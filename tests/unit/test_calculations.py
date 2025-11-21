@@ -85,8 +85,8 @@ def test_is_profitable_spread():
 
 def test_calculate_stop_loss_take_profit_long():
     """Test SL/TP calculation for LONG position"""
-    entry_price = 100.0
-    liquidation_price = 80.0
+    entry_price = 1.0
+    liquidation_price = 0.67  # From exchange API for 3x leverage LONG
     
     sl, tp = calculate_stop_loss_take_profit(
         entry_price=entry_price,
@@ -95,8 +95,37 @@ def test_calculate_stop_loss_take_profit_long():
         distance_percent=20.0
     )
     
-    # SL should be between entry and liquidation, closer to entry
-    assert liquidation_price < sl < entry_price
+    # Distance: 1.0 - 0.67 = 0.33
+    # SL = 1.0 - 0.33 * 0.8 = 0.736
+    # TP = 1.0 + 0.33 * 0.8 = 1.264
     
-    # TP should be above entry
-    assert tp > entry_price
+    assert abs(sl - 0.736) < 0.01
+    assert abs(tp - 1.264) < 0.01
+    
+    # Verify remaining distance to liquidation is 20%
+    remaining_pct = (sl - liquidation_price) / (entry_price - liquidation_price) * 100
+    assert abs(remaining_pct - 20.0) < 1.0
+
+
+def test_calculate_stop_loss_take_profit_short():
+    """Test SL/TP calculation for SHORT position"""
+    entry_price = 1.0
+    liquidation_price = 1.33  # From exchange API for 3x leverage SHORT
+    
+    sl, tp = calculate_stop_loss_take_profit(
+        entry_price=entry_price,
+        liquidation_price=liquidation_price,
+        side=PositionSide.SHORT,
+        distance_percent=20.0
+    )
+    
+    # Distance: 1.33 - 1.0 = 0.33
+    # SL = 1.0 + 0.33 * 0.8 = 1.264
+    # TP = 1.0 - 0.33 * 0.8 = 0.736
+    
+    assert abs(sl - 1.264) < 0.01
+    assert abs(tp - 0.736) < 0.01
+    
+    # Verify remaining distance to liquidation is 20%
+    remaining_pct = (liquidation_price - sl) / (liquidation_price - entry_price) * 100
+    assert abs(remaining_pct - 20.0) < 1.0

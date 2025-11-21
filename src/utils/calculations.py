@@ -44,7 +44,14 @@ def calculate_stop_loss_take_profit(
     """
     Calculate Stop Loss and Take Profit prices
     
-    SL/TP are placed at ±20% distance to liquidation price by default.
+    SL размещается на 80% расстояния от entry к liquidation (остается 20% до ликвидации).
+    TP размещается зеркально в противоположную сторону.
+    
+    Пример для SHORT:
+        entry = 1.0, liquidation = 1.33 (из API биржи), leverage = 3x
+        distance = 1.33 - 1.0 = 0.33
+        SL = 1.0 + 0.33 * 0.8 = 1.264
+        TP = 1.0 - 0.33 * 0.8 = 0.736
     
     Args:
         entry_price: Entry price
@@ -55,22 +62,22 @@ def calculate_stop_loss_take_profit(
     Returns:
         Tuple of (stop_loss_price, take_profit_price)
     """
-    distance_ratio = distance_percent / 100
+    distance_ratio = 1 - (distance_percent / 100)  # 80% если distance_percent=20
     
     if side == PositionSide.LONG:
-        # For LONG:
-        # - SL is below entry, closer to liquidation
-        # - TP is above entry
-        price_to_liq = entry_price - liquidation_price
-        stop_loss = entry_price - (price_to_liq * (1 - distance_ratio))
-        take_profit = entry_price + (price_to_liq * (1 - distance_ratio))
+        # For LONG: liquidation ниже entry
+        # SL = entry - distance * 0.8 (ближе к ликвидации)
+        # TP = entry + distance * 0.8 (в прибыль)
+        distance = entry_price - liquidation_price
+        stop_loss = entry_price - (distance * distance_ratio)
+        take_profit = entry_price + (distance * distance_ratio)
     else:  # SHORT
-        # For SHORT:
-        # - SL is above entry, closer to liquidation
-        # - TP is below entry
-        price_to_liq = liquidation_price - entry_price
-        stop_loss = entry_price + (price_to_liq * (1 - distance_ratio))
-        take_profit = entry_price - (price_to_liq * (1 - distance_ratio))
+        # For SHORT: liquidation выше entry
+        # SL = entry + distance * 0.8 (ближе к ликвидации)
+        # TP = entry - distance * 0.8 (в прибыль)
+        distance = liquidation_price - entry_price
+        stop_loss = entry_price + (distance * distance_ratio)
+        take_profit = entry_price - (distance * distance_ratio)
     
     return (stop_loss, take_profit)
 
