@@ -128,26 +128,30 @@ time_to_funding = await exchange.get_funding_rate(symbol)  # Точное вре
 
 if time_to_funding.time_to_funding_seconds <= 300:  # ≤ 5 минут
     # Проверяем каждые 40 секунд
-    current_balance = get_balance_ex1() + get_balance_ex2()
-    profit_pct = (current_balance - initial_capital) / initial_capital * 100
     
-    if profit_pct >= 1.0:
-        # ✅ Оставить позицию открытой (минимум +1% прибыли)
-        continue
-    else:
-        # Проверить текущий спред
-        current_spread_bps = calculate_spread(ob1, ob2)
+    # Проверить текущий спред (главный критерий!)
+    current_spread_bps = calculate_spread(ob1, ob2)
+    
+    if current_spread_bps < 0:  # Отрицательный спред = потеря
+        # 🔴 Закрыть позицию автоматически лимитками
+        current_balance = get_balance_ex1() + get_balance_ex2()
+        profit_pct = (current_balance - initial_capital) / initial_capital * 100
         
-        if current_spread_bps < 0:  # Отрицательный спред = потеря
-            # 🔴 Закрыть позицию автоматически лимитками
-            logger.warning(f"Auto-closing: profit={profit_pct:.2f}%, spread={current_spread_bps} bps")
-            close_position(mode="limit")
+        logger.warning(
+            f"Auto-closing: spread={current_spread_bps:.2f} bps (NEGATIVE), "
+            f"current PnL={profit_pct:.2f}%"
+        )
+        close_position(mode="limit")
+    else:
+        # ✅ Спред положительный - позиция выгодна, оставляем открытой
+        logger.info(f"✅ Spread positive ({current_spread_bps:.2f} bps), keeping position open")
 ```
 
 **Правила автозакрытия:**
-- ✅ Профит ≥ +1% → **НЕ ТРОГАТЬ**, оставить пользователю решать
-- 🔴 Профит < +1% **И** спред отрицательный (потеря) → **ЗАКРЫТЬ АВТОМАТИЧЕСКИ**
-- ✅ Профит < +1% **НО** спред положительный → оставить открытой
+- ✅ Спред положительный или нулевой → **НЕ ТРОГАТЬ**, позиция остается выгодной
+- 🔴 Спред отрицательный (потеря) → **ЗАКРЫТЬ АВТОМАТИЧЕСКИ**
+
+> ⚠️ **Почему так:** Если спред стал отрицательным, значит фандинг изменился и позиция будет приносить убыток. Неважно какой текущий PnL - закрываем до следующего фандинга, чтобы не терять деньги.
 
 ### Извлечение Funding Rate
 
@@ -681,33 +685,30 @@ class FundingTracker:
         if time_to_funding > 300:  # Больше 5 минут - пропустить
             return
         
-        # 2. Рассчитать текущий профит
-        balance1 = await exchange1.get_balance("USDT")
-        balance2 = await exchange2.get_balance("USDT")
-        
-        current_total = balance1.free + balance2.free
-        profit_pct = ((current_total - position.initial_capital) / position.initial_capital) * 100
-        
-        # 3. Правило: Если профит >= +1% → не трогать
-        if profit_pct >= 1.0:
-            logger.info(f"✅ Profit >= +1%, keeping position open")
-            return False
-        
-        # 4. Проверить текущий спред
+        # 2. Проверить текущий спред (ЕДИНСТВЕННЫЙ критерий)
         ob1 = await exchange1.get_orderbook(position.symbol)
         ob2 = await exchange2.get_orderbook(position.symbol)
         
         current_spread_bps = calculate_spread_bps(ob1, ob2, position.side1)
         
-        # 5. Если спред отрицательный (потеря) → закрыть
+        # 3. Если спред отрицательный → ЗАКРЫТЬ (независимо от PnL)
         if current_spread_bps < 0:
+            # Получить баланс для логирования
+            balance1 = await exchange1.get_balance("USDT")
+            balance2 = await exchange2.get_balance("USDT")
+            
+            current_total = balance1.free + balance2.free
+            profit_pct = ((current_total - position.initial_capital) / position.initial_capital) * 100
+            
             logger.warning(
                 f"🔴 Auto-closing {position.id}: "
-                f"profit={profit_pct:.2f}%, spread={current_spread_bps:.2f} bps"
+                f"spread={current_spread_bps:.2f} bps (NEGATIVE), current PnL={profit_pct:.2f}%"
             )
             await self._auto_close_position(position, exchange1, exchange2)
             return True
         
+        # Спред положительный → позиция выгодна
+        logger.info(f"✅ Spread positive, keeping position open")
         return False
     
     async def _get_time_to_next_funding(
@@ -761,8 +762,9 @@ class FundingTracker:
 **Ключевые особенности:**
 - 📡 Автоматическое получение `funding_rate` через API
 - ⏰ Мониторинг на 55-й минуте каждого часа (40-секундные интервалы)
-- 🎯 Умное закрытие: только если профит < 1% И спред отрицательный
+- 🎯 Умное закрытие: **только если спред отрицательный** (неважно какой PnL)
 - 🔄 Лимитные ордера для минимизации комиссий
+- ⚡ Приоритет: сохранение капитала > максимизация прибыли
 
 ### Calculate Spread for Auto-Close
 

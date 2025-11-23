@@ -178,9 +178,8 @@ class FundingTracker:
         """
         Determine if position should be auto-closed
         
-        Rules:
-        1. If PnL >= +1% → Keep open (user decides)
-        2. If PnL < +1% AND current spread shows loss → Auto-close
+        Rule:
+        - If current spread is negative → Auto-close (regardless of PnL)
         
         Args:
             position: Position to evaluate
@@ -190,26 +189,7 @@ class FundingTracker:
         Returns:
             True if should auto-close, False otherwise
         """
-        # Get current balances
-        balance1 = await exchange1.get_balance("USDT")
-        balance2 = await exchange2.get_balance("USDT")
-        
-        current_total = balance1.free + balance2.free
-        profit_pct = (
-            (current_total - position.initial_capital) / position.initial_capital
-        ) * 100
-        
-        logger.info(
-            f"📊 Position {position.id} profit: {profit_pct:.2f}% "
-            f"(${current_total:.2f} / ${position.initial_capital:.2f})"
-        )
-        
-        # Rule 1: If profit >= +1%, don't auto-close
-        if profit_pct >= 1.0:
-            logger.info(f"✅ Profit >= +1%, keeping position open")
-            return False
-        
-        # Rule 2: Check current spread
+        # Check current spread (main criterion!)
         ob1 = await exchange1.get_orderbook(position.symbol)
         ob2 = await exchange2.get_orderbook(position.symbol)
         
@@ -221,15 +201,24 @@ class FundingTracker:
         
         logger.info(f"📈 Current spread: {current_spread_bps:.2f} bps")
         
-        # If spread is negative (loss on closing), auto-close
+        # Only rule: if spread is negative → close
         if current_spread_bps < 0:
+            # Get current balances for logging
+            balance1 = await exchange1.get_balance("USDT")
+            balance2 = await exchange2.get_balance("USDT")
+            
+            current_total = balance1.free + balance2.free
+            profit_pct = (
+                (current_total - position.initial_capital) / position.initial_capital
+            ) * 100
+            
             logger.warning(
-                f"⚠️ Negative spread detected: {current_spread_bps:.2f} bps. "
-                f"Profit only {profit_pct:.2f}%. Auto-closing..."
+                f"⚠️ NEGATIVE SPREAD detected: {current_spread_bps:.2f} bps. "
+                f"Current PnL: {profit_pct:.2f}%. Auto-closing to avoid loss..."
             )
             return True
         
-        # Spread is positive but profit < 1% → keep open
+        # Spread is positive → position is profitable, keep open
         logger.info(
             f"✅ Spread positive ({current_spread_bps:.2f} bps), "
             f"keeping position open"
