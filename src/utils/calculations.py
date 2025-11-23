@@ -287,3 +287,43 @@ def calculate_roi_percent(
     if initial_margin == 0:
         return 0.0
     return (pnl / initial_margin) * 100
+
+
+def calculate_spread_bps(
+    orderbook1,  # OrderBook from exchange1
+    orderbook2,  # OrderBook from exchange2
+    side1: PositionSide
+) -> float:
+    """
+    Calculate current spread between two orderbooks in basis points
+    
+    Used for checking profitability before auto-closing positions.
+    
+    Args:
+        orderbook1: OrderBook from first exchange
+        orderbook2: OrderBook from second exchange
+        side1: Side on first exchange (LONG or SHORT)
+    
+    Returns:
+        Spread in basis points (positive = profitable, negative = loss)
+    
+    Example:
+        If position is SHORT on Ex1 and LONG on Ex2:
+        - To close: BUY on Ex1 (use ask), SELL on Ex2 (use bid)
+        - Spread = (bid_ex2 - ask_ex1) / ask_ex1 * 10000
+    """
+    if side1 == PositionSide.SHORT:
+        # Position: SHORT on Ex1, LONG on Ex2
+        # To close: BUY on Ex1 (ask), SELL on Ex2 (bid)
+        close_price_ex1 = orderbook1.best_ask
+        close_price_ex2 = orderbook2.best_bid
+    else:  # LONG
+        # Position: LONG on Ex1, SHORT on Ex2
+        # To close: SELL on Ex1 (bid), BUY on Ex2 (ask)
+        close_price_ex1 = orderbook1.best_bid
+        close_price_ex2 = orderbook2.best_ask
+    
+    # Calculate spread (positive = profit, negative = loss)
+    spread_bps = ((close_price_ex2 - close_price_ex1) / close_price_ex1) * 10000
+    
+    return spread_bps

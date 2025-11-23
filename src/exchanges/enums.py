@@ -80,57 +80,58 @@ class RiskLevel(str, Enum):
 
 
 # ============================================
-# TAKER COMMISSION (in %)
+# TAKER COMMISSION (basis points)
+# Updated: Nov 2025
 # ============================================
 
-TAKER_COMMISSION: Dict[Exchange, float] = {
-    Exchange.KUCOIN: 0.06,
-    Exchange.ASTER: 0.04,
-    Exchange.BINANCE: 0.05,
-    Exchange.OKX: 0.10,
-    Exchange.MEXC: 0.04,
-    Exchange.GATE: 0.05,
-    Exchange.BITGET: 0.06,
-    Exchange.BYBIT: 0.10,
-    Exchange.LIGHTER: 0.00,
-    Exchange.EXTENDED: 0.0225,
-    Exchange.HYPERLIQUID: 0.045,
-    Exchange.BINGX: 0.05,
-    Exchange.ETHEREAL: 0.03,
-}
-
-
-# Convert to basis points (bps) for easier calculation
 TAKER_COMMISSION_BPS: Dict[Exchange, float] = {
-    exchange: commission * 100  # % to bps (0.06% = 6 bps)
-    for exchange, commission in TAKER_COMMISSION.items()
+    Exchange.KUCOIN: 6.0,
+    Exchange.ASTER: 4.0,
+    Exchange.BINANCE: 5.0,
+    Exchange.OKX: 10.0,
+    Exchange.MEXC: 4.0,
+    Exchange.GATE: 5.0,
+    Exchange.BITGET: 6.0,
+    Exchange.BYBIT: 5.5,
+    Exchange.LIGHTER: 0.0,
+    Exchange.EXTENDED: 2.5,
+    Exchange.HYPERLIQUID: 4.5,
+    Exchange.BINGX: 5.0,
+    Exchange.ETHEREAL: 3.0,
+}
+
+# Convert to percentage for compatibility
+TAKER_COMMISSION: Dict[Exchange, float] = {
+    exchange: commission / 100  # bps to % (6 bps = 0.06%)
+    for exchange, commission in TAKER_COMMISSION_BPS.items()
 }
 
 
 # ============================================
-# MAKER COMMISSION (typically lower, for limit orders)
+# MAKER COMMISSION (basis points, for limit orders)
+# Updated: Nov 2025
 # ============================================
-
-MAKER_COMMISSION: Dict[Exchange, float] = {
-    Exchange.KUCOIN: 0.02,
-    Exchange.ASTER: 0.02,
-    Exchange.BINANCE: 0.02,
-    Exchange.OKX: 0.08,
-    Exchange.MEXC: 0.00,
-    Exchange.GATE: 0.02,
-    Exchange.BITGET: 0.02,
-    Exchange.BYBIT: 0.01,
-    Exchange.LIGHTER: 0.00,
-    Exchange.EXTENDED: 0.0075,
-    Exchange.HYPERLIQUID: 0.00,
-    Exchange.BINGX: 0.02,
-    Exchange.ETHEREAL: 0.00,
-}
-
 
 MAKER_COMMISSION_BPS: Dict[Exchange, float] = {
-    exchange: commission * 100
-    for exchange, commission in MAKER_COMMISSION.items()
+    Exchange.KUCOIN: 2.0,
+    Exchange.ASTER: 0.5,
+    Exchange.BINANCE: 2.0,
+    Exchange.OKX: 2.0,
+    Exchange.MEXC: 1.0,
+    Exchange.GATE: 2.0,
+    Exchange.BITGET: 2.0,
+    Exchange.BYBIT: 2.0,
+    Exchange.LIGHTER: 0.0,
+    Exchange.EXTENDED: 0.0,
+    Exchange.HYPERLIQUID: 1.5,
+    Exchange.BINGX: 2.0,
+    Exchange.ETHEREAL: 0.0,
+}
+
+# Convert to percentage for compatibility
+MAKER_COMMISSION: Dict[Exchange, float] = {
+    exchange: commission / 100  # bps to % (2 bps = 0.02%)
+    for exchange, commission in MAKER_COMMISSION_BPS.items()
 }
 
 

@@ -104,6 +104,11 @@ class Position:
     
     # Status
     status: str = "OPEN"  # OPEN, CLOSING, CLOSED
+    closed_at: Optional[datetime] = None  # When position was closed
+    close_reason: Optional[str] = None  # Why it was closed (manual, auto_close, sl_tp, etc.)
+    
+    # Capital tracking
+    initial_capital: float = 0.0  # Total USD invested
     
     # PnL tracking
     funding_received: float = 0.0  # Total funding received
@@ -239,13 +244,24 @@ class FundingRate:
     symbol: str
     rate: float  # Funding rate (e.g., 0.0001 = 0.01%)
     rate_bps: float  # Rate in basis points
-    next_funding_time: float  # Unix timestamp
-    timestamp: float
+    next_funding_time: Optional[datetime] = None  # Next funding time (UTC)
+    timestamp: float = field(default_factory=lambda: datetime.now().timestamp())
     
     @property
     def time_to_funding_minutes(self) -> float:
         """Minutes until next funding"""
-        return (self.next_funding_time - datetime.now().timestamp()) / 60
+        if not self.next_funding_time:
+            return 0.0
+        delta = self.next_funding_time - datetime.utcnow()
+        return delta.total_seconds() / 60
+    
+    @property
+    def time_to_funding_seconds(self) -> int:
+        """Seconds until next funding"""
+        if not self.next_funding_time:
+            return 0
+        delta = self.next_funding_time - datetime.utcnow()
+        return int(delta.total_seconds())
     
     @property
     def is_positive(self) -> bool:
