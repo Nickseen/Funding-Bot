@@ -26,6 +26,64 @@ from .enums import (
 )
 
 
+# ============================================
+# STANDARD EXCEPTIONS
+# ============================================
+
+class ExchangeError(Exception):
+    """Base exception for all exchange-related errors"""
+    pass
+
+
+class InsufficientBalanceError(ExchangeError):
+    """Not enough balance to execute operation"""
+    pass
+
+
+class PositionNotFoundError(ExchangeError):
+    """Position does not exist"""
+    pass
+
+
+class OrderNotFoundError(ExchangeError):
+    """Order does not exist"""
+    pass
+
+
+class InvalidLeverageError(ExchangeError):
+    """Leverage value is invalid or exceeds maximum"""
+    pass
+
+
+class MarginInsufficientError(ExchangeError):
+    """Insufficient margin to maintain position"""
+    pass
+
+
+class OrderWouldTriggerImmediatelyError(ExchangeError):
+    """Limit order would execute immediately (not allowed in some cases)"""
+    pass
+
+
+class RateLimitError(ExchangeError):
+    """API rate limit exceeded"""
+    pass
+
+
+class NetworkError(ExchangeError):
+    """Network connection issue"""
+    pass
+
+
+class InvalidSymbolError(ExchangeError):
+    """Trading pair is invalid or not supported"""
+    pass
+
+
+# ============================================
+# BASE EXCHANGE CLASS
+# ============================================
+
 class BaseExchange(ABC):
     """
     Abstract base class for all exchange adapters.
@@ -170,20 +228,22 @@ class BaseExchange(ABC):
     @abstractmethod
     async def close_position(
         self,
-        position_id: str,
+        symbol: str,
         order_type: OrderType = OrderType.MARKET,
         price: Optional[float] = None
     ) -> Position:
         """
-        Close a position
+        Close a position by symbol (closes entire position for the pair)
+        
+        Note: Works with One-Way Mode (one position per symbol)
         
         Args:
-            position_id: Position ID to close
+            symbol: Trading pair (e.g., "BTCUSDT")
             order_type: MARKET or LIMIT
             price: Limit price (required if order_type=LIMIT)
         
         Returns:
-            Updated Position object
+            Updated Position object with status CLOSED
         """
         pass
     
@@ -326,6 +386,22 @@ class BaseExchange(ABC):
         pass
     
     @abstractmethod
+    async def get_position_by_symbol(self, symbol: str) -> Optional[Position]:
+        """
+        Get current position for a specific symbol
+        
+        Critical for One-Way Mode: returns the active position for this pair.
+        Returns None if no position exists.
+        
+        Args:
+            symbol: Trading pair (e.g., "BTCUSDT")
+        
+        Returns:
+            Position object or None if no position for this symbol
+        """
+        pass
+    
+    @abstractmethod
     async def get_order(self, order_id: str, symbol: str) -> Optional[Order]:
         """
         Get order status
@@ -416,6 +492,137 @@ class BaseExchange(ABC):
         
         Returns:
             Liquidation price
+        """
+        pass
+    
+    # ============================================
+    # ADDITIONAL METHODS
+    # ============================================
+    
+    @abstractmethod
+    async def get_mark_price(self, symbol: str) -> float:
+        """
+        Get current mark price for a symbol
+        
+        Mark price is used for liquidation calculations and unrealized PnL.
+        More stable than last price, less prone to manipulation.
+        
+        Args:
+            symbol: Trading pair
+        
+        Returns:
+            Current mark price
+        """
+        pass
+    
+    @abstractmethod
+    async def set_margin_mode(self, mode: str) -> bool:
+        """
+        Set margin mode for the account (GLOBAL setting)
+        
+        Applies to all trading pairs on this exchange.
+        Must be set before opening positions.
+        
+        Args:
+            mode: 'ISOLATED' or 'CROSS'
+                - ISOLATED: Each position has separate margin (safer)
+                - CROSS: All positions share account margin (riskier)
+        
+        Returns:
+            True if set successfully
+        
+        Raises:
+            ExchangeError: If setting fails or mode is invalid
+        """
+        pass
+    
+    @abstractmethod
+    async def get_account_info(self) -> Dict[str, Any]:
+        """
+        Get account information
+        
+        Returns comprehensive account data including:
+        - Total wallet balance
+        - Available balance
+        - Used margin
+        - Unrealized PnL
+        - All open positions
+        - Account leverage settings
+        
+        Returns:
+            Dict with account information
+        """
+        pass
+    
+    @abstractmethod
+    async def get_symbol_info(self, symbol: str) -> Dict[str, Any]:
+        """
+        Get trading rules and constraints for a symbol
+        
+        Returns:
+            Dict containing:
+            - min_quantity: Minimum order size
+            - max_quantity: Maximum order size
+            - quantity_step: Quantity precision (e.g., 0.001)
+            - min_price: Minimum price
+            - price_tick: Price precision (e.g., 0.01)
+            - max_leverage: Maximum allowed leverage
+            - maintenance_margin_rate: Maintenance margin percentage
+        """
+        pass
+    
+    # ============================================
+    # WEBSOCKET SUBSCRIPTIONS
+    # ============================================
+    
+    @abstractmethod
+    async def subscribe_position_updates(self, callback) -> None:
+        """
+        Subscribe to real-time position updates via WebSocket
+        
+        CRITICAL for Emergency Close: detects when SL/TP triggers.
+        Callback receives position updates including:
+        - Position opened/closed
+        - PnL changes
+        - Margin changes
+        - Liquidation events
+        
+        Args:
+            callback: Async function called on position updates
+                     Signature: async def callback(position_data: Dict)
+        """
+        pass
+    
+    @abstractmethod
+    async def subscribe_order_updates(self, callback) -> None:
+        """
+        Subscribe to real-time order updates via WebSocket
+        
+        Monitors order status changes:
+        - Order placed
+        - Order filled (partially/fully)
+        - Order cancelled
+        - Order rejected
+        
+        Args:
+            callback: Async function called on order updates
+                     Signature: async def callback(order_data: Dict)
+        """
+        pass
+    
+    @abstractmethod
+    async def subscribe_account_updates(self, callback) -> None:
+        """
+        Subscribe to real-time account updates via WebSocket
+        
+        Monitors:
+        - Balance changes
+        - Margin changes
+        - Available balance updates
+        
+        Args:
+            callback: Async function called on account updates
+                     Signature: async def callback(account_data: Dict)
         """
         pass
     

@@ -550,10 +550,11 @@ liq = calculate_liquidation_price(
 | FundingTracker (auto-close) | ✅ | 24.11.2025 |
 | Stable Spread Mode | ✅ | 24.11.2025 |
 | PositionCloser (5 режимов) | ✅ | 24.11.2025 |
+| BaseExchange доработка (32 метода) | ✅ | 24.11.2025 |
 | Commission rates update | ✅ | 24.11.2025 |
 
 **ФАЗА 1: 100% ЗАВЕРШЕНА** ✅  
-**БОНУС: +5 модулей** ✅
+**БОНУС: +6 модулей/обновлений** ✅
 
 ---
 
@@ -693,9 +694,9 @@ await monitor.start()
 ## 📈 Прогресс проекта
 
 ```
-[████████████░░░░░░░░░░░░] 40% - ФАЗА 1 + БОНУС ✅
+[█████████████░░░░░░░░░░░] 45% - ФАЗА 1.7 ✅
 
-Следующая: ФАЗА 2 (Binance + CLI + WebSocket)
+Следующая: ФАЗА 2.1 (Binance Adapter - 32 метода)
 ```
 
 **Roadmap:**
@@ -705,7 +706,8 @@ await monitor.start()
 | **1** | Фундамент + Types + State | ✅ Готово | - |
 | **1.5** | ExecutionEngine + FundingTracker + Stable Spread | ✅ Готово | 24.11.2025 |
 | **1.6** | PositionCloser (5 режимов закрытия) | ✅ Готово | 24.11.2025 |
-| **2.1** | Binance адаптер (40+ методов) | 🔄 В работе | 2 недели |
+| **1.7** | BaseExchange доработка (32 метода) | ✅ Готово | 24.11.2025 |
+| **2.1** | Binance адаптер (32 метода) | 🔄 В работе | 2 недели |
 | **2.2** | CLI Menu (открытие/закрытие/анализ) | ⏳ Ожидание | 1 неделя |
 | **2.3** | OrderBook Monitor (WebSocket) | ⏳ Ожидание | 1 неделя |
 | **3** | State Recovery + Persistence | ⏳ Ожидание | 1 неделя |
