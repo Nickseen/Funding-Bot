@@ -20,7 +20,8 @@ Funding-Bot/
 │   │   ├── __init__.py
 │   │   ├── state.py             ✅ AppState для управления в RAM
 │   │   ├── execution_engine.py  ✅ Движок открытия позиций (3 режима)
-│   │   └── funding_tracker.py   ✅ Автозакрытие при negative spread
+│   │   ├── funding_tracker.py   ✅ Автозакрытие при negative spread
+│   │   └── position_closer.py   ✅ Универсальное закрытие (5 режимов)
 │   │
 │   ├── utils/
 │   │   ├── __init__.py
@@ -367,7 +368,82 @@ await engine.close_stable_spread(position)
 
 ---
 
-### 11. **FundingTracker** (`src/core/funding_tracker.py`)
+### 11. **PositionCloser** (`src/core/position_closer.py`) ⭐ (НОВЫЙ!)
+
+✅ **5 режимов закрытия позиций:**
+
+#### 1. **Hit-the-bid Close**
+- Поиск пересечения bid/ask (5 мин, ±2 bps)
+- **Прерывание поиска**: пользователь может остановить нажатием 'q'
+- **Меню после timeout**: выбор нового режима закрытия
+- Лимитки выставляются **только после** нахождения пересечения
+- Использует **maker fees**
+
+#### 2. **Flash Close**
+- Быстрое закрытие по текущим ценам
+- Детальный анализ: spread, fees, funding earned, Net PnL
+- Подтверждение пользователем
+- Limit orders по best bid/ask (**maker fees**)
+
+#### 3. **Market Close** (аварийное!)
+- Мгновенное закрытие market ордерами
+- Предупреждение о высоком slippage
+- **Taker fees** + slippage
+- Только для критических ситуаций
+
+#### 4. **Stable Spread Close**
+- Закрытие с анализом изменения спреда
+- Только для позиций с `execution_mode="stable_spread"`
+- Сравнение: entry_spread vs current_spread
+- Показывает profit/loss от изменения спреда
+
+#### 5. **Emergency Close** (автоматическое)
+- Срабатывает при SL/TP на одной бирже
+- **Шаг 1**: Limit order на второй бирже (timeout 3 сек)
+- **Шаг 2**: Если не исполнился → Market order принудительно
+- Сохраняет delta-neutrality любой ценой
+
+**Меню выбора режима:**
+```
+╔══════════════════════════════════════════════════════════
+║ CLOSE MODE SELECTION
+╠══════════════════════════════════════════════════════════
+║ Position: pos_stable_BTCUSDT_1732435200
+║ Pair: BTCUSDT
+║ Exchanges: binance / bybit
+║ Reason: Timeout (5 min) - пересечение не найдено
+║ 
+║ Current Analysis:
+║   Spread: 9.80 bps
+║   Close fees: 2.50 bps
+║   Funding earned: +45.00 bps
+║   Net PnL: +32.70 bps (0.33%)
+╠══════════════════════════════════════════════════════════
+║ Close Options:
+╠══════════════════════════════════════════════════════════
+║ 1. Hit-the-bid (Search again, 5 min)
+║ 2. Flash close (Current prices, with confirmation)
+║ 3. Market close (Instant, high slippage)
+║ 4. Cancel (Keep position open)
+╚══════════════════════════════════════════════════════════
+Select [1-4]:
+```
+
+**Использование:**
+```python
+closer = PositionCloser(exchange1, exchange2, state)
+
+# Выбор режима
+await closer.close_hit_the_bid(position)      # Ждать пересечения
+await closer.close_flash(position)             # Быстро по текущим ценам
+await closer.close_market(position)            # Аварийное мгновенное
+await closer.close_stable_spread(position)     # Для stable_spread позиций
+await closer.emergency_close("binance", pos)   # При срабатывании SL/TP
+```
+
+---
+
+### 12. **FundingTracker** (`src/core/funding_tracker.py`)
 
 ✅ **Автозакрытие убыточных позиций:**
 
@@ -473,10 +549,11 @@ liq = calculate_liquidation_price(
 | ExecutionEngine (3 режима) | ✅ | 24.11.2025 |
 | FundingTracker (auto-close) | ✅ | 24.11.2025 |
 | Stable Spread Mode | ✅ | 24.11.2025 |
+| PositionCloser (5 режимов) | ✅ | 24.11.2025 |
 | Commission rates update | ✅ | 24.11.2025 |
 
 **ФАЗА 1: 100% ЗАВЕРШЕНА** ✅  
-**БОНУС: +4 модуля** ✅
+**БОНУС: +5 модулей** ✅
 
 ---
 
@@ -520,67 +597,7 @@ python -c "from src.exchanges.binance import BinanceExchange; ..."
 
 ---
 
-### Приоритет 2: Универсальный close метод
-
-**Проблема:** Сейчас есть только `close_stable_spread()` для stable spread режима
-
-**Нужно:** Создать `src/core/position_closer.py`
-
-**Методы:**
-```python
-class PositionCloser:
-    async def close_hit_the_bid(position) -> bool:
-        """Ждать пересечения 5 минут, потом показать анализ"""
-        
-    async def close_flash(position) -> bool:
-        """Быстрое закрытие по текущим ценам"""
-        
-    async def close_market(position) -> bool:
-        """Мгновенное закрытие market ордерами"""
-        
-    async def close_stable_spread(position) -> bool:
-        """Закрытие с сохранением спреда (уже есть!)"""
-```
-
-**CLI интерфейс:**
-```
-╔══════════════════════════════════════════════════════════
-║ Close Mode:
-╠══════════════════════════════════════════════════════════
-║ 1. Hit-the-bid (Wait for better price, 5 min)
-║ 2. Flash close (Quick execution)
-║ 3. Market order (Instant)
-║ 4. Stable spread (только для stable_spread позиций)
-╚══════════════════════════════════════════════════════════
-Select mode [1-4]:
-```
-
----
-
-### Приоритет 3: Emergency Close Handler
-
-**Задача:** Создать `src/core/emergency_close.py`
-
-**Логика:**
-```python
-# Если на одной бирже сработал TP или SL:
-if tp_triggered_on_ex1 or sl_triggered_on_ex1:
-    # Закрыть противоположную сторону за 3 сек (limit)
-    await close_ex2(mode="limit", timeout=3)
-    
-    # Если лимитка не исполнилась
-    if not filled_after_3_sec:
-        await close_ex2(mode="market")  # Принудительно
-```
-
-**Мониторинг:**
-- WebSocket подписка на изменения позиций
-- Проверка статуса SL/TP каждые 1 секунду
-- Мгновенная реакция на срабатывание
-
----
-
-### Приоритет 4: CLI интерфейс
+### Приоритет 2: CLI интерфейс
 
 **Задача:** Создать `src/cli/menu.py`
 
@@ -620,7 +637,7 @@ Select [1-4]:
 
 ---
 
-### Приоритет 5: OrderBook Monitor (WebSocket)
+### Приоритет 3: OrderBook Monitor (WebSocket)
 
 **Задача:** Создать `src/core/orderbook_monitor.py`
 
@@ -676,9 +693,9 @@ await monitor.start()
 ## 📈 Прогресс проекта
 
 ```
-[██████████░░░░░░░░░░░░░░] 35% - ФАЗА 1 + БОНУС ✅
+[████████████░░░░░░░░░░░░] 40% - ФАЗА 1 + БОНУС ✅
 
-Следующая: ФАЗА 2 (Binance + Closer + Emergency + CLI)
+Следующая: ФАЗА 2 (Binance + CLI + WebSocket)
 ```
 
 **Roadmap:**
@@ -687,11 +704,10 @@ await monitor.start()
 |------|----------|--------|-----|
 | **1** | Фундамент + Types + State | ✅ Готово | - |
 | **1.5** | ExecutionEngine + FundingTracker + Stable Spread | ✅ Готово | 24.11.2025 |
+| **1.6** | PositionCloser (5 режимов закрытия) | ✅ Готово | 24.11.2025 |
 | **2.1** | Binance адаптер (40+ методов) | 🔄 В работе | 2 недели |
-| **2.2** | PositionCloser (4 режима закрытия) | ⏳ Ожидание | 3 дня |
-| **2.3** | Emergency Close Handler | ⏳ Ожидание | 2 дня |
-| **2.4** | CLI Menu (открытие/закрытие/анализ) | ⏳ Ожидание | 1 неделя |
-| **2.5** | OrderBook Monitor (WebSocket) | ⏳ Ожидание | 1 неделя |
+| **2.2** | CLI Menu (открытие/закрытие/анализ) | ⏳ Ожидание | 1 неделя |
+| **2.3** | OrderBook Monitor (WebSocket) | ⏳ Ожидание | 1 неделя |
 | **3** | State Recovery + Persistence | ⏳ Ожидание | 1 неделя |
 | **4** | Остальные биржи (KuCoin, Bybit, etc.) | ⏳ Ожидание | 3 недели |
 | **5** | Тестирование на testnet | ⏳ Ожидание | 2 недели |
@@ -717,6 +733,7 @@ await monitor.start()
 - ✅ **ExecutionEngine** (3 режима открытия)
 - ✅ **FundingTracker** (автозакрытие)
 - ✅ **Stable Spread Mode** (для high OI пар)
+- ✅ **PositionCloser** (5 режимов закрытия с прерыванием)
 
 **Следующий шаг: Binance адаптер!** 🚀
 
