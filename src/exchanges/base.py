@@ -1,13 +1,23 @@
 """
-Abstract base class for exchange adapters.
+Abstract base class for exchange adapters - Version 3.0
 
-This class defines the interface that all exchange implementations must follow.
-Each exchange (Binance, KuCoin, etc.) will inherit from this and implement their specific API calls.
+ARCHITECTURE:
+- Public methods: Common implementation with validation, logging, error handling
+- Private _api_* methods: Exchange-specific API calls (implemented by each adapter)
+- Private _parse_* methods: Convert raw API responses to typed objects
+
+Each exchange adapter only needs to implement:
+1. API calls (_api_* methods) - ~32 simple methods
+2. Optional parsers if response format differs (_parse_* methods)
+
+All business logic, validation, and error handling is centralized here.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Callable
 from datetime import datetime
+
+from loguru import logger as log
 
 from .types import (
     Position,
@@ -23,6 +33,13 @@ from .enums import (
     OrderSide,
     OrderType,
     OrderStatus,
+)
+from ..utils.validators import (
+    validate_symbol,
+    validate_leverage,
+    validate_quantity,
+    validate_price,
+    validate_order_type_with_price,
 )
 
 
@@ -88,7 +105,9 @@ class BaseExchange(ABC):
     """
     Abstract base class for all exchange adapters.
     
-    This ensures consistent interface across all exchanges despite API differences.
+    Uses Template Method pattern:
+    - Public methods contain common logic (THIS CLASS)
+    - Private _api_* methods are exchange-specific (SUBCLASSES)
     """
     
     def __init__(
@@ -123,6 +142,8 @@ class BaseExchange(ABC):
         """
         Establish connection to exchange
         
+        Implementation required by each exchange.
+        
         Returns:
             True if connected successfully
         """
@@ -130,7 +151,11 @@ class BaseExchange(ABC):
     
     @abstractmethod
     async def disconnect(self) -> None:
-        """Close connection to exchange"""
+        """
+        Close connection to exchange
+        
+        Implementation required by each exchange.
+        """
         pass
     
     @abstractmethod
@@ -138,68 +163,68 @@ class BaseExchange(ABC):
         """
         Test if connection is valid
         
+        Implementation required by each exchange.
+        
         Returns:
             True if connection is valid
         """
         pass
     
     # ============================================
-    # MARKET DATA
+    # MARKET DATA - PUBLIC METHODS
     # ============================================
     
-    @abstractmethod
     async def get_orderbook(self, symbol: str, limit: int = 20) -> OrderBook:
         """
         Get orderbook for a symbol
         
         Args:
-            symbol: Trading pair (e.g., "BTCUSDT")
+            symbol: Trading pair
             limit: Depth limit
         
         Returns:
             OrderBook object
         """
-        pass
+        if not validate_symbol(symbol):
+            raise ValueError(f"Invalid symbol: {symbol}")
+        
+        try:
+            orderbook_data = await self._api_get_orderbook(symbol, limit)
+            return self._parse_orderbook(orderbook_data)
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise ExchangeError(f"Failed to get orderbook: {e}")
     
-    @abstractmethod
     async def get_price_data(self, symbol: str) -> PriceData:
-        """
-        Get current price data (bid/ask)
+        """Get current price data (bid/ask)"""
+        if not validate_symbol(symbol):
+            raise ValueError(f"Invalid symbol: {symbol}")
         
-        Args:
-            symbol: Trading pair
-        
-        Returns:
-            PriceData object with bid/ask
-        """
-        pass
+        try:
+            price_data = await self._api_get_price_data(symbol)
+            return self._parse_price_data(price_data)
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise ExchangeError(f"Failed to get price data: {e}")
     
-    @abstractmethod
-    async def subscribe_orderbook(self, symbol: str, callback) -> None:
-        """
-        Subscribe to real-time orderbook updates via WebSocket
+    async def get_mark_price(self, symbol: str) -> float:
+        """Get mark price for PnL calculations"""
+        if not validate_symbol(symbol):
+            raise ValueError(f"Invalid symbol: {symbol}")
         
-        Args:
-            symbol: Trading pair
-            callback: Async function to call when orderbook updates
-        """
-        pass
-    
-    @abstractmethod
-    async def unsubscribe_orderbook(self, symbol: str) -> None:
-        """
-        Unsubscribe from orderbook updates
-        
-        Args:
-            symbol: Trading pair
-        """
-        pass
+        try:
+            return await self._api_get_mark_price(symbol)
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise ExchangeError(f"Failed to get mark price: {e}")
     
     # ============================================
-    # TRADING
+    # TRADING - PUBLIC METHODS
     # ============================================
     
-    @abstractmethod
     async def open_position(
         self,
         symbol: str,
@@ -209,45 +234,60 @@ class BaseExchange(ABC):
         order_type: OrderType = OrderType.MARKET,
         price: Optional[float] = None
     ) -> Position:
-        """
-        Open a position (LONG or SHORT)
+        """Open a position with full validation and logging"""
+        # Validation
+        if not validate_symbol(symbol):
+            raise ValueError(f"Invalid symbol: {symbol}")
+        if not validate_quantity(quantity):
+            raise ValueError(f"Invalid quantity: {quantity}")
+        if not validate_leverage(leverage):
+            raise InvalidLeverageError(f"Invalid leverage: {leverage}")
+        if not validate_order_type_with_price(order_type, price):
+            raise ValueError(f"Price required for {order_type.value} orders")
         
-        Args:
-            symbol: Trading pair
-            side: LONG or SHORT
-            quantity: Position size in tokens
-            leverage: Leverage multiplier
-            order_type: MARKET or LIMIT
-            price: Limit price (required if order_type=LIMIT)
+        log.info(
+            f"{self.get_name()}: Opening {side.value} {symbol}, "
+            f"qty={quantity}, lev={leverage}x"
+        )
         
-        Returns:
-            Position object
-        """
-        pass
+        try:
+            position_data = await self._api_open_position(
+                symbol, side, quantity, leverage, order_type, price
+            )
+            position = self._parse_position(position_data)
+            log.success(f"{self.get_name()}: Position opened - {position.id}")
+            return position
+        except ExchangeError:
+            raise
+        except Exception as e:
+            log.error(f"{self.get_name()}: Failed to open position: {e}")
+            raise ExchangeError(f"Failed to open position: {e}")
     
-    @abstractmethod
     async def close_position(
         self,
         symbol: str,
         order_type: OrderType = OrderType.MARKET,
         price: Optional[float] = None
     ) -> Position:
-        """
-        Close a position by symbol (closes entire position for the pair)
+        """Close position by symbol with validation and logging"""
+        if not validate_symbol(symbol):
+            raise ValueError(f"Invalid symbol: {symbol}")
+        if not validate_order_type_with_price(order_type, price):
+            raise ValueError(f"Price required for {order_type.value} orders")
         
-        Note: Works with One-Way Mode (one position per symbol)
+        log.info(f"{self.get_name()}: Closing {symbol}")
         
-        Args:
-            symbol: Trading pair (e.g., "BTCUSDT")
-            order_type: MARKET or LIMIT
-            price: Limit price (required if order_type=LIMIT)
-        
-        Returns:
-            Updated Position object with status CLOSED
-        """
-        pass
+        try:
+            position_data = await self._api_close_position(symbol, order_type, price)
+            position = self._parse_position(position_data)
+            log.success(f"{self.get_name()}: Position closed - {symbol}")
+            return position
+        except ExchangeError:
+            raise
+        except Exception as e:
+            log.error(f"{self.get_name()}: Failed to close position: {e}")
+            raise ExchangeError(f"Failed to close position: {e}")
     
-    @abstractmethod
     async def place_order(
         self,
         symbol: str,
@@ -257,374 +297,316 @@ class BaseExchange(ABC):
         price: Optional[float] = None,
         reduce_only: bool = False
     ) -> Order:
-        """
-        Place an order
+        """Place order with validation and logging"""
+        if not validate_symbol(symbol):
+            raise ValueError(f"Invalid symbol: {symbol}")
+        if not validate_quantity(quantity):
+            raise ValueError(f"Invalid quantity: {quantity}")
+        if not validate_order_type_with_price(order_type, price):
+            raise ValueError(f"Price required for {order_type.value} orders")
         
-        Args:
-            symbol: Trading pair
-            side: BUY or SELL
-            order_type: Order type (MARKET, LIMIT, etc.)
-            quantity: Order quantity
-            price: Limit price (required for LIMIT orders)
-            reduce_only: If True, only reduce position (not open new)
+        log.info(f"{self.get_name()}: Placing {side.value} {order_type.value} {symbol}")
         
-        Returns:
-            Order object
-        """
-        pass
+        try:
+            order_data = await self._api_place_order(
+                symbol, side, order_type, quantity, price, reduce_only
+            )
+            order = self._parse_order(order_data)
+            log.success(f"{self.get_name()}: Order placed - {order.id}")
+            return order
+        except ExchangeError:
+            raise
+        except Exception as e:
+            log.error(f"{self.get_name()}: Failed to place order: {e}")
+            raise ExchangeError(f"Failed to place order: {e}")
     
-    @abstractmethod
     async def cancel_order(self, order_id: str, symbol: str) -> bool:
-        """
-        Cancel an order
+        """Cancel order"""
+        if not validate_symbol(symbol):
+            raise ValueError(f"Invalid symbol: {symbol}")
         
-        Args:
-            order_id: Order ID to cancel
-            symbol: Trading pair
+        log.info(f"{self.get_name()}: Cancelling order {order_id}")
         
-        Returns:
-            True if cancelled successfully
-        """
-        pass
+        try:
+            result = await self._api_cancel_order(order_id, symbol)
+            log.success(f"{self.get_name()}: Order cancelled - {order_id}")
+            return result
+        except ExchangeError:
+            raise
+        except Exception as e:
+            log.error(f"{self.get_name()}: Failed to cancel order: {e}")
+            raise ExchangeError(f"Failed to cancel order: {e}")
     
-    @abstractmethod
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
-        """
-        Set leverage for a symbol
+        """Set leverage with validation"""
+        if not validate_symbol(symbol):
+            raise ValueError(f"Invalid symbol: {symbol}")
+        if not validate_leverage(leverage):
+            raise InvalidLeverageError(f"Invalid leverage: {leverage}")
         
-        Args:
-            symbol: Trading pair
-            leverage: Leverage multiplier
+        log.info(f"{self.get_name()}: Setting leverage {symbol} -> {leverage}x")
         
-        Returns:
-            True if set successfully
-        """
-        pass
+        try:
+            result = await self._api_set_leverage(symbol, leverage)
+            log.success(f"{self.get_name()}: Leverage set to {leverage}x")
+            return result
+        except ExchangeError:
+            raise
+        except Exception as e:
+            log.error(f"{self.get_name()}: Failed to set leverage: {e}")
+            raise ExchangeError(f"Failed to set leverage: {e}")
     
-    # ============================================
-    # STOP LOSS / TAKE PROFIT
-    # ============================================
-    
-    @abstractmethod
-    async def set_stop_loss(
-        self,
-        position_id: str,
-        stop_price: float,
-        order_type: OrderType = OrderType.STOP_MARKET
-    ) -> Order:
-        """
-        Set stop loss for a position
-        
-        Args:
-            position_id: Position ID
-            stop_price: Stop loss trigger price
-            order_type: STOP_MARKET or STOP_LOSS
-        
-        Returns:
-            Stop loss Order object
-        """
-        pass
-    
-    @abstractmethod
-    async def set_take_profit(
-        self,
-        position_id: str,
-        take_profit_price: float,
-        order_type: OrderType = OrderType.TAKE_PROFIT_MARKET
-    ) -> Order:
-        """
-        Set take profit for a position
-        
-        Args:
-            position_id: Position ID
-            take_profit_price: Take profit trigger price
-            order_type: TAKE_PROFIT_MARKET or TAKE_PROFIT
-        
-        Returns:
-            Take profit Order object
-        """
-        pass
-    
-    # ============================================
-    # ACCOUNT & BALANCE
-    # ============================================
-    
-    @abstractmethod
-    async def get_balance(self) -> Balance:
-        """
-        Get account balance
-        
-        Returns:
-            Balance object
-        """
-        pass
-    
-    @abstractmethod
-    async def get_positions(self, symbol: Optional[str] = None) -> List[Position]:
-        """
-        Get all open positions or for specific symbol
-        
-        Args:
-            symbol: Optional trading pair to filter by
-        
-        Returns:
-            List of Position objects
-        """
-        pass
-    
-    @abstractmethod
-    async def get_position(self, position_id: str) -> Optional[Position]:
-        """
-        Get a specific position by ID
-        
-        Args:
-            position_id: Position ID
-        
-        Returns:
-            Position object or None if not found
-        """
-        pass
-    
-    @abstractmethod
-    async def get_position_by_symbol(self, symbol: str) -> Optional[Position]:
-        """
-        Get current position for a specific symbol
-        
-        Critical for One-Way Mode: returns the active position for this pair.
-        Returns None if no position exists.
-        
-        Args:
-            symbol: Trading pair (e.g., "BTCUSDT")
-        
-        Returns:
-            Position object or None if no position for this symbol
-        """
-        pass
-    
-    @abstractmethod
-    async def get_order(self, order_id: str, symbol: str) -> Optional[Order]:
-        """
-        Get order status
-        
-        Args:
-            order_id: Order ID
-            symbol: Trading pair
-        
-        Returns:
-            Order object or None if not found
-        """
-        pass
-    
-    @abstractmethod
-    async def get_open_orders(self, symbol: Optional[str] = None) -> List[Order]:
-        """
-        Get all open orders
-        
-        Args:
-            symbol: Optional trading pair to filter by
-        
-        Returns:
-            List of Order objects
-        """
-        pass
-    
-    # ============================================
-    # FUNDING RATE
-    # ============================================
-    
-    @abstractmethod
-    async def get_funding_rate(self, symbol: str) -> FundingRate:
-        """
-        Get current funding rate
-        
-        Args:
-            symbol: Trading pair
-        
-        Returns:
-            FundingRate object
-        """
-        pass
-    
-    @abstractmethod
-    async def get_funding_history(
-        self,
-        symbol: str,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
-        limit: int = 100
-    ) -> List[FundingRate]:
-        """
-        Get historical funding rates
-        
-        Args:
-            symbol: Trading pair
-            start_time: Start time
-            end_time: End time
-            limit: Max results
-        
-        Returns:
-            List of FundingRate objects
-        """
-        pass
-    
-    # ============================================
-    # LIQUIDATION PRICE
-    # ============================================
-    
-    @abstractmethod
-    async def get_liquidation_price(
-        self,
-        symbol: str,
-        side: PositionSide,
-        quantity: float,
-        entry_price: float,
-        leverage: int
-    ) -> float:
-        """
-        Calculate liquidation price for a position
-        
-        Args:
-            symbol: Trading pair
-            side: LONG or SHORT
-            quantity: Position size
-            entry_price: Entry price
-            leverage: Leverage multiplier
-        
-        Returns:
-            Liquidation price
-        """
-        pass
-    
-    # ============================================
-    # ADDITIONAL METHODS
-    # ============================================
-    
-    @abstractmethod
-    async def get_mark_price(self, symbol: str) -> float:
-        """
-        Get current mark price for a symbol
-        
-        Mark price is used for liquidation calculations and unrealized PnL.
-        More stable than last price, less prone to manipulation.
-        
-        Args:
-            symbol: Trading pair
-        
-        Returns:
-            Current mark price
-        """
-        pass
-    
-    @abstractmethod
     async def set_margin_mode(self, mode: str) -> bool:
-        """
-        Set margin mode for the account (GLOBAL setting)
+        """Set margin mode (ISOLATED/CROSS) with validation"""
+        if mode not in ["ISOLATED", "CROSS"]:
+            raise ValueError(f"Invalid margin mode: {mode}")
         
-        Applies to all trading pairs on this exchange.
-        Must be set before opening positions.
+        log.info(f"{self.get_name()}: Setting margin mode -> {mode}")
         
-        Args:
-            mode: 'ISOLATED' or 'CROSS'
-                - ISOLATED: Each position has separate margin (safer)
-                - CROSS: All positions share account margin (riskier)
-        
-        Returns:
-            True if set successfully
-        
-        Raises:
-            ExchangeError: If setting fails or mode is invalid
-        """
-        pass
+        try:
+            result = await self._api_set_margin_mode(mode)
+            log.success(f"{self.get_name()}: Margin mode set to {mode}")
+            return result
+        except ExchangeError:
+            raise
+        except Exception as e:
+            log.error(f"{self.get_name()}: Failed to set margin mode: {e}")
+            raise ExchangeError(f"Failed to set margin mode: {e}")
     
-    @abstractmethod
+    # ============================================
+    # ACCOUNT & POSITIONS - PUBLIC METHODS
+    # ============================================
+    
+    async def get_balance(self) -> Balance:
+        """Get account balance"""
+        try:
+            balance_data = await self._api_get_balance()
+            return self._parse_balance(balance_data)
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise ExchangeError(f"Failed to get balance: {e}")
+    
+    async def get_positions(self, symbol: Optional[str] = None) -> List[Position]:
+        """Get all positions or for specific symbol"""
+        if symbol and not validate_symbol(symbol):
+            raise ValueError(f"Invalid symbol: {symbol}")
+        
+        try:
+            positions_data = await self._api_get_positions(symbol)
+            return [self._parse_position(p) for p in positions_data]
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise ExchangeError(f"Failed to get positions: {e}")
+    
+    async def get_position_by_symbol(self, symbol: str) -> Optional[Position]:
+        """Get position for specific symbol"""
+        if not validate_symbol(symbol):
+            raise ValueError(f"Invalid symbol: {symbol}")
+        
+        try:
+            position_data = await self._api_get_position_by_symbol(symbol)
+            if not position_data:
+                return None
+            return self._parse_position(position_data)
+        except PositionNotFoundError:
+            return None
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise ExchangeError(f"Failed to get position: {e}")
+    
     async def get_account_info(self) -> Dict[str, Any]:
-        """
-        Get account information
-        
-        Returns comprehensive account data including:
-        - Total wallet balance
-        - Available balance
-        - Used margin
-        - Unrealized PnL
-        - All open positions
-        - Account leverage settings
-        
-        Returns:
-            Dict with account information
-        """
-        pass
+        """Get account information"""
+        try:
+            return await self._api_get_account_info()
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise ExchangeError(f"Failed to get account info: {e}")
     
-    @abstractmethod
     async def get_symbol_info(self, symbol: str) -> Dict[str, Any]:
-        """
-        Get trading rules and constraints for a symbol
+        """Get symbol trading rules"""
+        if not validate_symbol(symbol):
+            raise ValueError(f"Invalid symbol: {symbol}")
         
-        Returns:
-            Dict containing:
-            - min_quantity: Minimum order size
-            - max_quantity: Maximum order size
-            - quantity_step: Quantity precision (e.g., 0.001)
-            - min_price: Minimum price
-            - price_tick: Price precision (e.g., 0.01)
-            - max_leverage: Maximum allowed leverage
-            - maintenance_margin_rate: Maintenance margin percentage
-        """
-        pass
+        try:
+            return await self._api_get_symbol_info(symbol)
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise ExchangeError(f"Failed to get symbol info: {e}")
+    
+    # ============================================
+    # FUNDING RATE - PUBLIC METHODS
+    # ============================================
+    
+    async def get_funding_rate(self, symbol: str) -> FundingRate:
+        """Get current funding rate"""
+        if not validate_symbol(symbol):
+            raise ValueError(f"Invalid symbol: {symbol}")
+        
+        try:
+            funding_data = await self._api_get_funding_rate(symbol)
+            return self._parse_funding_rate(funding_data)
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise ExchangeError(f"Failed to get funding rate: {e}")
     
     # ============================================
     # WEBSOCKET SUBSCRIPTIONS
     # ============================================
     
     @abstractmethod
-    async def subscribe_position_updates(self, callback) -> None:
-        """
-        Subscribe to real-time position updates via WebSocket
-        
-        CRITICAL for Emergency Close: detects when SL/TP triggers.
-        Callback receives position updates including:
-        - Position opened/closed
-        - PnL changes
-        - Margin changes
-        - Liquidation events
-        
-        Args:
-            callback: Async function called on position updates
-                     Signature: async def callback(position_data: Dict)
-        """
+    async def subscribe_orderbook(self, symbol: str, callback: Callable) -> None:
+        """Subscribe to orderbook updates via WebSocket"""
         pass
     
     @abstractmethod
-    async def subscribe_order_updates(self, callback) -> None:
-        """
-        Subscribe to real-time order updates via WebSocket
-        
-        Monitors order status changes:
-        - Order placed
-        - Order filled (partially/fully)
-        - Order cancelled
-        - Order rejected
-        
-        Args:
-            callback: Async function called on order updates
-                     Signature: async def callback(order_data: Dict)
-        """
+    async def subscribe_position_updates(self, callback: Callable) -> None:
+        """Subscribe to position updates via WebSocket"""
         pass
     
     @abstractmethod
-    async def subscribe_account_updates(self, callback) -> None:
-        """
-        Subscribe to real-time account updates via WebSocket
-        
-        Monitors:
-        - Balance changes
-        - Margin changes
-        - Available balance updates
-        
-        Args:
-            callback: Async function called on account updates
-                     Signature: async def callback(account_data: Dict)
-        """
+    async def subscribe_order_updates(self, callback: Callable) -> None:
+        """Subscribe to order updates via WebSocket"""
         pass
+    
+    @abstractmethod
+    async def subscribe_account_updates(self, callback: Callable) -> None:
+        """Subscribe to account updates via WebSocket"""
+        pass
+    
+    # ============================================
+    # EXCHANGE-SPECIFIC API ADAPTERS (implement in subclass)
+    # ============================================
+    
+    @abstractmethod
+    async def _api_get_orderbook(self, symbol: str, limit: int) -> Dict[str, Any]:
+        """API call to get orderbook"""
+        pass
+    
+    @abstractmethod
+    async def _api_get_price_data(self, symbol: str) -> Dict[str, Any]:
+        """API call to get price data"""
+        pass
+    
+    @abstractmethod
+    async def _api_get_mark_price(self, symbol: str) -> float:
+        """API call to get mark price"""
+        pass
+    
+    @abstractmethod
+    async def _api_open_position(
+        self,
+        symbol: str,
+        side: PositionSide,
+        quantity: float,
+        leverage: int,
+        order_type: OrderType,
+        price: Optional[float]
+    ) -> Dict[str, Any]:
+        """API call to open position"""
+        pass
+    
+    @abstractmethod
+    async def _api_close_position(
+        self,
+        symbol: str,
+        order_type: OrderType,
+        price: Optional[float]
+    ) -> Dict[str, Any]:
+        """API call to close position"""
+        pass
+    
+    @abstractmethod
+    async def _api_place_order(
+        self,
+        symbol: str,
+        side: OrderSide,
+        order_type: OrderType,
+        quantity: float,
+        price: Optional[float],
+        reduce_only: bool
+    ) -> Dict[str, Any]:
+        """API call to place order"""
+        pass
+    
+    @abstractmethod
+    async def _api_cancel_order(self, order_id: str, symbol: str) -> bool:
+        """API call to cancel order"""
+        pass
+    
+    @abstractmethod
+    async def _api_set_leverage(self, symbol: str, leverage: int) -> bool:
+        """API call to set leverage"""
+        pass
+    
+    @abstractmethod
+    async def _api_set_margin_mode(self, mode: str) -> bool:
+        """API call to set margin mode"""
+        pass
+    
+    @abstractmethod
+    async def _api_get_balance(self) -> Dict[str, Any]:
+        """API call to get balance"""
+        pass
+    
+    @abstractmethod
+    async def _api_get_positions(self, symbol: Optional[str]) -> List[Dict[str, Any]]:
+        """API call to get positions"""
+        pass
+    
+    @abstractmethod
+    async def _api_get_position_by_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """API call to get position by symbol"""
+        pass
+    
+    @abstractmethod
+    async def _api_get_account_info(self) -> Dict[str, Any]:
+        """API call to get account info"""
+        pass
+    
+    @abstractmethod
+    async def _api_get_symbol_info(self, symbol: str) -> Dict[str, Any]:
+        """API call to get symbol info"""
+        pass
+    
+    @abstractmethod
+    async def _api_get_funding_rate(self, symbol: str) -> Dict[str, Any]:
+        """API call to get funding rate"""
+        pass
+    
+    # ============================================
+    # PARSERS (common implementation, can override)
+    # ============================================
+    
+    def _parse_position(self, data: Dict[str, Any]) -> Position:
+        """Parse raw API response to Position object"""
+        # Default implementation - can be overridden by subclass
+        raise NotImplementedError("Subclass must implement _parse_position()")
+    
+    def _parse_order(self, data: Dict[str, Any]) -> Order:
+        """Parse raw API response to Order object"""
+        raise NotImplementedError("Subclass must implement _parse_order()")
+    
+    def _parse_orderbook(self, data: Dict[str, Any]) -> OrderBook:
+        """Parse raw API response to OrderBook object"""
+        raise NotImplementedError("Subclass must implement _parse_orderbook()")
+    
+    def _parse_price_data(self, data: Dict[str, Any]) -> PriceData:
+        """Parse raw API response to PriceData object"""
+        raise NotImplementedError("Subclass must implement _parse_price_data()")
+    
+    def _parse_balance(self, data: Dict[str, Any]) -> Balance:
+        """Parse raw API response to Balance object"""
+        raise NotImplementedError("Subclass must implement _parse_balance()")
+    
+    def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
+        """Parse raw API response to FundingRate object"""
+        raise NotImplementedError("Subclass must implement _parse_funding_rate()")
     
     # ============================================
     # HELPER METHODS
@@ -640,12 +622,7 @@ class BaseExchange(ABC):
     
     @abstractmethod
     async def get_server_time(self) -> int:
-        """
-        Get exchange server time
-        
-        Returns:
-            Unix timestamp in milliseconds
-        """
+        """Get exchange server time (Unix timestamp in milliseconds)"""
         pass
     
     @abstractmethod
