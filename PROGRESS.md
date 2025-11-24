@@ -1,5 +1,8 @@
 # 🎉 ФАЗА 1 ЗАВЕРШЕНА! (Фундамент проекта)
 
+**Статус:** ✅ Фаза 1 завершена + добавлены новые модули  
+**Последнее обновление:** 24 ноября 2025
+
 ## ✅ Что было создано
 
 ### 📁 Структура проекта
@@ -15,7 +18,9 @@ Funding-Bot/
 │   │
 │   ├── core/
 │   │   ├── __init__.py
-│   │   └── state.py          ✅ AppState для управления в RAM
+│   │   ├── state.py             ✅ AppState для управления в RAM
+│   │   ├── execution_engine.py  ✅ Движок открытия позиций (3 режима)
+│   │   └── funding_tracker.py   ✅ Автозакрытие при negative spread
 │   │
 │   ├── utils/
 │   │   ├── __init__.py
@@ -57,11 +62,14 @@ Funding-Bot/
 
 ### 1. **Типы данных** (`src/exchanges/types.py`)
 
-✅ **9 dataclass'ов:**
+✅ **9 dataclass'ов + расширения для Stable Spread:**
 - `PriceData` - данные о ценах bid/ask
 - `OrderBook` - снимок стакана
 - `Balance` - баланс на бирже
 - `Position` - дельта-нейтральная позиция (~500 байт в памяти)
+  - **NEW:** `execution_mode` - "hit_the_bid" | "flash_funding" | "stable_spread"
+  - **NEW:** `entry_spread_abs` - абсолютный спред при входе
+  - **NEW:** `entry_spread_bps` - спред в basis points при входе
 - `Order` - ордер
 - `IntersectionOpportunity` - найденная возможность арбитража
 - `RiskMetrics` - метрики риска
@@ -316,6 +324,84 @@ make test-coverage # с покрытием
 
 ---
 
+## 🆕 Новые модули (после Фазы 1)
+
+### 10. **ExecutionEngine** (`src/core/execution_engine.py`)
+
+✅ **3 режима открытия позиций:**
+
+#### 1. **Hit-the-bid** (классический)
+- Ожидание пересечения bid/ask между биржами
+- Таймаут: 5 минут
+- Толерантность: ±2 bps
+- Показ финансового анализа при неудаче
+
+#### 2. **Flash funding** (быстрый вход)
+- Открытие перед funding payment
+- Анализ текущего спреда vs funding rate
+- Показ break-even времени
+- Подтверждение пользователем
+
+#### 3. **Stable Spread** ⭐ (НОВЫЙ!)
+- **Для пар с высоким OI** (стабильный спред)
+- Открытие **limit ордерами** по best bid/ask (maker fees!)
+- **Сохранение спреда** в памяти (entry_spread_abs, entry_spread_bps)
+- Закрытие с **тем же спредом** через `close_stable_spread()`
+- Анализ при закрытии: entry spread vs current spread
+- Profit = spread_open - spread_close
+
+**Код:**
+```python
+# Открытие
+position = await engine.stable_spread(
+    symbol="BTCUSDT",
+    side1=PositionSide.LONG,
+    quantity=0.1,
+    leverage=5,
+    funding_rate_bps=15.0
+)
+
+# Закрытие (только для stable_spread позиций!)
+await engine.close_stable_spread(position)
+```
+
+---
+
+### 11. **FundingTracker** (`src/core/funding_tracker.py`)
+
+✅ **Автозакрытие убыточных позиций:**
+
+**Логика:**
+1. Мониторинг каждые 40 секунд
+2. За 5 минут до funding payment - проверка spread
+3. **Правило:** если `current_spread_bps < 0` → auto-close
+4. Закрытие limit ордерами на обеих биржах
+
+**Фичи:**
+- Поддержка разных funding интервалов:
+  - 1 час (Hyperliquid)
+  - 4 часа (Aster)
+  - 8 часов (Binance, KuCoin, Bybit, OKX, Gate, MEXC, Bitget, BingX, Lighter)
+- Получение точного времени через API биржи
+- Thread-safe операции через AppState
+- Логирование всех действий
+
+**Упрощение:**
+- ❌ Убрана проверка PnL < 1%
+- ✅ Только проверка negative spread (проще и надежнее)
+
+**Код:**
+```python
+tracker = FundingTracker(state)
+await tracker.start_monitoring()
+
+# Автоматически закроет позицию если:
+# - До funding осталось < 5 минут
+# - current_spread_bps < 0
+```
+
+---
+
 ## 🚀 Что можно делать СЕЙЧАС
 
 ### Запустить бота (пока без торговли):
@@ -370,6 +456,7 @@ liq = calculate_liquidation_price(
 
 | Задача | Статус | Время |
 |--------|--------|-------|
+| **ФАЗА 1: Фундамент** | | |
 | Структура проекта | ✅ | - |
 | Types & dataclasses | ✅ | - |
 | Enums & константы | ✅ | - |
@@ -382,36 +469,176 @@ liq = calculate_liquidation_price(
 | Config | ✅ | - |
 | Tests setup | ✅ | - |
 | README | ✅ | - |
+| **ДОПОЛНИТЕЛЬНО** | | |
+| ExecutionEngine (3 режима) | ✅ | 24.11.2025 |
+| FundingTracker (auto-close) | ✅ | 24.11.2025 |
+| Stable Spread Mode | ✅ | 24.11.2025 |
+| Commission rates update | ✅ | 24.11.2025 |
 
-**ФАЗА 1: 100% ЗАВЕРШЕНА** ✅
+**ФАЗА 1: 100% ЗАВЕРШЕНА** ✅  
+**БОНУС: +4 модуля** ✅
 
 ---
 
-## 🎯 Следующие шаги (ФАЗА 2)
+## 🎯 Что нужно сделать СЕЙЧАС (ФАЗА 2)
 
-### Неделя 3-4: Binance адаптер
+### Приоритет 1: Binance адаптер ⚡
 
-1. ✅ Создать `src/exchanges/binance.py`
-2. Реализовать все методы `BaseExchange`:
-   - REST API методы (ccxt.binance)
-   - WebSocket подписки (bid/ask updates)
-   - Управление позициями
-   - Установка SL/TP
-   - Получение баланса
+**Задача:** Реализовать `src/exchanges/binance.py`
 
-3. Тестирование на testnet:
-   - Подключение
-   - Получение цен
-   - Открытие/закрытие позиций
-   - WebSocket обновления
+**Что нужно:**
+1. Создать класс `BinanceExchange(BaseExchange)`
+2. Реализовать все 40+ методов из `BaseExchange`:
+   - ✅ `connect()` / `disconnect()`
+   - ✅ `get_orderbook()` - получение стакана
+   - ✅ `get_funding_rate()` - фандинг рейт
+   - ✅ `open_position()` - открытие позиции
+   - ✅ `close_position()` - закрытие позиции
+   - ✅ `place_order()` - выставление ордера (limit/market)
+   - ✅ `set_stop_loss()` - установка SL
+   - ✅ `set_take_profit()` - установка TP
+   - ✅ `get_balance()` - баланс USDT
+   - ✅ `get_positions()` - открытые позиции
+   - ✅ `get_liquidation_price()` - цена ликвидации
+   - ✅ WebSocket подписки (orderbook updates)
 
-### Неделя 5-6: Core bot logic
+**Использовать:**
+- `ccxt.binance` для REST API
+- `websockets` для WebSocket подключений
+- Binance Futures Testnet для тестирования
 
-1. `price_monitor.py` - WebSocket мониторинг цен
-2. `intersection_detector.py` - поиск пересечений bid/ask
-3. `limit_order_manager.py` - управление лимитками
-4. `risk_monitor.py` - мониторинг рисков
-5. `emergency_close.py` - аварийное закрытие
+**Тестирование:**
+```bash
+# 1. Подключение
+python -c "from src.exchanges.binance import BinanceExchange; ..."
+
+# 2. Получение стакана
+# 3. Открытие тестовой позиции
+# 4. Установка SL/TP
+# 5. Закрытие позиции
+```
+
+---
+
+### Приоритет 2: Универсальный close метод
+
+**Проблема:** Сейчас есть только `close_stable_spread()` для stable spread режима
+
+**Нужно:** Создать `src/core/position_closer.py`
+
+**Методы:**
+```python
+class PositionCloser:
+    async def close_hit_the_bid(position) -> bool:
+        """Ждать пересечения 5 минут, потом показать анализ"""
+        
+    async def close_flash(position) -> bool:
+        """Быстрое закрытие по текущим ценам"""
+        
+    async def close_market(position) -> bool:
+        """Мгновенное закрытие market ордерами"""
+        
+    async def close_stable_spread(position) -> bool:
+        """Закрытие с сохранением спреда (уже есть!)"""
+```
+
+**CLI интерфейс:**
+```
+╔══════════════════════════════════════════════════════════
+║ Close Mode:
+╠══════════════════════════════════════════════════════════
+║ 1. Hit-the-bid (Wait for better price, 5 min)
+║ 2. Flash close (Quick execution)
+║ 3. Market order (Instant)
+║ 4. Stable spread (только для stable_spread позиций)
+╚══════════════════════════════════════════════════════════
+Select mode [1-4]:
+```
+
+---
+
+### Приоритет 3: Emergency Close Handler
+
+**Задача:** Создать `src/core/emergency_close.py`
+
+**Логика:**
+```python
+# Если на одной бирже сработал TP или SL:
+if tp_triggered_on_ex1 or sl_triggered_on_ex1:
+    # Закрыть противоположную сторону за 3 сек (limit)
+    await close_ex2(mode="limit", timeout=3)
+    
+    # Если лимитка не исполнилась
+    if not filled_after_3_sec:
+        await close_ex2(mode="market")  # Принудительно
+```
+
+**Мониторинг:**
+- WebSocket подписка на изменения позиций
+- Проверка статуса SL/TP каждые 1 секунду
+- Мгновенная реакция на срабатывание
+
+---
+
+### Приоритет 4: CLI интерфейс
+
+**Задача:** Создать `src/cli/menu.py`
+
+**Основное меню:**
+```
+╔══════════════════════════════════════════════════════════
+║ Delta Neutral Trading Bot
+╠══════════════════════════════════════════════════════════
+║ 1. Open Position
+║ 2. View Positions
+║ 3. Close Position
+║ 4. Funding Analysis
+║ 5. Settings
+║ 6. Exit
+╚══════════════════════════════════════════════════════════
+Select option [1-6]:
+```
+
+**Открытие позиции:**
+```
+Symbol: BTCUSDT
+Exchange 1: binance
+Side 1: LONG
+Leverage: 5
+Quantity: 0.1
+Exchange 2: bybit
+Funding Rate (bps/hour): 15.0
+
+Execution Mode:
+1. Hit-the-bid (Wait 5 min)
+2. Flash funding (Quick)
+3. Stable spread (High OI pairs)
+4. Market (Instant)
+
+Select [1-4]:
+```
+
+---
+
+### Приоритет 5: OrderBook Monitor (WebSocket)
+
+**Задача:** Создать `src/core/orderbook_monitor.py`
+
+**Логика:**
+- WebSocket подписка на orderbook updates
+- Обновление AppState.prices в реальном времени
+- Детекция пересечений bid/ask
+- Уведомления о возможностях арбитража
+
+**Использование:**
+```python
+monitor = OrderBookMonitor(state)
+await monitor.subscribe("BTCUSDT", [Exchange.BINANCE, Exchange.BYBIT])
+await monitor.start()
+
+# Автоматически обновляет state.prices
+# ExecutionEngine использует эти данные
+```
 
 ---
 
@@ -449,34 +676,74 @@ liq = calculate_liquidation_price(
 ## 📈 Прогресс проекта
 
 ```
-[████████░░░░░░░░░░░░░░░░] 25% - ФАЗА 1 ЗАВЕРШЕНА ✅
+[██████████░░░░░░░░░░░░░░] 35% - ФАЗА 1 + БОНУС ✅
 
-Следующая: ФАЗА 2 (Binance + Core)
+Следующая: ФАЗА 2 (Binance + Closer + Emergency + CLI)
 ```
 
-**Оценка времени:**
-- ФАЗА 1: ✅ Завершено
-- ФАЗА 2: 4 недели (Binance + Core bot)
-- ФАЗА 3: 1 неделя (State & Recovery)
-- ФАЗА 4: 2 недели (CLI & Interface)
-- ФАЗА 5: 3 недели (Тестирование)
+**Roadmap:**
 
-**ИТОГО: ~10 недель до production-ready**
+| Фаза | Описание | Статус | ETA |
+|------|----------|--------|-----|
+| **1** | Фундамент + Types + State | ✅ Готово | - |
+| **1.5** | ExecutionEngine + FundingTracker + Stable Spread | ✅ Готово | 24.11.2025 |
+| **2.1** | Binance адаптер (40+ методов) | 🔄 В работе | 2 недели |
+| **2.2** | PositionCloser (4 режима закрытия) | ⏳ Ожидание | 3 дня |
+| **2.3** | Emergency Close Handler | ⏳ Ожидание | 2 дня |
+| **2.4** | CLI Menu (открытие/закрытие/анализ) | ⏳ Ожидание | 1 неделя |
+| **2.5** | OrderBook Monitor (WebSocket) | ⏳ Ожидание | 1 неделя |
+| **3** | State Recovery + Persistence | ⏳ Ожидание | 1 неделя |
+| **4** | Остальные биржи (KuCoin, Bybit, etc.) | ⏳ Ожидание | 3 недели |
+| **5** | Тестирование на testnet | ⏳ Ожидание | 2 недели |
+| **6** | Production deployment | ⏳ Ожидание | 1 неделя |
+
+**ИТОГО: ~8-10 недель до production-ready**
 
 ---
 
 ## 🎊 Заключение
 
-**ФАЗА 1 полностью завершена!**
+**ФАЗА 1 + БОНУС полностью завершены!**
 
 Создан прочный фундамент:
 - ✅ Структура проекта
-- ✅ Типы данных
-- ✅ Абстракции для бирж
+- ✅ Типы данных (+ Stable Spread расширения)
+- ✅ Абстракции для бирж (40+ методов)
 - ✅ Управление состоянием в RAM
-- ✅ Utility функции
-- ✅ Логирование
-- ✅ Конфигурация
-- ✅ Тесты
+- ✅ Utility функции (16+ расчетов)
+- ✅ Логирование (3 потока)
+- ✅ Конфигурация (.env)
+- ✅ Тесты (pytest)
+- ✅ **ExecutionEngine** (3 режима открытия)
+- ✅ **FundingTracker** (автозакрытие)
+- ✅ **Stable Spread Mode** (для high OI пар)
 
-**Готов к ФАЗЕ 2: реализация Binance адаптера и ядра бота!** 🚀
+**Следующий шаг: Binance адаптер!** 🚀
+
+---
+
+## 📝 Чек-лист для начала Фазы 2
+
+### Перед началом:
+- [ ] Зарегистрироваться на Binance Futures Testnet
+- [ ] Получить API ключи (testnet)
+- [ ] Добавить в `.env`: `BINANCE_TESTNET_API_KEY`, `BINANCE_TESTNET_SECRET_KEY`
+- [ ] Установить `ccxt`: `pip install ccxt`
+- [ ] Изучить [Binance Futures API Docs](https://binance-docs.github.io/apidocs/futures/en/)
+
+### Создать файлы:
+- [ ] `src/exchanges/binance.py` - основной адаптер
+- [ ] `src/core/position_closer.py` - универсальное закрытие
+- [ ] `src/core/emergency_close.py` - аварийное закрытие
+- [ ] `src/cli/menu.py` - интерфейс бота
+- [ ] `tests/integration/test_binance.py` - интеграционные тесты
+
+### Тестирование:
+- [ ] Подключение к Binance Testnet
+- [ ] Получение orderbook
+- [ ] Открытие тестовой позиции (0.001 BTC)
+- [ ] Установка SL/TP
+- [ ] Закрытие позиции
+- [ ] WebSocket подписка на orderbook
+
+**Готов начать Фазу 2!** 💪

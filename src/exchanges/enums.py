@@ -66,9 +66,9 @@ class OrderStatus(str, Enum):
 
 class ExecutionMode(str, Enum):
     """Execution modes for opening positions"""
-    HIT_THE_BID = "hit_the_bid"  # Wait for bid/ask intersection
+    HIT_THE_BID = "hit_the_bid"  # Wait for bid/ask intersection (5 min, ±2 bps)
     FLASH_FUNDING = "flash_funding"  # Quick execution before funding
-    MARKET = "market"  # Immediate market execution
+    STABLE_SPREAD = "stable_spread"  # Open/close with preserved spread (high OI pairs)
 
 
 class RiskLevel(str, Enum):
