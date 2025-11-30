@@ -253,13 +253,10 @@ class BinanceExchange(BaseExchange):
     
     async def _api_set_margin_mode(self, mode: str) -> bool:
         """Binance: POST /fapi/v1/marginType"""
-        try:
-            # Note: Binance requires setting margin mode PER SYMBOL
-            # For now, we'll just return True
-            # In practice, call this when opening first position for each symbol
-            return True
-        except ccxt.RateLimitExceeded as e:
-            raise RateLimitError(str(e))
+        # Note: Binance requires setting margin mode PER SYMBOL
+        # For now, we'll just return True
+        # In practice, call this when opening first position for each symbol
+        return True
     
     async def _api_get_balance(self) -> Dict[str, Any]:
         """Binance: GET /fapi/v2/balance"""

@@ -56,6 +56,7 @@ class FundingTracker:
             try:
                 await self._task
             except asyncio.CancelledError:
+                # Task cancellation is expected when stopping monitoring loop
                 pass
         logger.info("⏹️ Funding tracker stopped")
     

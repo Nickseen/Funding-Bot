@@ -111,7 +111,7 @@ def calculate_position_pnl(
     return pnl
 
 
-def calculate_spread_bps(price1: float, price2: float) -> float:
+def calculate_spread_bps_from_prices(price1: float, price2: float) -> float:
     """
     Calculate spread between two prices in basis points
     
@@ -221,7 +221,8 @@ def calculate_funding_profit(
         Funding profit in USD (positive = received, negative = paid)
     """
     # Funding is paid/received every 8 hours (typically)
-    funding_profit = position_value * funding_rate
+    # Calculate proportional funding based on hours parameter
+    funding_profit = position_value * funding_rate * (hours / 8)
     return funding_profit
 
 
@@ -323,7 +324,15 @@ def calculate_spread_bps(
         close_price_ex1 = orderbook1.best_bid
         close_price_ex2 = orderbook2.best_ask
     
+    # Check for None values (empty orderbook)
+    if close_price_ex1 is None or close_price_ex2 is None:
+        return float('nan')
+    
+    # Extract price from tuple (price, quantity)
+    price_ex1 = close_price_ex1[0] if isinstance(close_price_ex1, tuple) else close_price_ex1
+    price_ex2 = close_price_ex2[0] if isinstance(close_price_ex2, tuple) else close_price_ex2
+    
     # Calculate spread (positive = profit, negative = loss)
-    spread_bps = ((close_price_ex2 - close_price_ex1) / close_price_ex1) * 10000
+    spread_bps = ((price_ex2 - price_ex1) / price_ex1) * 10000
     
     return spread_bps

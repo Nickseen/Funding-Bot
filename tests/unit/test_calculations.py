@@ -2,11 +2,10 @@
 Unit tests for calculation functions.
 """
 
-import pytest
 from src.utils.calculations import (
     calculate_liquidation_price,
     calculate_stop_loss_take_profit,
-    calculate_spread_bps,
+    calculate_spread_bps_from_prices,
     calculate_net_profit_bps,
     is_profitable_spread,
 )
@@ -50,7 +49,7 @@ def test_calculate_spread_bps():
     price1 = 100.0
     price2 = 100.5
     
-    spread = calculate_spread_bps(price1, price2)
+    spread = calculate_spread_bps_from_prices(price1, price2)
     
     # 0.5 / 100.25 * 10000 ≈ 49.88 bps
     assert 49 < spread < 51

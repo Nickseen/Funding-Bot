@@ -11,7 +11,7 @@ from src.core.state import app_state
 from src.utils.calculations import (
     calculate_liquidation_price,
     calculate_stop_loss_take_profit,
-    calculate_spread_bps,
+    calculate_spread_bps_from_prices,
     calculate_net_profit_bps,
 )
 from src.utils.validators import validate_delta_neutral_position
@@ -110,7 +110,7 @@ async def example_2_calculate_profitability():
     price_binance = 100.50
     price_kucoin = 100.00
     
-    spread = calculate_spread_bps(price_binance, price_kucoin)
+    spread = calculate_spread_bps_from_prices(price_binance, price_kucoin)
     
     # Fees: Binance (0.05%) + KuCoin (0.06%) = 0.11% = 11 bps
     total_fees = 11.0
@@ -129,7 +129,7 @@ async def example_2_calculate_profitability():
     price_binance = 100.05
     price_kucoin = 100.00
     
-    spread = calculate_spread_bps(price_binance, price_kucoin)
+    spread = calculate_spread_bps_from_prices(price_binance, price_kucoin)
     net_profit = calculate_net_profit_bps(spread, total_fees)
     
     log.info(f"\nScenario 2:")

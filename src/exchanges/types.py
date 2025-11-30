@@ -4,9 +4,8 @@ All data structures stored in RAM.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, List, Tuple
 from datetime import datetime
-from enum import Enum
 
 
 @dataclass
