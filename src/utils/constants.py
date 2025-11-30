@@ -1,0 +1,27 @@
+"""Global constants"""
+
+# Position ID prefix
+POSITION_ID_PREFIX = "pos_"
+
+# Default values
+DEFAULT_LEVERAGE = 5
+DEFAULT_MIN_PROFIT_BPS = 1.0  # Minimum 1 bps profit
+
+# Timeouts (seconds)
+WEBSOCKET_TIMEOUT = 30
+ORDER_CHECK_INTERVAL = 1
+POSITION_UPDATE_INTERVAL = 5
+
+# Limits
+MAX_LEVERAGE = 125
+MIN_LEVERAGE = 1
+MAX_OPEN_POSITIONS = 1000
+
+# Price precision
+PRICE_DECIMALS = 8
+QUANTITY_DECIMALS = 8
+
+# Risk thresholds
+CRITICAL_DISTANCE_TO_LIQ = 30  # % distance to liquidation
+HIGH_RISK_DISTANCE_TO_LIQ = 40
+MEDIUM_RISK_DISTANCE_TO_LIQ = 50
