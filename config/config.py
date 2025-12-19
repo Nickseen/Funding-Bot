@@ -29,6 +29,10 @@ class Config:
     KUCOIN_SECRET_KEY: str = os.getenv("KUCOIN_SECRET_KEY", "")
     KUCOIN_PASSPHRASE: str = os.getenv("KUCOIN_PASSPHRASE", "")
     
+    # Bybit
+    BYBIT_API_KEY: str = os.getenv("BYBIT_API_KEY", "")
+    BYBIT_SECRET_KEY: str = os.getenv("BYBIT_SECRET_KEY", "")
+    
     # Bot settings
     MAX_POSITIONS: int = int(os.getenv("MAX_POSITIONS", "100"))
     
@@ -59,9 +63,12 @@ class Config:
         """
         errors = []
         
-        # Check API keys
+        # Check API keys (warn if not configured, but don't fail)
         if not cls.BINANCE_API_KEY or not cls.BINANCE_SECRET_KEY:
             errors.append("Binance API credentials not configured")
+        
+        if not cls.BYBIT_API_KEY or not cls.BYBIT_SECRET_KEY:
+            errors.append("Bybit API credentials not configured")
         
         # Log level
         valid_log_levels = ["DEBUG", "INFO", "WARNING", "ERROR"]
