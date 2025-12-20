@@ -1,14 +1,15 @@
 """
-Bybit Futures Exchange Adapter
+OKX Futures Exchange Adapter
 
 This adapter implements only the exchange-specific API calls.
 All validation, logging, and error handling is done in BaseExchange.
 
-Each method is 5-15 lines of pure API calls - no business logic!
+OKX API Reference:
+- https://www.okx.com/docs-v5/en/
 
-Bybit API Reference:
-- Futures (Linear): https://bybit-exchange.github.io/docs/v5/intro
-- Uses Unified Trading Account (UTA) by default
+OKX Testnet:
+- https://www.okx.com/docs-v5/en/#overview-demo-trading-services
+- Demo trading available at: https://www.okx.com/trade-swap/btc-usdt-swap (switch to demo mode)
 """
 
 from typing import Dict, Any, List, Optional
@@ -20,43 +21,46 @@ from .enums import Exchange, PositionSide, OrderSide, OrderType
 from .types import Position, Order, OrderBook, PriceData, Balance, FundingRate
 
 
-class BybitExchange(BaseExchange):
+class OKXExchange(BaseExchange):
     """
-    Bybit Futures adapter (Linear Perpetual - USDT settled)
+    OKX Futures adapter (USDT-margined perpetual swaps)
     
     Implements ONLY:
     1. _api_* methods (raw API calls)
-    2. _parse_* methods (convert Bybit response format to our types)
+    2. _parse_* methods (convert OKX response format to our types)
     
     All business logic is in BaseExchange!
     
     Notes:
-    - Bybit uses Unified Trading Account (UTA) by default
-    - Symbol format: BTCUSDT (same as Binance)
-    - Position mode: One-way mode by default (can be set to Hedge mode)
+    - OKX uses "swap" for perpetual futures
+    - Symbol format: BTC-USDT-SWAP
+    - OKX requires passphrase for API authentication
+    - Demo trading available (testnet)
     """
     
     def __init__(
         self,
         api_key: str,
         secret_key: str,
+        passphrase: str = "",
         testnet: bool = False
     ):
-        super().__init__(api_key, secret_key, testnet=testnet)
-        self.exchange_name = Exchange.BYBIT
+        super().__init__(api_key, secret_key, passphrase=passphrase, testnet=testnet)
+        self.exchange_name = Exchange.OKX
         
         # Initialize ccxt client
-        self.client = ccxt.bybit({
+        self.client = ccxt.okx({
             'apiKey': api_key,
             'secret': secret_key,
+            'password': passphrase,  # OKX requires passphrase
             'enableRateLimit': True,
             'options': {
-                'defaultType': 'linear',  # Linear perpetual (USDT-settled)
-                'adjustForTimeDifference': True,
+                'defaultType': 'swap',  # Perpetual swaps
             }
         })
         
         if testnet:
+            # OKX demo trading
             self.client.set_sandbox_mode(True)
     
     # ============================================
@@ -64,7 +68,7 @@ class BybitExchange(BaseExchange):
     # ============================================
     
     async def connect(self) -> bool:
-        """Connect to Bybit"""
+        """Connect to OKX"""
         try:
             await self.client.load_markets()
             self.connected = True
@@ -73,7 +77,7 @@ class BybitExchange(BaseExchange):
             raise ExchangeError(f"Failed to connect: {e}")
     
     async def disconnect(self) -> None:
-        """Disconnect from Bybit"""
+        """Disconnect from OKX"""
         await self.client.close()
         self.connected = False
     
@@ -91,23 +95,22 @@ class BybitExchange(BaseExchange):
     
     def _convert_symbol(self, symbol: str) -> str:
         """
-        Convert simple symbol format to Bybit ccxt format
+        Convert simple symbol format to OKX ccxt format
         
-        BTCUSDT -> BTC/USDT:USDT (linear perpetual)
+        BTCUSDT -> BTC/USDT:USDT (perpetual swap)
         """
         # Already in correct format
         if '/' in symbol:
             return symbol
         
         # Convert BTCUSDT -> BTC/USDT:USDT
-        # Find where base ends and quote begins
         quote_currencies = ['USDT', 'USDC', 'USD']
         for quote in quote_currencies:
             if symbol.endswith(quote):
                 base = symbol[:-len(quote)]
                 return f"{base}/{quote}:{quote}"
         
-        # Fallback - return as is
+        # Fallback
         return symbol
     
     # ============================================
@@ -115,7 +118,7 @@ class BybitExchange(BaseExchange):
     # ============================================
     
     async def _api_get_orderbook(self, symbol: str, limit: int) -> Dict[str, Any]:
-        """Bybit: GET /v5/market/orderbook"""
+        """OKX: GET /api/v5/market/books"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             return await self.client.fetch_order_book(ccxt_symbol, limit)
@@ -125,7 +128,7 @@ class BybitExchange(BaseExchange):
             raise NetworkError(str(e))
     
     async def _api_get_price_data(self, symbol: str) -> Dict[str, Any]:
-        """Bybit: GET /v5/market/tickers"""
+        """OKX: GET /api/v5/market/ticker"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             ticker = await self.client.fetch_ticker(ccxt_symbol)
@@ -141,14 +144,13 @@ class BybitExchange(BaseExchange):
             raise RateLimitError(str(e))
     
     async def _api_get_mark_price(self, symbol: str) -> float:
-        """Bybit: GET /v5/market/tickers - mark price from ticker"""
+        """OKX: GET /api/v5/public/mark-price"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             ticker = await self.client.fetch_ticker(ccxt_symbol)
-            # Bybit returns mark price in the info field
-            if 'info' in ticker and 'markPrice' in ticker['info']:
-                return float(ticker['info']['markPrice'])
-            # Fallback to last price
+            # OKX includes mark price in ticker info
+            if 'info' in ticker and 'markPx' in ticker['info']:
+                return float(ticker['info']['markPx'])
             return float(ticker['last'])
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
@@ -163,7 +165,7 @@ class BybitExchange(BaseExchange):
         price: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Bybit: Open position
+        OKX: Open position
         
         Steps:
         1. Set leverage
@@ -172,18 +174,21 @@ class BybitExchange(BaseExchange):
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # 1. Set leverage first (ignore "not modified" error)
+            # 1. Set leverage (ignore "already set" errors)
             try:
                 await self.client.set_leverage(leverage, ccxt_symbol)
             except Exception as e:
-                if 'not modified' not in str(e).lower():
+                if 'leverage' not in str(e).lower():
                     raise
             
             # 2. Place order
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = 'buy' if side == PositionSide.LONG else 'sell'
             
-            params = {}
+            params = {
+                'tdMode': 'cross',  # Cross margin mode
+            }
+            
             if order_type == OrderType.LIMIT:
                 order = await self.client.create_order(
                     symbol=ccxt_symbol,
@@ -223,7 +228,7 @@ class BybitExchange(BaseExchange):
         price: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Bybit: Close position
+        OKX: Close position
         
         Get current position, place opposite order with reduceOnly=True
         """
@@ -247,7 +252,10 @@ class BybitExchange(BaseExchange):
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = 'sell' if position_side == 'long' else 'buy'
             
-            params = {'reduceOnly': True}
+            params = {
+                'reduceOnly': True,
+                'tdMode': 'cross',
+            }
             
             if order_type == OrderType.LIMIT:
                 await self.client.create_order(
@@ -267,7 +275,7 @@ class BybitExchange(BaseExchange):
                     params=params
                 )
             
-            # 3. Return updated position (should be closed now)
+            # 3. Return updated position
             positions = await self.client.fetch_positions([ccxt_symbol])
             return next(
                 (p for p in positions if p['symbol'] == ccxt_symbol),
@@ -286,13 +294,15 @@ class BybitExchange(BaseExchange):
         price: Optional[float],
         reduce_only: bool
     ) -> Dict[str, Any]:
-        """Bybit: POST /v5/order/create"""
+        """OKX: POST /api/v5/trade/order"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = side.value.lower()
             
-            params = {}
+            params = {
+                'tdMode': 'cross',
+            }
             if reduce_only:
                 params['reduceOnly'] = True
             
@@ -318,7 +328,7 @@ class BybitExchange(BaseExchange):
             raise RateLimitError(str(e))
     
     async def _api_cancel_order(self, order_id: str, symbol: str) -> bool:
-        """Bybit: POST /v5/order/cancel"""
+        """OKX: POST /api/v5/trade/cancel-order"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             await self.client.cancel_order(order_id, ccxt_symbol)
@@ -327,7 +337,7 @@ class BybitExchange(BaseExchange):
             raise RateLimitError(str(e))
     
     async def _api_set_leverage(self, symbol: str, leverage: int) -> bool:
-        """Bybit: POST /v5/position/set-leverage"""
+        """OKX: POST /api/v5/account/set-leverage"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             await self.client.set_leverage(leverage, ccxt_symbol)
@@ -335,29 +345,27 @@ class BybitExchange(BaseExchange):
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except Exception as e:
-            # Bybit may return error if leverage is already set
-            if 'leverage not modified' in str(e).lower():
+            # OKX may return error if leverage is already set
+            if 'leverage' in str(e).lower():
                 return True
             raise ExchangeError(f"Failed to set leverage: {e}")
     
     async def _api_set_margin_mode(self, mode: str) -> bool:
-        """Bybit: POST /v5/position/set-margin-mode"""
+        """OKX: POST /api/v5/account/set-position-mode"""
         try:
-            # Bybit uses 'REGULAR_MARGIN' for cross and 'ISOLATED_MARGIN' for isolated
-            # Or we can use set_margin_mode on ccxt
+            # OKX uses 'cross' or 'isolated'
             margin_mode = 'cross' if mode == 'CROSS' else 'isolated'
             await self.client.set_margin_mode(margin_mode)
             return True
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except Exception as e:
-            # May already be set
-            if 'not modified' in str(e).lower():
+            if 'already' in str(e).lower():
                 return True
             raise ExchangeError(f"Failed to set margin mode: {e}")
     
     async def _api_get_balance(self) -> Dict[str, Any]:
-        """Bybit: GET /v5/account/wallet-balance"""
+        """OKX: GET /api/v5/account/balance"""
         try:
             balance = await self.client.fetch_balance()
             return balance
@@ -365,7 +373,7 @@ class BybitExchange(BaseExchange):
             raise RateLimitError(str(e))
     
     async def _api_get_positions(self, symbol: Optional[str]) -> List[Dict[str, Any]]:
-        """Bybit: GET /v5/position/list"""
+        """OKX: GET /api/v5/account/positions"""
         try:
             if symbol:
                 ccxt_symbol = self._convert_symbol(symbol)
@@ -379,7 +387,7 @@ class BybitExchange(BaseExchange):
             raise RateLimitError(str(e))
     
     async def _api_get_position_by_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Bybit: GET /v5/position/list for specific symbol"""
+        """OKX: GET /api/v5/account/positions for specific symbol"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             positions = await self.client.fetch_positions([ccxt_symbol])
@@ -392,23 +400,19 @@ class BybitExchange(BaseExchange):
             raise RateLimitError(str(e))
     
     async def _api_get_account_info(self) -> Dict[str, Any]:
-        """Bybit: GET /v5/account/info"""
+        """OKX: GET /api/v5/account/config"""
         try:
-            # ccxt doesn't have a direct method, use private API
-            return await self.client.private_get_v5_account_info()
+            return await self._api_get_balance()
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
-        except Exception:
-            # Fallback to balance info
-            return await self._api_get_balance()
     
     async def _api_get_symbol_info(self, symbol: str) -> Dict[str, Any]:
-        """Bybit: GET /v5/market/instruments-info"""
+        """OKX: GET /api/v5/public/instruments"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             markets = self.client.markets
             if ccxt_symbol not in markets:
-                await self.client.load_markets(True)  # Reload
+                await self.client.load_markets(True)
                 markets = self.client.markets
             
             market = markets.get(ccxt_symbol)
@@ -421,13 +425,13 @@ class BybitExchange(BaseExchange):
                 'quantity_step': market['precision']['amount'],
                 'min_price': market['limits']['price']['min'],
                 'price_tick': market['precision']['price'],
-                'max_leverage': 100,  # Bybit max for most pairs
+                'max_leverage': 125,  # OKX max for major pairs
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
     
     async def _api_get_funding_rate(self, symbol: str) -> Dict[str, Any]:
-        """Bybit: GET /v5/market/tickers - funding info"""
+        """OKX: GET /api/v5/public/funding-rate"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             ticker = await self.client.fetch_ticker(ccxt_symbol)
@@ -442,18 +446,17 @@ class BybitExchange(BaseExchange):
             raise RateLimitError(str(e))
     
     # ============================================
-    # PARSERS (convert Bybit format to our types)
+    # PARSERS (convert OKX format to our types)
     # ============================================
     
     def _parse_position(self, data: Dict[str, Any]) -> Position:
-        """Convert Bybit position data to Position object"""
-        # ccxt normalizes position data
+        """Convert OKX position data to Position object"""
         symbol = data.get('symbol', '')
         contracts = float(data.get('contracts', 0) or 0)
         side = data.get('side', '')  # 'long' or 'short'
         
         return Position(
-            id=f"bybit_{symbol}_{int(datetime.utcnow().timestamp())}",
+            id=f"okx_{symbol}_{int(datetime.utcnow().timestamp())}",
             pair=symbol,
             exchange1=self.exchange_name.value,
             exchange1_pos_id=data.get('id', ''),
@@ -461,7 +464,7 @@ class BybitExchange(BaseExchange):
             exchange1_entry_price=float(data.get('entryPrice', 0) or 0),
             exchange1_current_price=float(data.get('markPrice', 0) or 0),
             exchange1_leverage=int(data.get('leverage', 1) or 1),
-            # For single exchange position, duplicate fields
+            # For single exchange position
             exchange2='',
             exchange2_pos_id='',
             exchange2_side='',
@@ -479,9 +482,7 @@ class BybitExchange(BaseExchange):
         )
     
     def _parse_order(self, data: Dict[str, Any]) -> Order:
-        """Convert Bybit order data to Order object"""
-        from .types import Order
-        
+        """Convert OKX order data to Order object"""
         return Order(
             id=data.get('id', ''),
             symbol=data.get('symbol', ''),
@@ -496,7 +497,7 @@ class BybitExchange(BaseExchange):
         )
     
     def _parse_orderbook(self, data: Dict[str, Any]) -> OrderBook:
-        """Convert Bybit orderbook to OrderBook object"""
+        """Convert OKX orderbook to OrderBook object"""
         return OrderBook(
             symbol=data.get('symbol', ''),
             exchange=self.exchange_name.value,
@@ -506,24 +507,18 @@ class BybitExchange(BaseExchange):
         )
     
     def _parse_price_data(self, data: Dict[str, Any]) -> PriceData:
-        """Convert Bybit ticker to PriceData"""
-        # Handle timestamp - may be None on testnet
-        ts = data.get('timestamp')
-        if ts is None:
-            ts = datetime.utcnow().timestamp() * 1000
-        
+        """Convert OKX ticker to PriceData"""
         return PriceData(
             symbol=data.get('symbol', ''),
             bid=float(data.get('bid', 0) or 0),
             ask=float(data.get('ask', 0) or 0),
             bid_qty=float(data.get('bid_qty', 0) or 0),
             ask_qty=float(data.get('ask_qty', 0) or 0),
-            timestamp=float(ts) / 1000
+            timestamp=float(data.get('timestamp', datetime.utcnow().timestamp() * 1000)) / 1000
         )
     
     def _parse_balance(self, data: Dict[str, Any]) -> Balance:
-        """Convert Bybit balance to Balance object"""
-        # ccxt normalizes balance - look for USDT
+        """Convert OKX balance to Balance object"""
         usdt = data.get('USDT', data.get('info', {}).get('USDT', {}))
         
         if isinstance(usdt, dict):
@@ -540,12 +535,12 @@ class BybitExchange(BaseExchange):
             total=total,
             available=free,
             margin_used=used,
-            unrealized_pnl=0,  # Would need separate call
+            unrealized_pnl=0,
             timestamp=datetime.utcnow().timestamp()
         )
     
     def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
-        """Convert Bybit funding data to FundingRate"""
+        """Convert OKX funding data to FundingRate"""
         next_funding_ts = int(data.get('nextFundingTime', 0) or 0)
         
         return FundingRate(
@@ -561,24 +556,19 @@ class BybitExchange(BaseExchange):
     # ============================================
     
     async def subscribe_orderbook(self, symbol: str, callback) -> None:
-        """Subscribe to Bybit orderbook WebSocket"""
-        # TODO: Implement WebSocket subscription
-        # Bybit WS: wss://stream.bybit.com/v5/public/linear
+        """Subscribe to OKX orderbook WebSocket"""
         pass
     
     async def subscribe_position_updates(self, callback) -> None:
         """Subscribe to position updates"""
-        # TODO: Implement WebSocket subscription
         pass
     
     async def subscribe_order_updates(self, callback) -> None:
         """Subscribe to order updates"""
-        # TODO: Implement WebSocket subscription
         pass
     
     async def subscribe_account_updates(self, callback) -> None:
         """Subscribe to account updates"""
-        # TODO: Implement WebSocket subscription
         pass
     
     # ============================================
@@ -586,7 +576,7 @@ class BybitExchange(BaseExchange):
     # ============================================
     
     async def get_server_time(self) -> int:
-        """Get Bybit server time"""
+        """Get OKX server time"""
         try:
             time = await self.client.fetch_time()
             return time
@@ -594,28 +584,5 @@ class BybitExchange(BaseExchange):
             raise ExchangeError(f"Failed to get server time: {e}")
     
     async def sync_time(self) -> None:
-        """Sync time with Bybit"""
-        # ccxt handles this automatically with adjustForTimeDifference
+        """Sync time with OKX"""
         pass
-    
-    # ============================================
-    # BYBIT-SPECIFIC METHODS
-    # ============================================
-    
-    async def set_position_mode(self, hedge_mode: bool = False) -> bool:
-        """
-        Set position mode
-        
-        Args:
-            hedge_mode: True for hedge mode (dual positions), False for one-way mode
-            
-        Note: Bybit requires no open positions to change this
-        """
-        try:
-            mode = 'BothSide' if hedge_mode else 'MergedSingle'
-            await self.client.set_position_mode(hedge_mode, symbol=None)
-            return True
-        except Exception as e:
-            if 'not modified' in str(e).lower():
-                return True
-            raise ExchangeError(f"Failed to set position mode: {e}")

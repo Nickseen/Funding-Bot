@@ -33,6 +33,11 @@ class Config:
     BYBIT_API_KEY: str = os.getenv("BYBIT_API_KEY", "")
     BYBIT_SECRET_KEY: str = os.getenv("BYBIT_SECRET_KEY", "")
     
+    # OKX
+    OKX_API_KEY: str = os.getenv("OKX_API_KEY", "")
+    OKX_SECRET_KEY: str = os.getenv("OKX_SECRET_KEY", "")
+    OKX_PASSPHRASE: str = os.getenv("OKX_PASSPHRASE", "")
+    
     # Bot settings
     MAX_POSITIONS: int = int(os.getenv("MAX_POSITIONS", "100"))
     
