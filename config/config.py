@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 
 # Load .env file
-env_path = Path(__file__).parent.parent.parent / ".env"
+env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(env_path)
 
 
