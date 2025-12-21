@@ -2,25 +2,47 @@
 Тест открытия delta-neutral позиции на Bybit testnet + OKX demo
 """
 import asyncio
+import os
+from dotenv import load_dotenv
 from src.exchanges.bybit import BybitExchange
 from src.exchanges.okx import OKXExchange
 from src.exchanges.enums import PositionSide, OrderType
+
+load_dotenv()
 
 async def run_delta_neutral_test():
     print("=" * 60)
     print("ОТКРЫТИЕ DELTA-NEUTRAL ПОЗИЦИИ")
     print("=" * 60)
     
+    # Load credentials from environment variables
+    bybit_api_key = os.getenv("BYBIT_API_KEY", "")
+    bybit_secret_key = os.getenv("BYBIT_SECRET_KEY", "")
+    okx_api_key = os.getenv("OKX_API_KEY", "")
+    okx_secret_key = os.getenv("OKX_SECRET_KEY", "")
+    okx_passphrase = os.getenv("OKX_PASSPHRASE", "")
+    
+    # Validate credentials
+    if not bybit_api_key or not bybit_secret_key:
+        print("❌ Bybit API credentials not found in environment variables!")
+        print("   Please set BYBIT_API_KEY and BYBIT_SECRET_KEY in .env file")
+        return
+    
+    if not okx_api_key or not okx_secret_key or not okx_passphrase:
+        print("❌ OKX API credentials not found in environment variables!")
+        print("   Please set OKX_API_KEY, OKX_SECRET_KEY, and OKX_PASSPHRASE in .env file")
+        return
+    
     bybit = BybitExchange(
-        api_key="eypD4q6xnIN0lznITS",
-        secret_key="2U4w74c6h66s18x82ISVVpuMhWqtIYeqdkax",
+        api_key=bybit_api_key,
+        secret_key=bybit_secret_key,
         testnet=True
     )
     
     okx = OKXExchange(
-        api_key="a44736b0-18cf-4e9e-a9b3-c6564c44b352",
-        secret_key="82D1C6F400C469D0E042A83DAD7E1FD7",
-        passphrase="Funding1!",
+        api_key=okx_api_key,
+        secret_key=okx_secret_key,
+        passphrase=okx_passphrase,
         testnet=True
     )
     
