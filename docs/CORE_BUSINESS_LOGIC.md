@@ -31,11 +31,11 @@ FundingTracker ───┘
 
 | Модуль | Публичные | Приватные | Всего |
 |--------|-----------|-----------|-------|
-| ExecutionEngine | 4 | 4 | 8 |
+| ExecutionEngine | 3 | 4 | 7 |
 | PositionCloser | 5 | 3 | 8 |
 | FundingTracker | 4 | 4 | 8 |
 | AppState | 16 | 0 | 16 |
-| **ИТОГО** | **29** | **11** | **40** |
+| **ИТОГО** | **28** | **11** | **39** |
 
 ---
 
@@ -49,9 +49,10 @@ FundingTracker ───┘
 | Режим | Метод | Описание |
 |-------|-------|----------|
 | Hit-the-bid | `hit_the_bid()` | Ждём пересечения стаканов (5 мин) |
-| Flash funding | `flash_funding()` | Быстрое открытие перед фандингом |
-| Stable spread | `stable_spread()` | Сохранение спреда между биржами |
+| Stable spread | `stable_spread()` | Быстрое открытие с сохранением спреда (замена Flash Funding) |
 | Market | (через `_open_with_limit_orders`) | Немедленное исполнение |
+
+> **Примечание:** `Flash Funding` режим был удалён и заменён на `Stable Spread` (см. REQUIREMENTS.md §3)
 
 ---
 
@@ -115,61 +116,7 @@ FUNCTION hit_the_bid(symbol, side1, quantity, leverage, funding_rate_bps):
 
 ---
 
-## `flash_funding(symbol, side1, quantity, leverage, funding_rate_bps) -> Optional[Tuple[Position, str]]`
-
-**Назначение:** Быстрое открытие перед funding payment без ожидания пересечения
-
-**Псевдокод:**
-```
-FUNCTION flash_funding(symbol, side1, quantity, leverage, funding_rate_bps):
-    
-    side2 = OPPOSITE(side1)
-    
-    # ═══════════════════════════════════════════
-    # 1. ПОЛУЧИТЬ ТЕКУЩИЕ ЦЕНЫ
-    # ═══════════════════════════════════════════
-    price1 = await exchange1.get_price_data(symbol)
-    price2 = await exchange2.get_price_data(symbol)
-    
-    # Execution prices (bid для SHORT, ask для LONG)
-    IF side1 == SHORT:
-        exec_price1 = price1.bid
-        exec_price2 = price2.ask
-    ELSE:
-        exec_price1 = price1.ask
-        exec_price2 = price2.bid
-    
-    # ═══════════════════════════════════════════
-    # 2. РАСЧЁТ PROFITABILITY
-    # ═══════════════════════════════════════════
-    spread_bps = calculate_spread_bps(exec_price2, exec_price1)
-    total_fees_bps = get_total_fees_bps(ex1, ex2, use_maker=False)  # Taker!
-    
-    net_profit_bps = -spread_bps - total_fees_bps + funding_rate_bps
-    
-    # ═══════════════════════════════════════════
-    # 3. ПОКАЗАТЬ АНАЛИЗ ПОЛЬЗОВАТЕЛЮ
-    # ═══════════════════════════════════════════
-    SHOW_ANALYSIS:
-        - Spread: X bps
-        - Fees (taker): Y bps  
-        - Funding rate: Z bps/hour
-        - Net profit: N bps
-        - PROFITABLE / NOT PROFITABLE
-    
-    # ═══════════════════════════════════════════
-    # 4. ЗАПРОСИТЬ ПОДТВЕРЖДЕНИЕ
-    # ═══════════════════════════════════════════
-    IF user_confirms:
-        RETURN await _open_with_limit_orders(...)
-    ELSE:
-        RETURN None
-```
-
-**Отличие от hit_the_bid:**
-- Не ждёт пересечения
-- Использует taker fees (market orders)
-- Показывает анализ сразу
+> **Примечание:** `Flash Funding` режим удалён из кода и документации. Его поведение заменено и улучшено в `stable_spread()` (см. REQUIREMENTS.md §3).
 
 ---
 
@@ -1012,10 +959,10 @@ async with _position_lock:
 ├─────────────────────────────────────────────┤
 │ Total files:             4                  │
 │ Total lines of code:     ~2000              │
-│ Total methods:           40                 │
+│ Total methods:           39                 │
 ├─────────────────────────────────────────────┤
-│ ExecutionEngine:         8 methods          │
-│   - Opening modes:       3 (hit/flash/stable)│
+│ ExecutionEngine:         7 methods          │
+│   - Opening modes:       2 (hit/stable)     │
 │   - Helper methods:      5                  │
 ├─────────────────────────────────────────────┤
 │ PositionCloser:          8 methods          │
