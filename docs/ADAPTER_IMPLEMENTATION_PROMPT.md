@@ -50,7 +50,7 @@ async def _api_get_mark_price(self, symbol: str) -> float:
     """Получить mark price для PnL"""
 ```
 
-### 3. TRADING API (6 методов)
+### 3. TRADING API (8 методов)
 ```python
 async def _api_open_position(
     self, symbol: str, side: PositionSide, quantity: float,
@@ -86,6 +86,38 @@ async def _api_set_leverage(self, symbol: str, leverage: int) -> bool:
     
 async def _api_set_margin_mode(self, mode: str) -> bool:
     """Установить режим маржи: ISOLATED или CROSS"""
+
+async def _api_set_stop_loss(
+    self, symbol: str, side: PositionSide, stop_price: float,
+    quantity: Optional[float]
+) -> Dict[str, Any]:
+    """
+    Установить Stop Loss ордер:
+    - LONG позиция → SELL stop order (цена падает → убыток)
+    - SHORT позиция → BUY stop order (цена растёт → убыток)
+    
+    Типы ордеров по биржам:
+    - Binance: STOP_MARKET с stopPrice, reduceOnly=True
+    - Bybit: Conditional order с triggerPrice
+    - KuCoin: stop='loss', stopPrice
+    - OKX: Algo order с ordType='trigger'
+    """
+
+async def _api_set_take_profit(
+    self, symbol: str, side: PositionSide, take_profit_price: float,
+    quantity: Optional[float]
+) -> Dict[str, Any]:
+    """
+    Установить Take Profit ордер:
+    - LONG позиция → SELL take profit (цена растёт → прибыль)
+    - SHORT позиция → BUY take profit (цена падает → прибыль)
+    
+    Типы ордеров по биржам:
+    - Binance: TAKE_PROFIT_MARKET с stopPrice, reduceOnly=True
+    - Bybit: Conditional order с triggerPrice
+    - KuCoin: stop='entry', stopPrice
+    - OKX: Algo order с ordType='trigger'
+    """
 ```
 
 ### 4. ACCOUNT API (4 метода)
@@ -357,7 +389,7 @@ MAKER_COMMISSION_BPS = {
 
 ## ✅ ЧЕКЛИСТ ПЕРЕД ЗАВЕРШЕНИЕМ:
 
-- [ ] Все 18 `_api_*` методов реализованы
+- [ ] Все 20 `_api_*` методов реализованы (включая set_stop_loss, set_take_profit)
 - [ ] Все 6 `_parse_*` методов реализованы
 - [ ] `_convert_symbol()` корректно конвертирует формат
 - [ ] Все исключения обёрнуты в RateLimitError/NetworkError/ExchangeError
@@ -406,7 +438,68 @@ MAKER_COMMISSION_BPS = {
 
 | Метрика | Ожидание |
 |---------|----------|
-| Размер файла | 400-650 строк |
-| Количество методов | ~25 |
+| Размер файла | 450-700 строк |
+| Количество методов | ~27 |
 | Бизнес-логика | 0% (всё в BaseExchange) |
 | Комментарии | Docstrings на английском |
+
+---
+
+## 🛑 ПРИМЕРЫ РЕАЛИЗАЦИИ SL/TP ПО БИРЖАМ:
+
+### Binance (STOP_MARKET / TAKE_PROFIT_MARKET):
+```python
+async def _api_set_stop_loss(self, symbol, side, stop_price, quantity):
+    order_side = 'SELL' if side == PositionSide.LONG else 'BUY'
+    params = {
+        'symbol': symbol,
+        'side': order_side,
+        'type': 'STOP_MARKET',
+        'stopPrice': stop_price,
+        'quantity': quantity,
+        'reduceOnly': True,
+        'workingType': 'MARK_PRICE'
+    }
+    return await self.client.fapiPrivate_post_order(params)
+```
+
+### Bybit (Conditional с triggerPrice):
+```python
+async def _api_set_stop_loss(self, symbol, side, stop_price, quantity):
+    order_side = 'sell' if side == PositionSide.LONG else 'buy'
+    params = {
+        'triggerPrice': stop_price,
+        'triggerBy': 'MarkPrice',
+        'reduceOnly': True,
+        'category': 'linear',
+    }
+    return await self.client.create_order(ccxt_symbol, 'market', order_side, quantity, params=params)
+```
+
+### KuCoin (stop='loss'):
+```python
+async def _api_set_stop_loss(self, symbol, side, stop_price, quantity):
+    order_side = 'sell' if side == PositionSide.LONG else 'buy'
+    params = {
+        'stop': 'loss',
+        'stopPrice': stop_price,
+        'stopPriceType': 'MP',
+        'reduceOnly': True,
+    }
+    return await self.client.create_order(ccxt_symbol, 'market', order_side, contracts, params=params)
+```
+
+### OKX (Algo order):
+```python
+async def _api_set_stop_loss(self, symbol, side, stop_price, quantity):
+    order_side = 'sell' if side == PositionSide.LONG else 'buy'
+    params = {
+        'stopLossPrice': stop_price,
+        'triggerPrice': stop_price,
+        'ordType': 'trigger',
+        'reduceOnly': True,
+    }
+    return await self.client.create_order(ccxt_symbol, 'market', order_side, quantity, params=params)
+```
+
+> **Важно:** Если биржа не поддерживает отдельные SL/TP ордера, используй их TP/SL при открытии позиции или OCO orders.
