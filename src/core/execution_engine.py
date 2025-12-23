@@ -1,10 +1,11 @@
 """
 Execution Engine - управление режимами открытия позиций.
 
-Поддерживает 3 режима:
+Поддерживает 2 режима открытия:
 1. Hit-the-bid: Ожидание пересечения стаканов (5 минут)
-2. Flash funding: Быстрое открытие перед funding payment
-3. Market: Немедленное исполнение по рынку
+2. Stable spread: Быстрое открытие с сохранением спреда (замена Flash Funding)
+
+NOTE: Flash Funding режим УДАЛЁН - заменён на Stable Spread (см. REQUIREMENTS.md §3)
 """
 
 import asyncio
@@ -237,72 +238,8 @@ Open position anyway? [Y/n]: """
         # Пока возвращаем None (отмена)
         return None
     
-    async def flash_funding(
-        self,
-        symbol: str,
-        side1: PositionSide,
-        quantity: float,
-        leverage: int,
-        funding_rate_bps: float
-    ) -> Optional[Tuple[Position, str]]:
-        """
-        Режим 2: Flash funding - быстрое открытие перед funding payment
-        
-        Получаем 2 стакана, считаем profitability, спрашиваем подтверждение
-        """
-        log.info(f"Starting FLASH FUNDING mode for {symbol}")
-        
-        side2 = PositionSide.LONG if side1 == PositionSide.SHORT else PositionSide.SHORT
-        
-        # Получаем стаканы
-        price1 = await self.exchange1.get_price_data(symbol)
-        price2 = await self.exchange2.get_price_data(symbol)
-        
-        # Берем execution prices
-        if side1 == PositionSide.SHORT:
-            exec_price1 = price1.bid
-            exec_price2 = price2.ask
-        else:
-            exec_price1 = price1.ask
-            exec_price2 = price2.bid
-        
-        # Spread
-        spread_bps = calculate_spread_bps(exec_price2, exec_price1)
-        
-        # Fees
-        from ..exchanges.enums import get_total_fees_bps
-        total_fees_bps = get_total_fees_bps(
-            Exchange(self.exchange1.get_name()),
-            Exchange(self.exchange2.get_name()),
-            use_maker=False  # Market orders
-        )
-        
-        # Net profit
-        net_profit_bps = -spread_bps - total_fees_bps + funding_rate_bps
-        
-        message = f"""
-╔══════════════════════════════════════════════════════════
-║ FLASH FUNDING ANALYSIS
-╠══════════════════════════════════════════════════════════
-║ Spread: {spread_bps:.2f} bps
-║ Fees (taker): {total_fees_bps:.2f} bps
-║ Funding rate: {funding_rate_bps:.2f} bps/hour
-╠══════════════════════════════════════════════════════════
-║ Net profit: {net_profit_bps:.2f} bps
-║ {'✅ PROFITABLE' if net_profit_bps > 0 else '❌ NOT PROFITABLE'}
-╠══════════════════════════════════════════════════════════
-║ Execution prices:
-║   {self.exchange1.get_name()}: {exec_price1:.6f}
-║   {self.exchange2.get_name()}: {exec_price2:.6f}
-╚══════════════════════════════════════════════════════════
-
-Confirm position? [Y/n]: """
-        
-        log.info(message)
-        
-        # TODO: В CLI добавить подтверждение
-        # Пока возвращаем None
-        return None
+    # NOTE: flash_funding() был УДАЛЁН - заменён на stable_spread()
+    # См. REQUIREMENTS.md §3 "Stable Spread Mode (замена Flash Funding)"
     
     async def _open_with_limit_orders(
         self,

@@ -102,7 +102,7 @@ class Position:
     liquidation_price_ex2: float  # Liquidation price on exchange2
     
     # Execution mode (with defaults)
-    execution_mode: str = "hit_the_bid"  # "hit_the_bid", "flash_funding", "stable_spread"
+    execution_mode: str = "hit_the_bid"  # "hit_the_bid", "stable_spread"
     
     # Stable Spread Mode (only if execution_mode = "stable_spread")
     entry_spread_abs: Optional[float] = None  # Absolute spread at entry (e.g., 0.12 for 1.00 vs 1.12)

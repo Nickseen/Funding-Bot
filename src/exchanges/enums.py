@@ -67,8 +67,7 @@ class OrderStatus(str, Enum):
 class ExecutionMode(str, Enum):
     """Execution modes for opening positions"""
     HIT_THE_BID = "hit_the_bid"  # Wait for bid/ask intersection (5 min, ±2 bps)
-    FLASH_FUNDING = "flash_funding"  # Quick execution before funding
-    STABLE_SPREAD = "stable_spread"  # Open/close with preserved spread (high OI pairs)
+    STABLE_SPREAD = "stable_spread"  # Open/close with preserved spread (replaces Flash Funding)
 
 
 class RiskLevel(str, Enum):
@@ -150,7 +149,6 @@ DEFAULT_TAKE_PROFIT_PERCENT = 20  # % distance to liquidation
 # Timeouts
 ORDER_TIMEOUT_SECONDS = 5  # Timeout for limit orders
 INTERSECTION_SEARCH_TIMEOUT_SECONDS = 300  # 5 minutes
-FLASH_FUNDING_WINDOW_MINUTES = 10  # Execute within 10 min of funding
 
 # WebSocket
 WS_RECONNECT_DELAY_SECONDS = 5

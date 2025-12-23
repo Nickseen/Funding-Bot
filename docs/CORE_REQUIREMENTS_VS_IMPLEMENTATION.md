@@ -8,11 +8,13 @@
 
 | Модуль | Требования | Реализовано | Статус |
 |--------|------------|-------------|--------|
-| ExecutionEngine | 3 режима открытия | 3 реализованы | ✅ DONE |
+| ExecutionEngine | 2 режима открытия | 2 реализованы | ✅ DONE |
 | PositionCloser | 5 режимов закрытия | 5 реализованы | ✅ DONE |
 | FundingTracker | Auto-close при -spread | Полностью | ✅ DONE |
 | AppState | RAM + asyncio locks | Полностью | ✅ DONE |
 | EmergencyHandler | 3-sec limit → market | Интегрировано в PositionCloser | ✅ DONE |
+
+> **⚠️ NOTE:** Flash Funding режим был УДАЛЁН — заменён на Stable Spread (см. REQUIREMENTS.md §3)
 
 ---
 
@@ -81,27 +83,12 @@ async def stable_spread(self, ...):
 ```
 **Вердикт:** ✅ Полное соответствие
 
----
-
-### 1.3 Flash Funding Mode (Market Orders)
-
-| Требование | Источник | Реализация | Статус |
-|------------|----------|------------|--------|
-| Мгновенное открытие маркетом | §Menu | `flash_funding()` использует `OrderType.MARKET` | ✅ |
-| Taker fees | §Комиссии | Маркет = taker, учитывается | ✅ |
-
-**Фактическая реализация (execution_engine.py:161-200):**
-```python
-async def flash_funding(self, ...):
-    # Маркет ордера = мгновенное исполнение
-    order_type = OrderType.MARKET
-    await self._execute_opening_orders(order_type=order_type, ...)
-```
-**Вердикт:** ✅ Полное соответствие
+> **📌 Flash Funding был УДАЛЁН из кода** — заменён на Stable Spread Mode  
+> См. execution_engine.py:241 и REQUIREMENTS.md §3
 
 ---
 
-### 1.4 SL/TP при открытии
+### 1.3 SL/TP при открытии
 
 | Требование | Источник | Реализация | Статус |
 |------------|----------|------------|--------|
@@ -497,7 +484,6 @@ class AppState:
 │                                                                  │
 │  ExecutionEngine                                                 │
 │  ├─ hit_the_bid()          ████████████████████ 100%            │
-│  ├─ flash_funding()        ████████████████████ 100%            │
 │  ├─ stable_spread()        ████████████████████ 100%            │
 │  └─ SL/TP integration      ████████████████████ 100%            │
 │                                                                  │
@@ -552,8 +538,9 @@ class AppState:
 
 | Дата | Изменение |
 |------|-----------|
-| 2025-01-XX | Создан документ |
-| 2025-01-XX | SL/TP интегрирован в _open_with_limit_orders |
+| 2025-12-23 | Создан документ |
+| 2025-12-23 | SL/TP интегрирован в _open_with_limit_orders |
+| 2025-12-23 | flash_funding удалён из кода — заменён на stable_spread |
 
 ---
 

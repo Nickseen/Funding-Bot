@@ -112,7 +112,7 @@ Net profit: 160 - 13 = +147 bps ✅
 **Ожидаемый результат:**
 - ✅ Анализ показывает профитность
 - ✅ После подтверждения → позиция открыта
-- ✅ Position.execution_mode = "flash_funding"
+- ✅ Position.execution_mode = "stable_spread"
 
 ---
 
