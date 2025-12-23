@@ -60,18 +60,22 @@ bps = % × 100
 Открыть позицию? [Y/n]
 ```
 
-### 3. Флеш фандинг (Flash Funding)
-**Когда использовать:** До funding payment остаются считанные минуты, нет времени ждать пересечение.
+### 3. Stable Spread Mode (замена Flash Funding)
+**Когда использовать:** Нет времени ждать пересечение, нужно быстро открыть позицию.
 
 **Логика:**
 1. Получить текущие стаканы с обеих бирж
-2. Рассчитать спред между bid/ask
-3. Вычесть комиссии (taker, так как маркет ордера)
-4. Добавить funding rate
-5. Показать профитность и спросить подтверждение
+2. Рассчитать и **СОХРАНИТЬ спред** между биржами
+3. Открыть позиции LIMIT ордерами по best bid/ask (**maker fees**!)
+4. Позиция закрывается **ТОЛЬКО** когда спред совпадает с entry_spread
 
-**Условие отмены:**
-Если `спред_потеря > funding_прибыль` → не открывать позицию
+**Преимущества перед старым Flash Funding:**
+- Maker fees вместо taker (дешевле)
+- Сохранение спреда (умное закрытие)
+- Работает для пар с высоким OI (стабильный спред)
+
+**Условие закрытия:**
+Позиция закрывается только через "Закрыть с сохранением спреда" режим.
 
 ### 4. Финансовый анализ
 **Не PnL, а текущие балансы!**
@@ -192,8 +196,8 @@ funding_info = await exchange.get_funding_rate("JUPUSDT")
 ║ Execution Mode:
 ╠══════════════════════════════════════════════════════════
 ║ 1. Hit-the-bid (Wait for intersection, 5 min timeout)
-║ 2. Flash funding (Quick execution before funding)
-║ 3. Market order (Instant execution)
+║ 2. Stable Spread (Quick open, close when spread matches)
+║ 3. Market order (Instant execution, taker fees)
 ╚══════════════════════════════════════════════════════════
 Select mode [1-3]:
 ```
@@ -236,7 +240,7 @@ Select position to close [1-2]:
 ║ Close Mode:
 ╠══════════════════════════════════════════════════════════
 ║ 1. Hit-the-bid (Wait for better price, 5 min)
-║ 2. Flash close (Quick execution)
+║ 2. Stable Spread close (Wait for spread to match entry)
 ║ 3. Market order (Instant)
 ╚══════════════════════════════════════════════════════════
 Select mode [1-3]:
@@ -426,7 +430,7 @@ Funding-Bot/
 │   │   └── enums.py        # Exchange enum, комиссии в bps
 │   ├── core/               # Бизнес-логика
 │   │   ├── state.py        # AppState с asyncio locks (RAM)
-│   │   ├── execution_engine.py  # Hit-the-bid, flash funding
+│   │   ├── execution_engine.py  # Hit-the-bid, stable spread
 │   │   ├── emergency_handler.py # 3-sec timeout, market fallback
 │   │   ├── orderbook_monitor.py # WebSocket мониторинг пересечений
 │   │   └── funding_tracker.py   # Автозакрытие перед фандингом
@@ -873,26 +877,21 @@ async def funding_monitoring_loop():
 - [x] AppState RAM management
 - [x] Calculation utilities (16+ functions including calculate_spread_bps)
 - [x] Validators, formatters, logger
-- [x] ExecutionEngine (hit-the-bid, flash funding)
+- [x] ExecutionEngine (hit-the-bid, stable spread)
 - [x] **FundingTracker** - Auto-close on profitability loss
 - [x] Tests (unit tests for calculations)
-- [x] Validators, formatters, logger
-- [x] ExecutionEngine (hit-the-bid, flash funding)
-- [x] Tests (unit tests for calculations)
 
-### Phase 2 🚧 - First Exchange Integration (Current)
-- [ ] Binance adapter implementation
-  - [ ] Authentication & connection
-  - [ ] Market data (orderbook, ticker, **funding with next_funding_time**)
-  - [ ] Position management (open, close, modify)
-  - [ ] Risk management (SL/TP, liquidation price from API)
-  - [ ] Balance queries for profitability checks
-- [ ] Emergency handler (3-sec timeout)
-- [ ] OrderBook monitor (WebSocket)
+### Phase 2 ✅ - Exchange Adapters & CLI
+- [x] Binance adapter implementation
+- [x] Bybit adapter implementation
+- [x] OKX adapter implementation
+- [x] KuCoin adapter implementation
+- [x] CLI Interface (937 lines)
+- [x] Integration Tests
 - [ ] Integrate FundingTracker into main event loop
-- [ ] Testing on Binance testnet
+- [ ] Testing on testnets
 
-### Phase 3 - Second Exchange & Features
+### Phase 3 🚧 - Testing & Polish (Current)
 - [ ] Second exchange adapter (KuCoin/Bybit) with funding support
 - [ ] CLI menu interface
 - [ ] Financial analysis feature (balance queries, not PnL calc)

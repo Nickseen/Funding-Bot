@@ -38,31 +38,36 @@ Delta Neutral Bot
 ### Project Structure
 
 ```
-delta-neutral-bot/
+Funding-Bot/
 ├── src/
-│   ├── exchanges/          # Exchange adapters
-│   │   ├── base.py         # Abstract base class
-│   │   ├── binance.py      # Binance implementation
-│   │   ├── types.py        # Data structures
-│   │   └── enums.py        # Constants & enums
-│   ├── core/               # Core bot logic
-│   │   ├── state.py        # RAM state management
-│   │   ├── bot.py          # Main bot class
-│   │   ├── price_monitor.py
-│   │   ├── risk_monitor.py
-│   │   └── recovery.py
-│   ├── utils/              # Utilities
-│   │   ├── calculations.py
-│   │   ├── validators.py
-│   │   ├── formatters.py
-│   │   ├── logger.py
-│   │   └── constants.py
-│   └── cli/                # CLI interface
-├── config/                 # Configuration
-├── tests/                  # Tests
-├── logs/                   # Log files (auto-generated)
+│   ├── exchanges/              # Exchange adapters
+│   │   ├── base.py             # Abstract base class (Template Method Pattern)
+│   │   ├── binance.py          # Binance implementation
+│   │   ├── bybit.py            # Bybit implementation
+│   │   ├── kucoin.py           # KuCoin implementation
+│   │   ├── okx.py              # OKX implementation
+│   │   ├── types.py            # Data structures (Position, OrderBook, etc.)
+│   │   └── enums.py            # Constants & enums + fees for 13 exchanges
+│   ├── core/                   # Core bot logic
+│   │   ├── state.py            # RAM state management (async, thread-safe)
+│   │   ├── execution_engine.py # Position opening (3 modes)
+│   │   ├── funding_tracker.py  # Auto-close on negative spread
+│   │   └── position_closer.py  # Universal close (5 modes)
+│   ├── utils/                  # Utilities
+│   │   ├── calculations.py     # Pure calculation functions
+│   │   ├── validators.py       # Data validation
+│   │   ├── formatters.py       # Output formatting
+│   │   ├── logger.py           # Loguru setup
+│   │   └── constants.py        # Constants
+│   └── cli/                    # CLI interface
+├── config/                     # Configuration
+├── tests/                      # Tests
+├── docs/                       # Documentation
+│   └── TEST_CASES.md           # Test cases
+├── logs/                       # Log files (auto-generated)
 ├── requirements.txt
-└── .env                    # Your API keys (create from .env.example)
+├── REQUIREMENTS.md             # Technical specification (AI context)
+└── .env                        # Your API keys (create from .env.example)
 ```
 
 ---
@@ -225,11 +230,13 @@ pytest tests/unit/test_calculations.py
 
 | Exchange | Status | Taker Fee | Maker Fee |
 |----------|--------|-----------|-----------|
-| Binance | ✅ Active | 0.05% | 0.02% |
-| KuCoin | 🚧 Planned | 0.06% | 0.02% |
-| OKX | 🚧 Planned | 0.10% | 0.08% |
-| Bybit | 🚧 Planned | 0.10% | 0.01% |
+| Binance | ✅ Implemented | 0.05% | 0.02% |
+| Bybit | ✅ Implemented | 0.055% | 0.02% |
+| KuCoin | ✅ Implemented | 0.06% | 0.02% |
+| OKX | ✅ Implemented | 0.05% | 0.02% |
 | Hyperliquid | 🚧 Planned | 0.045% | 0.00% |
+| Lighter | 🚧 Planned | 0.00% | 0.00% |
+| Aster | 🚧 Planned | 0.04% | 0.02% |
 
 ---
 
@@ -255,33 +262,42 @@ pytest tests/unit/test_calculations.py
 
 ## 🛠️ Development Roadmap
 
-### Phase 1: Foundation (Weeks 1-2) ✅
+### Phase 1: Foundation ✅ COMPLETED
 - [x] Project structure
-- [x] Types & enums
-- [x] Abstract Exchange class
-- [x] AppState (RAM management)
+- [x] Types & enums (9 dataclasses, 7 enums)
+- [x] Abstract Exchange class (Template Method Pattern)
+- [x] AppState (async, thread-safe RAM management)
+- [x] ExecutionEngine (3 modes: hit-the-bid, stable-spread, market)
+- [x] PositionCloser (5 modes)
+- [x] FundingTracker (auto-close on negative spread)
 - [x] Utilities (calculations, validators, formatters)
-- [x] Logging setup
+- [x] Logging setup (loguru)
 
-### Phase 2: Core Bot (Weeks 3-6) 🚧
-- [ ] Binance adapter implementation
+### Phase 2: Exchange Adapters 🚧 IN PROGRESS
+- [x] Binance adapter (basic)
+- [x] Bybit adapter (basic)
+- [x] KuCoin adapter (basic)
+- [x] OKX adapter (basic)
 - [ ] WebSocket price monitoring
-- [ ] Intersection detector
+- [ ] Full testing on testnet
+
+### Phase 3: Core Trading Logic
+- [ ] Intersection detector (bid/ask crossing)
 - [ ] Limit order manager
-- [ ] Risk monitor
+- [ ] Risk monitor (SL/TP)
 - [ ] Emergency close system
 
-### Phase 3: State & Recovery (Week 7)
+### Phase 4: State & Recovery
 - [ ] Position manager
-- [ ] Recovery system
+- [ ] Recovery system (restore from exchanges)
 - [ ] Financial analytics
 
-### Phase 4: Interface (Week 8-9)
+### Phase 5: Interface
 - [ ] CLI commands
 - [ ] Interactive menu
 - [ ] Status displays
 
-### Phase 5: Testing (Weeks 10-12)
+### Phase 6: Testing & Production
 - [ ] Unit tests
 - [ ] Integration tests
 - [ ] Stress tests

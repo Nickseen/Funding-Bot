@@ -11,7 +11,7 @@ def validate_symbol(symbol: str) -> bool:
     Validate trading symbol format
     
     Args:
-        symbol: Trading pair (e.g., "BTCUSDT")
+        symbol: Trading pair (e.g., "BTCUSDT", "BTC/USDT:USDT")
     
     Returns:
         True if valid
@@ -19,8 +19,10 @@ def validate_symbol(symbol: str) -> bool:
     if not symbol or len(symbol) < 3:
         return False
     
-    # Must contain only uppercase letters and numbers
-    return symbol.isalnum() and symbol.isupper()
+    # Allow various formats: BTCUSDT, BTC/USDT, BTC/USDT:USDT
+    # Remove special characters for check
+    clean_symbol = symbol.replace("/", "").replace(":", "").replace("-", "")
+    return clean_symbol.isalnum()
 
 
 def validate_leverage(leverage: int, min_leverage: int = 1, max_leverage: int = 125) -> bool:
