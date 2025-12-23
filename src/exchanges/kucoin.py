@@ -348,6 +348,112 @@ class KuCoinExchange(BaseExchange):
         ccxt_symbol = self._convert_symbol(symbol)
         return await self.client.cancel_order(order_id, ccxt_symbol)
     
+    async def _api_set_stop_loss(
+        self,
+        symbol: str,
+        side: 'PositionSide',
+        stop_price: float,
+        quantity: Optional[float]
+    ) -> Dict[str, Any]:
+        """
+        KuCoin: Create stop order using stop type
+        
+        KuCoin uses 'stop' parameter to create conditional orders
+        """
+        try:
+            from .enums import PositionSide
+            ccxt_symbol = self._convert_symbol(symbol)
+            order_side = 'sell' if side == PositionSide.LONG else 'buy'
+            
+            # If quantity not provided, get current position
+            if quantity is None:
+                positions = await self.client.fetch_positions([ccxt_symbol])
+                position = next(
+                    (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
+                    None
+                )
+                if position:
+                    quantity = float(position.get('contracts', 0))
+                else:
+                    raise ExchangeError(f"No position found for {symbol}")
+            
+            # Convert to contracts
+            market = self.client.market(ccxt_symbol)
+            contract_size = market.get('contractSize', 1)
+            contracts = int(quantity / contract_size) if contract_size else int(quantity)
+            if contracts < 1:
+                contracts = 1
+            
+            # KuCoin stop order
+            params = {
+                'stop': 'loss',  # 'loss' for stop loss
+                'stopPrice': stop_price,
+                'stopPriceType': 'MP',  # Mark price
+                'reduceOnly': True,
+            }
+            
+            return await self.client.create_order(
+                symbol=ccxt_symbol,
+                type='market',
+                side=order_side,
+                amount=contracts,
+                params=params
+            )
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitError(str(e))
+    
+    async def _api_set_take_profit(
+        self,
+        symbol: str,
+        side: 'PositionSide',
+        take_profit_price: float,
+        quantity: Optional[float]
+    ) -> Dict[str, Any]:
+        """
+        KuCoin: Create take profit order using stop type
+        """
+        try:
+            from .enums import PositionSide
+            ccxt_symbol = self._convert_symbol(symbol)
+            order_side = 'sell' if side == PositionSide.LONG else 'buy'
+            
+            # If quantity not provided, get current position
+            if quantity is None:
+                positions = await self.client.fetch_positions([ccxt_symbol])
+                position = next(
+                    (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
+                    None
+                )
+                if position:
+                    quantity = float(position.get('contracts', 0))
+                else:
+                    raise ExchangeError(f"No position found for {symbol}")
+            
+            # Convert to contracts
+            market = self.client.market(ccxt_symbol)
+            contract_size = market.get('contractSize', 1)
+            contracts = int(quantity / contract_size) if contract_size else int(quantity)
+            if contracts < 1:
+                contracts = 1
+            
+            # KuCoin stop order for take profit
+            params = {
+                'stop': 'entry',  # 'entry' works as take profit
+                'stopPrice': take_profit_price,
+                'stopPriceType': 'MP',  # Mark price
+                'reduceOnly': True,
+            }
+            
+            return await self.client.create_order(
+                symbol=ccxt_symbol,
+                type='market',
+                side=order_side,
+                amount=contracts,
+                params=params
+            )
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitError(str(e))
+    
     async def _api_get_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
         """Get order details from KuCoin Futures"""
         ccxt_symbol = self._convert_symbol(symbol)
