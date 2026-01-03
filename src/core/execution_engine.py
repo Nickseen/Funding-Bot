@@ -376,13 +376,14 @@ Open position anyway? [Y/n]: """
         1. Получить текущие стаканы обеих бирж
         2. Вычислить спред между биржами (сохранить в памяти)
         3. Открыть позиции LIMIT ордерами по best bid/ask (НЕ market!)
-        4. Выставить SL/TP как обычно (±80% до ликвидации)
-        5. При закрытии - использовать тот же спред (закрыть только через close_stable_spread)
+        4. Рассчитать и установить SL/TP (±80% до ликвидации) для защиты
+        5. При закрытии - рекомендуется использовать close_stable_spread для сохранения спреда
         
         Преимущества:
         - Не нужно ждать пересечения
         - Быстрое открытие
         - Работает при высоком OI (спред стабилен)
+        - SL/TP защищают от ликвидации
         
         Args:
             symbol: Trading pair
@@ -460,20 +461,85 @@ Open position? [Y/n]: """
         log.info(message)
         
         # TODO: В CLI добавить подтверждение
-        # Пока возвращаем готовую позицию
+        # Пока открываем позицию
         
-        # 6. Создать позицию с сохраненным спредом
+        # 6. Открыть позиции на обеих биржах (параллельно)
+        from ..exchanges.enums import OrderType
+        
+        log.info(f"Opening stable spread position...")
+        log.info(f"  {self.exchange1.get_name()}: {side1.value} {quantity} @ {exec_price1}")
+        log.info(f"  {self.exchange2.get_name()}: {side2.value} {quantity} @ {exec_price2}")
+        
+        pos1, pos2 = await asyncio.gather(
+            self.exchange1.open_position(
+                symbol=symbol,
+                side=side1,
+                quantity=quantity,
+                leverage=leverage,
+                order_type=OrderType.LIMIT,
+                price=exec_price1
+            ),
+            self.exchange2.open_position(
+                symbol=symbol,
+                side=side2,
+                quantity=quantity,
+                leverage=leverage,
+                order_type=OrderType.LIMIT,
+                price=exec_price2
+            )
+        )
+        
+        log.success(f"Positions opened on both exchanges")
+        
+        # 7. Рассчитать liquidation prices
+        liq_price1 = calculate_liquidation_price(exec_price1, leverage, side1)
+        liq_price2 = calculate_liquidation_price(exec_price2, leverage, side2)
+        
+        log.info(f"Liquidation prices: {self.exchange1.get_name()}={liq_price1:.4f}, {self.exchange2.get_name()}={liq_price2:.4f}")
+        
+        # 8. Рассчитать SL/TP (80% до ликвидации)
+        sl1, tp1 = calculate_stop_loss_take_profit(
+            entry_price=exec_price1,
+            liquidation_price=liq_price1,
+            side=side1,
+            distance_percent=20.0
+        )
+        sl2, tp2 = calculate_stop_loss_take_profit(
+            entry_price=exec_price2,
+            liquidation_price=liq_price2,
+            side=side2,
+            distance_percent=20.0
+        )
+        
+        log.info(f"SL/TP calculated:")
+        log.info(f"  {self.exchange1.get_name()}: SL={sl1:.4f}, TP={tp1:.4f}")
+        log.info(f"  {self.exchange2.get_name()}: SL={sl2:.4f}, TP={tp2:.4f}")
+        
+        # 9. Установить SL/TP ордера (параллельно)
+        try:
+            await asyncio.gather(
+                self.exchange1.set_stop_loss(symbol, side1, sl1, quantity),
+                self.exchange1.set_take_profit(symbol, side1, tp1, quantity),
+                self.exchange2.set_stop_loss(symbol, side2, sl2, quantity),
+                self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
+            )
+            log.success(f"SL/TP orders placed on both exchanges")
+        except Exception as e:
+            log.warning(f"Failed to set SL/TP orders: {e}")
+            # Продолжаем даже если SL/TP не установились
+        
+        # 10. Создать позицию с сохраненным спредом
         position = Position(
             id=f"pos_stable_{symbol}_{int(asyncio.get_event_loop().time())}",
             pair=symbol,
             exchange1=self.exchange1.get_name(),
-            exchange1_pos_id="pending",
+            exchange1_pos_id=getattr(pos1, 'id', 'unknown'),
             exchange1_side=side1.value,
             exchange1_entry_price=exec_price1,
             exchange1_current_price=exec_price1,
             exchange1_leverage=leverage,
             exchange2=self.exchange2.get_name(),
-            exchange2_pos_id="pending",
+            exchange2_pos_id=getattr(pos2, 'id', 'unknown'),
             exchange2_side=side2.value,
             exchange2_entry_price=exec_price2,
             exchange2_current_price=exec_price2,
@@ -483,10 +549,10 @@ Open position? [Y/n]: """
             execution_mode="stable_spread",
             entry_spread_abs=entry_spread_abs,
             entry_spread_bps=entry_spread_bps,
-            stop_loss_price=0.0,  # SL/TP not used in stable_spread mode (close via close_stable_spread)
-            take_profit_price=0.0,
-            liquidation_price_ex1=calculate_liquidation_price(exec_price1, leverage, side1),
-            liquidation_price_ex2=calculate_liquidation_price(exec_price2, leverage, side2),
+            stop_loss_price=sl1,  # SL/TP теперь используются для защиты
+            take_profit_price=tp1,
+            liquidation_price_ex1=liq_price1,
+            liquidation_price_ex2=liq_price2,
         )
         
         return (position, message)
