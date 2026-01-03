@@ -95,18 +95,18 @@ class Position:
     quantity: float  # Amount in tokens
     entry_time: float  # Unix timestamp
     
-    # Execution mode
-    execution_mode: str = "hit_the_bid"  # "hit_the_bid", "flash_funding", "stable_spread"
-    
-    # Stable Spread Mode (only if execution_mode = "stable_spread")
-    entry_spread_abs: Optional[float] = None  # Absolute spread at entry (e.g., 0.12 for 1.00 vs 1.12)
-    entry_spread_bps: Optional[float] = None  # Spread in basis points at entry
-    
-    # Risk management
+    # Risk management (required)
     stop_loss_price: float  # ±20% to liquidation
     take_profit_price: float  # ±20% to liquidation
     liquidation_price_ex1: float  # Liquidation price on exchange1
     liquidation_price_ex2: float  # Liquidation price on exchange2
+    
+    # Execution mode (with defaults)
+    execution_mode: str = "hit_the_bid"  # "hit_the_bid", "stable_spread"
+    
+    # Stable Spread Mode (only if execution_mode = "stable_spread")
+    entry_spread_abs: Optional[float] = None  # Absolute spread at entry (e.g., 0.12 for 1.00 vs 1.12)
+    entry_spread_bps: Optional[float] = None  # Spread in basis points at entry
     
     # Status
     status: str = "OPEN"  # OPEN, CLOSING, CLOSED

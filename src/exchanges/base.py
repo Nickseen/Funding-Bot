@@ -373,6 +373,80 @@ class BaseExchange(ABC):
             log.error(f"{self.get_name()}: Failed to set margin mode: {e}")
             raise ExchangeError(f"Failed to set margin mode: {e}")
     
+    async def set_stop_loss(
+        self,
+        symbol: str,
+        side: PositionSide,
+        stop_price: float,
+        quantity: Optional[float] = None
+    ) -> Order:
+        """
+        Set stop loss for position
+        
+        Args:
+            symbol: Trading pair
+            side: Position side (LONG/SHORT) - SL order will be opposite
+            stop_price: Trigger price for stop loss
+            quantity: Amount (if None, closes entire position)
+        
+        Returns:
+            Order object for the SL order
+        """
+        if not validate_symbol(symbol):
+            raise ValueError(f"Invalid symbol: {symbol}")
+        if not validate_price(stop_price):
+            raise ValueError(f"Invalid stop price: {stop_price}")
+        
+        log.info(f"{self.get_name()}: Setting SL for {symbol} @ {stop_price}")
+        
+        try:
+            order_data = await self._api_set_stop_loss(symbol, side, stop_price, quantity)
+            order = self._parse_order(order_data)
+            log.success(f"{self.get_name()}: Stop Loss set @ {stop_price}")
+            return order
+        except ExchangeError:
+            raise
+        except Exception as e:
+            log.error(f"{self.get_name()}: Failed to set stop loss: {e}")
+            raise ExchangeError(f"Failed to set stop loss: {e}")
+    
+    async def set_take_profit(
+        self,
+        symbol: str,
+        side: PositionSide,
+        take_profit_price: float,
+        quantity: Optional[float] = None
+    ) -> Order:
+        """
+        Set take profit for position
+        
+        Args:
+            symbol: Trading pair
+            side: Position side (LONG/SHORT) - TP order will be opposite
+            take_profit_price: Trigger price for take profit
+            quantity: Amount (if None, closes entire position)
+        
+        Returns:
+            Order object for the TP order
+        """
+        if not validate_symbol(symbol):
+            raise ValueError(f"Invalid symbol: {symbol}")
+        if not validate_price(take_profit_price):
+            raise ValueError(f"Invalid take profit price: {take_profit_price}")
+        
+        log.info(f"{self.get_name()}: Setting TP for {symbol} @ {take_profit_price}")
+        
+        try:
+            order_data = await self._api_set_take_profit(symbol, side, take_profit_price, quantity)
+            order = self._parse_order(order_data)
+            log.success(f"{self.get_name()}: Take Profit set @ {take_profit_price}")
+            return order
+        except ExchangeError:
+            raise
+        except Exception as e:
+            log.error(f"{self.get_name()}: Failed to set take profit: {e}")
+            raise ExchangeError(f"Failed to set take profit: {e}")
+    
     # ============================================
     # ACCOUNT & POSITIONS - PUBLIC METHODS
     # ============================================
@@ -547,6 +621,42 @@ class BaseExchange(ABC):
     @abstractmethod
     async def _api_set_margin_mode(self, mode: str) -> bool:
         """API call to set margin mode"""
+        pass
+    
+    @abstractmethod
+    async def _api_set_stop_loss(
+        self,
+        symbol: str,
+        side: PositionSide,
+        stop_price: float,
+        quantity: Optional[float]
+    ) -> Dict[str, Any]:
+        """
+        API call to set stop loss order
+        
+        Must create a STOP_MARKET order that triggers at stop_price.
+        Order side should be opposite to position side:
+        - LONG position -> SELL stop order
+        - SHORT position -> BUY stop order
+        """
+        pass
+    
+    @abstractmethod
+    async def _api_set_take_profit(
+        self,
+        symbol: str,
+        side: PositionSide,
+        take_profit_price: float,
+        quantity: Optional[float]
+    ) -> Dict[str, Any]:
+        """
+        API call to set take profit order
+        
+        Must create a TAKE_PROFIT_MARKET order that triggers at take_profit_price.
+        Order side should be opposite to position side:
+        - LONG position -> SELL take profit order
+        - SHORT position -> BUY take profit order
+        """
         pass
     
     @abstractmethod
