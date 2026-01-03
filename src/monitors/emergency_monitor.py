@@ -156,8 +156,8 @@ class EmergencyMonitor:
         """
         try:
             # Получить текущее состояние позиций с бирж
-            ex1_position = await self.exchange1.get_position(position.symbol)
-            ex2_position = await self.exchange2.get_position(position.symbol)
+            ex1_position = await self.exchange1.get_position(position.pair)
+            ex2_position = await self.exchange2.get_position(position.pair)
             
             # Проверить есть ли позиции (None = закрыта)
             ex1_closed = ex1_position is None or ex1_position.size == 0

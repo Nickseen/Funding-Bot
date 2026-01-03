@@ -52,17 +52,30 @@ def sample_position():
     """Sample position for testing"""
     return Position(
         id="test-pos-1",
-        symbol="BTCUSDT",
-        pair="BTC-USDT",
+        pair="BTCUSDT",
         exchange1="binance",
         exchange2="bybit",
+        exchange1_pos_id="pos1",
+        exchange2_pos_id="pos2",
         exchange1_side="LONG",
         exchange2_side="SHORT",
-        leverage=10,
+        exchange1_leverage=10,
+        exchange2_leverage=10,
+        exchange1_entry_price=50000.0,
+        exchange2_entry_price=50010.0,
+        exchange1_current_price=50000.0,
+        exchange2_current_price=50010.0,
         quantity=0.1,
-        status=PositionStatus.OPEN,
+        entry_time=datetime.utcnow().timestamp(),
+        stop_loss_price=48000.0,
+        take_profit_price=52000.0,
+        liquidation_price_ex1=47000.0,
+        liquidation_price_ex2=53000.0,
+        status="OPEN",
         execution_mode="hit_the_bid",
-        opened_at=datetime.utcnow()
+        initial_capital=1000.0,
+        entry_spread_bps=2.0,
+        entry_spread_abs=10.0
     )
 
 
