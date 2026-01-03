@@ -48,12 +48,15 @@ Funding-Bot/
 │   │   ├── okx.py              # OKX implementation
 │   │   ├── types.py            # Data structures (Position, OrderBook, etc.)
 │   │   └── enums.py            # Constants & enums + fees for 13 exchanges
-│   ├── core/                   # Core bot logic
+│   ├── core/                   # Core business logic
 │   │   ├── state.py            # RAM state management (async, thread-safe)
-│   │   ├── execution_engine.py # Position opening (3 modes)
-│   │   ├── funding_tracker.py  # Auto-close on negative spread
-│   │   └── position_closer.py  # Universal close (5 modes)
-│   ├── utils/                  # Utilities
+│   │   ├── execution_engine.py # Position opening (2 modes)
+│   │   └── position_closer.py  # Position closing (5 modes)
+│   ├── monitors/               # Monitoring & detection
+│   │   └── funding_tracker.py  # Funding monitoring + auto-close
+│   ├── managers/               # Infrastructure & resource management
+│   │   └── (planned: RiskManager, WebSocketManager)
+│   ├── utils/                  # Stateless utilities
 │   │   ├── calculations.py     # Pure calculation functions
 │   │   ├── validators.py       # Data validation
 │   │   ├── formatters.py       # Output formatting
