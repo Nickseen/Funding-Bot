@@ -48,20 +48,29 @@ Funding-Bot/
 │   │   ├── okx.py              # OKX implementation
 │   │   ├── types.py            # Data structures (Position, OrderBook, etc.)
 │   │   └── enums.py            # Constants & enums + fees for 13 exchanges
-│   ├── core/                   # Core bot logic
+│   ├── core/                   # Core business logic
 │   │   ├── state.py            # RAM state management (async, thread-safe)
-│   │   ├── execution_engine.py # Position opening (3 modes)
-│   │   ├── funding_tracker.py  # Auto-close on negative spread
-│   │   └── position_closer.py  # Universal close (5 modes)
-│   ├── utils/                  # Utilities
+│   │   ├── execution_engine.py # Position opening (2 modes: hit_the_bid, stable_spread)
+│   │   └── position_closer.py  # Position closing (5 modes: hit_the_bid, flash, market, stable_spread, emergency)
+│   ├── monitors/               # Monitoring & detection (stateful watchers)
+│   │   ├── funding_tracker.py  # Funding monitoring + auto-close (smart intervals)
+│   │   └── emergency_monitor.py # SL/TP detection (REST polling 5 sec)
+│   ├── managers/               # Infrastructure & resource management
+│   │   └── (planned: RiskManager, WebSocketManager)
+│   ├── utils/                  # Stateless utilities
 │   │   ├── calculations.py     # Pure calculation functions
 │   │   ├── validators.py       # Data validation
 │   │   ├── formatters.py       # Output formatting
 │   │   ├── logger.py           # Loguru setup
 │   │   └── constants.py        # Constants
-│   └── cli/                    # CLI interface
+│   ├── cli/                    # CLI interface
+│   └── main.py                 # Bot orchestration (Bot class with lifecycle)
 ├── config/                     # Configuration
-├── tests/                      # Tests
+├── tests/                      # Tests (12 passing)
+│   ├── unit/
+│   │   ├── test_calculations.py       # Calculations tests (7 tests)
+│   │   └── test_emergency_monitor.py  # EmergencyMonitor tests (5 tests)
+│   └── conftest.py             # Pytest fixtures
 ├── docs/                       # Documentation
 │   └── TEST_CASES.md           # Test cases
 ├── logs/                       # Log files (auto-generated)
@@ -267,40 +276,39 @@ pytest tests/unit/test_calculations.py
 - [x] Types & enums (9 dataclasses, 7 enums)
 - [x] Abstract Exchange class (Template Method Pattern)
 - [x] AppState (async, thread-safe RAM management)
-- [x] ExecutionEngine (3 modes: hit-the-bid, stable-spread, market)
-- [x] PositionCloser (5 modes)
-- [x] FundingTracker (auto-close on negative spread)
+- [x] ExecutionEngine (2 modes: hit_the_bid, stable_spread with full SL/TP)
+- [x] PositionCloser (5 modes: hit_the_bid, flash, market, stable_spread, emergency)
+- [x] FundingTracker (smart monitoring with passive/active modes, PnL threshold)
+- [x] EmergencyMonitor (REST polling 5 sec for SL/TP detection)
 - [x] Utilities (calculations, validators, formatters)
 - [x] Logging setup (loguru)
+- [x] Bot class integration (main.py with lifecycle management)
+- [x] Architecture refactor (monitors/, managers/, core/, utils/)
 
-### Phase 2: Exchange Adapters 🚧 IN PROGRESS
-- [x] Binance adapter (basic)
-- [x] Bybit adapter (basic)
-- [x] KuCoin adapter (basic)
-- [x] OKX adapter (basic)
-- [ ] WebSocket price monitoring
+### Phase 2: Exchange Adapters ✅ COMPLETED
+- [x] Binance adapter (basic REST API)
+- [x] Bybit adapter (basic REST API)
+- [x] KuCoin adapter (basic REST API)
+- [x] OKX adapter (basic REST API)
+- [x] Unit tests (12/12 passing)
+- [ ] WebSocket price monitoring (skeleton ready, low priority)
 - [ ] Full testing on testnet
 
-### Phase 3: Core Trading Logic
-- [ ] Intersection detector (bid/ask crossing)
-- [ ] Limit order manager
-- [ ] Risk monitor (SL/TP)
-- [ ] Emergency close system
-
-### Phase 4: State & Recovery
-- [ ] Position manager
-- [ ] Recovery system (restore from exchanges)
-- [ ] Financial analytics
-
-### Phase 5: Interface
-- [ ] CLI commands
+### Phase 3: CLI & Integration 🚧 IN PROGRESS
+- [ ] CLI commands (partner working on this)
 - [ ] Interactive menu
 - [ ] Status displays
+- [ ] Integration with Bot class
 
-### Phase 6: Testing & Production
-- [ ] Unit tests
+### Phase 4: Persistence & Recovery
+- [ ] SQLite database for position history
+- [ ] Recovery system (restore from exchanges)
+- [ ] Financial analytics (detailed PnL breakdown)
+
+### Phase 5: Testing & Production
+- [x] Unit tests (calculations, emergency_monitor)
 - [ ] Integration tests
-- [ ] Stress tests
+- [ ] Testnet validation
 - [ ] Production deployment
 
 ---
