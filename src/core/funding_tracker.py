@@ -1,15 +1,21 @@
 """
 Funding Rate Tracker - Monitors funding rates and auto-closes unprofitable positions.
 
-Logic:
-1. Monitor time until next funding (every 8 hours on most exchanges)
-2. At 55 minutes mark, start checking every 40 seconds
-3. Check profitability: if PnL < +1% AND spread shows loss → auto-close
+Алгоритм мониторинга:
+1. Непрерывно мониторит время до следующего фандинга через API биржи
+2. На 55-й минуте (≤5 мин до фандинга) → проверка каждые 40 секунд
+3. Критерий автозакрытия:
+   - Если PnL >= +1% от initial_capital → НЕ закрывать (решение за пользователем)
+   - Если спред отрицательный И PnL < +1% → ЗАКРЫТЬ АВТОМАТИЧЕСКИ
+
+Закрытие использует тот же режим, что и открытие:
+- hit_the_bid → close_hit_the_bid (поиск пересечения)
+- stable_spread → close_stable_spread (сохранение спреда)
 """
 
 import asyncio
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from loguru import logger
 
 from src.exchanges.base import BaseExchange
@@ -18,23 +24,44 @@ from src.exchanges.enums import PositionStatus
 from src.core.state import AppState
 from src.utils.calculations import calculate_spread_bps
 
+if TYPE_CHECKING:
+    from src.core.position_closer import PositionCloser
+
+# Порог PnL для автозакрытия (1% = 100 bps)
+AUTO_CLOSE_PNL_THRESHOLD_PCT = 1.0
+
 
 class FundingTracker:
     """
     Tracks funding rates and auto-closes positions that lost profitability.
     
-    Prevents positions from going through multiple funding payments
-    when they're no longer profitable.
+    Мониторит время до фандинга и автоматически закрывает позиции,
+    которые потеряли выгодность (спред стал отрицательным).
+    
+    Использует PositionCloser для закрытия в правильном режиме
+    (hit_the_bid или stable_spread в зависимости от execution_mode).
     """
     
-    def __init__(self, state: AppState):
+    def __init__(
+        self,
+        state: AppState,
+        position_closer: Optional["PositionCloser"] = None,
+        exchange1: Optional[BaseExchange] = None,
+        exchange2: Optional[BaseExchange] = None
+    ):
         """
         Initialize funding tracker
         
         Args:
             state: Application state manager
+            position_closer: PositionCloser for handling auto-closes
+            exchange1: First exchange adapter
+            exchange2: Second exchange adapter
         """
         self.state = state
+        self.position_closer = position_closer
+        self.exchange1 = exchange1
+        self.exchange2 = exchange2
         self._monitoring = False
         self._task: Optional[asyncio.Task] = None
     
@@ -64,64 +91,113 @@ class FundingTracker:
         """
         Main monitoring loop
         
-        Checks all open positions and determines if they should be auto-closed
-        before the next funding payment.
+        Оптимизированный алгоритм:
+        - До 55-й минуты: просто спим (никаких проверок)
+        - За 5 минут до фандинга: проверяем каждые 40 секунд (спред + PnL)
         """
         while self._monitoring:
             try:
                 positions = await self.state.get_positions_by_status(PositionStatus.OPEN)
                 
-                for position in positions:
-                    await self._check_position_profitability(position)
+                if not positions:
+                    # Нет открытых позиций - спим 1 минуту и проверяем снова
+                    await asyncio.sleep(60)
+                    continue
                 
-                # Sleep 40 seconds between checks
-                await asyncio.sleep(40)
+                # Получить минимальное время до фандинга среди всех позиций
+                min_time_to_funding = float('inf')
+                
+                for position in positions:
+                    time_to_funding = await self._get_time_to_funding_for_position(position)
+                    min_time_to_funding = min(min_time_to_funding, time_to_funding)
+                
+                if min_time_to_funding <= 300:
+                    # ⚡ АКТИВНЫЙ РЕЖИМ: за 5 минут до фандинга
+                    # Проверяем все позиции на выгодность
+                    logger.info(
+                        f"⚡ Active mode: {min_time_to_funding}s to funding, "
+                        f"checking {len(positions)} positions..."
+                    )
+                    
+                    for position in positions:
+                        time_to_funding = await self._get_time_to_funding_for_position(position)
+                        if time_to_funding <= 300:
+                            await self._check_position_profitability(position)
+                    
+                    # Следующая проверка через 40 секунд
+                    await asyncio.sleep(40)
+                else:
+                    # 💤 ПАССИВНЫЙ РЕЖИМ: далеко до фандинга
+                    # Спим до 55-й минуты (time_to_funding - 300)
+                    sleep_time = min_time_to_funding - 300
+                    
+                    logger.info(
+                        f"💤 Passive mode: {min_time_to_funding}s to funding, "
+                        f"sleeping {sleep_time}s until 55-min mark"
+                    )
+                    
+                    await asyncio.sleep(sleep_time)
                 
             except Exception as e:
                 logger.error(f"Error in funding tracker loop: {e}")
-                await asyncio.sleep(40)
+                await asyncio.sleep(60)
+    
+    async def _get_time_to_funding_for_position(self, position: Position) -> int:
+        """
+        Get time to next funding for a position using stored exchanges.
+        
+        Args:
+            position: Position to check
+            
+        Returns:
+            Seconds until next funding
+        """
+        if not self.exchange1:
+            logger.warning("No exchange1 set, using fallback 1 hour")
+            return 3600
+        
+        return await self._get_time_to_next_funding(self.exchange1, position.symbol)
     
     async def _check_position_profitability(
         self,
         position: Position,
-        exchange1: BaseExchange,
-        exchange2: BaseExchange
+        exchange1: Optional[BaseExchange] = None,
+        exchange2: Optional[BaseExchange] = None
     ) -> None:
         """
-        Check if position should be auto-closed before next funding
+        Check if position should be auto-closed before next funding.
+        
+        Вызывается только когда до фандинга ≤ 5 минут.
         
         Args:
             position: Position to check
-            exchange1: First exchange adapter
-            exchange2: Second exchange adapter
+            exchange1: First exchange adapter (uses self.exchange1 if not provided)
+            exchange2: Second exchange adapter (uses self.exchange2 if not provided)
         """
-        # Get time to next funding
-        time_to_funding = await self._get_time_to_next_funding(
-            exchange1,
-            position.symbol
-        )
+        # Использовать переданные exchanges или сохраненные
+        ex1 = exchange1 or self.exchange1
+        ex2 = exchange2 or self.exchange2
         
-        # Only check at 55-minute mark (5 minutes before funding)
-        if time_to_funding > 300:  # More than 5 minutes
+        if not ex1 or not ex2:
+            logger.error("Exchanges not configured for FundingTracker")
             return
         
         logger.info(
-            f"⏰ Funding check for {position.symbol} "
-            f"(T-{time_to_funding}s to funding)"
+            f"⏰ Funding check for {position.symbol} - checking profitability..."
         )
         
         # Step 1: Calculate current profitability
         should_close = await self._should_auto_close(
             position,
-            exchange1,
-            exchange2
+            ex1,
+            ex2
         )
         
         if should_close:
             logger.warning(
                 f"🔴 Auto-closing {position.id} - Lost profitability before funding"
             )
-            await self._auto_close_position(position, exchange1, exchange2)
+            await self._auto_close_position(position, ex1, ex2)
     
     async def _get_time_to_next_funding(
         self,
@@ -179,8 +255,9 @@ class FundingTracker:
         """
         Determine if position should be auto-closed
         
-        Rule:
-        - If current spread is negative → Auto-close (regardless of PnL)
+        Правила автозакрытия:
+        1. Если PnL >= +1% → НЕ закрывать (оставить решение пользователю)
+        2. Если спред отрицательный И PnL < +1% → ЗАКРЫТЬ
         
         Args:
             position: Position to evaluate
@@ -190,7 +267,24 @@ class FundingTracker:
         Returns:
             True if should auto-close, False otherwise
         """
-        # Check current spread (main criterion!)
+        # 1. Получить текущий PnL
+        balance1 = await exchange1.get_balance("USDT")
+        balance2 = await exchange2.get_balance("USDT")
+        current_total = balance1.free + balance2.free
+        
+        profit_pct = (
+            (current_total - position.initial_capital) / position.initial_capital
+        ) * 100
+        
+        # 2. Если PnL >= +1% → НЕ закрывать автоматически
+        if profit_pct >= AUTO_CLOSE_PNL_THRESHOLD_PCT:
+            logger.info(
+                f"✅ PnL = {profit_pct:.2f}% (>= {AUTO_CLOSE_PNL_THRESHOLD_PCT}%), "
+                f"leaving close decision to user"
+            )
+            return False
+        
+        # 3. PnL < +1% → проверить спред
         ob1 = await exchange1.get_orderbook(position.symbol)
         ob2 = await exchange2.get_orderbook(position.symbol)
         
@@ -200,26 +294,20 @@ class FundingTracker:
             position.side1
         )
         
-        logger.info(f"📈 Current spread: {current_spread_bps:.2f} bps")
+        logger.info(
+            f"📈 PnL: {profit_pct:.2f}%, Spread: {current_spread_bps:.2f} bps"
+        )
         
-        # Only rule: if spread is negative → close
+        # 4. Спред отрицательный И PnL < +1% → ЗАКРЫТЬ
         if current_spread_bps < 0:
-            # Get current balances for logging
-            balance1 = await exchange1.get_balance("USDT")
-            balance2 = await exchange2.get_balance("USDT")
-            
-            current_total = balance1.free + balance2.free
-            profit_pct = (
-                (current_total - position.initial_capital) / position.initial_capital
-            ) * 100
-            
             logger.warning(
                 f"⚠️ NEGATIVE SPREAD detected: {current_spread_bps:.2f} bps. "
-                f"Current PnL: {profit_pct:.2f}%. Auto-closing to avoid loss..."
+                f"PnL: {profit_pct:.2f}% (< {AUTO_CLOSE_PNL_THRESHOLD_PCT}%). "
+                f"Auto-closing to avoid further loss..."
             )
             return True
         
-        # Spread is positive → position is profitable, keep open
+        # Спред положительный → позиция выгодна, оставляем
         logger.info(
             f"✅ Spread positive ({current_spread_bps:.2f} bps), "
             f"keeping position open"
@@ -233,39 +321,76 @@ class FundingTracker:
         exchange2: BaseExchange
     ) -> None:
         """
-        Auto-close position using limit orders
+        Auto-close position using appropriate close mode.
+        
+        Использует тот же режим закрытия, что и при открытии:
+        - hit_the_bid → close_hit_the_bid (поиск пересечения)
+        - stable_spread → close_stable_spread (сохранение спреда)
         
         Args:
             position: Position to close
-            exchange1: First exchange
-            exchange2: Second exchange
+            exchange1: First exchange (used if no position_closer)
+            exchange2: Second exchange (used if no position_closer)
         """
         try:
-            logger.info(f"🔄 Auto-closing position {position.id}...")
-            
-            # Close both sides simultaneously with limit orders
-            close1_task = exchange1.close_position(
-                position_id=position.id,
-                mode="limit"
-            )
-            close2_task = exchange2.close_position(
-                position_id=position.id,
-                mode="limit"
+            logger.info(
+                f"🔄 Auto-closing position {position.id} "
+                f"(mode: {position.execution_mode})..."
             )
             
-            await asyncio.gather(close1_task, close2_task)
-            
-            # Update position status
-            position.status = PositionStatus.CLOSED
-            position.closed_at = datetime.utcnow()
-            position.close_reason = "auto_close_profitability_loss"
-            
-            await self.state.update_position(position)
-            
-            logger.success(
-                f"✅ Position {position.id} auto-closed successfully "
-                f"(reason: profitability loss before funding)"
-            )
+            # Используем PositionCloser если доступен
+            if self.position_closer:
+                # Выбрать режим закрытия в зависимости от execution_mode
+                if position.execution_mode == "hit_the_bid":
+                    # Для hit_the_bid: сначала пытаемся найти пересечение,
+                    # если не получится за 5 мин → flash close
+                    success = await self.position_closer.close_hit_the_bid(position)
+                elif position.execution_mode == "stable_spread":
+                    # Для stable_spread: закрыть с сохранением спреда
+                    success = await self.position_closer.close_stable_spread(position)
+                else:
+                    # Fallback: flash close
+                    logger.warning(
+                        f"Unknown execution_mode: {position.execution_mode}, "
+                        f"using flash close"
+                    )
+                    success = await self.position_closer.close_flash(position)
+                
+                if success:
+                    logger.success(
+                        f"✅ Position {position.id} auto-closed via PositionCloser "
+                        f"(mode: {position.execution_mode})"
+                    )
+                else:
+                    logger.warning(
+                        f"⚠️ PositionCloser returned False for {position.id}"
+                    )
+            else:
+                # Fallback: прямое закрытие лимитками (без PositionCloser)
+                logger.warning(
+                    "PositionCloser not available, using direct limit close"
+                )
+                close1_task = exchange1.close_position(
+                    position_id=position.id,
+                    mode="limit"
+                )
+                close2_task = exchange2.close_position(
+                    position_id=position.id,
+                    mode="limit"
+                )
+                
+                await asyncio.gather(close1_task, close2_task)
+                
+                # Update position status
+                position.status = PositionStatus.CLOSED
+                position.closed_at = datetime.utcnow()
+                position.close_reason = "auto_close_profitability_loss"
+                
+                await self.state.update_position(position)
+                
+                logger.success(
+                    f"✅ Position {position.id} auto-closed (direct limit)"
+                )
             
         except Exception as e:
             logger.error(f"❌ Failed to auto-close position {position.id}: {e}")
