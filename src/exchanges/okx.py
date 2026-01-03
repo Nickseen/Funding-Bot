@@ -364,6 +364,100 @@ class OKXExchange(BaseExchange):
                 return True
             raise ExchangeError(f"Failed to set margin mode: {e}")
     
+    async def _api_set_stop_loss(
+        self,
+        symbol: str,
+        side: 'PositionSide',
+        stop_price: float,
+        quantity: Optional[float]
+    ) -> Dict[str, Any]:
+        """
+        OKX: POST /api/v5/trade/order-algo with ordType=conditional
+        
+        OKX uses algo orders for SL/TP
+        """
+        try:
+            from .enums import PositionSide
+            ccxt_symbol = self._convert_symbol(symbol)
+            order_side = 'sell' if side == PositionSide.LONG else 'buy'
+            
+            # If quantity not provided, get current position
+            if quantity is None:
+                positions = await self.client.fetch_positions([ccxt_symbol])
+                position = next(
+                    (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
+                    None
+                )
+                if position:
+                    quantity = float(position.get('contracts', 0))
+                else:
+                    raise ExchangeError(f"No position found for {symbol}")
+            
+            # OKX algo order for stop loss
+            params = {
+                'stopLossPrice': stop_price,
+                'triggerPrice': stop_price,
+                'ordType': 'trigger',
+                'tgtCcy': 'base_ccy',
+                'reduceOnly': True,
+            }
+            
+            return await self.client.create_order(
+                symbol=ccxt_symbol,
+                type='market',
+                side=order_side,
+                amount=quantity,
+                params=params
+            )
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitError(str(e))
+    
+    async def _api_set_take_profit(
+        self,
+        symbol: str,
+        side: 'PositionSide',
+        take_profit_price: float,
+        quantity: Optional[float]
+    ) -> Dict[str, Any]:
+        """
+        OKX: POST /api/v5/trade/order-algo with ordType=conditional
+        """
+        try:
+            from .enums import PositionSide
+            ccxt_symbol = self._convert_symbol(symbol)
+            order_side = 'sell' if side == PositionSide.LONG else 'buy'
+            
+            # If quantity not provided, get current position
+            if quantity is None:
+                positions = await self.client.fetch_positions([ccxt_symbol])
+                position = next(
+                    (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
+                    None
+                )
+                if position:
+                    quantity = float(position.get('contracts', 0))
+                else:
+                    raise ExchangeError(f"No position found for {symbol}")
+            
+            # OKX algo order for take profit
+            params = {
+                'takeProfitPrice': take_profit_price,
+                'triggerPrice': take_profit_price,
+                'ordType': 'trigger',
+                'tgtCcy': 'base_ccy',
+                'reduceOnly': True,
+            }
+            
+            return await self.client.create_order(
+                symbol=ccxt_symbol,
+                type='market',
+                side=order_side,
+                amount=quantity,
+                params=params
+            )
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitError(str(e))
+    
     async def _api_get_balance(self) -> Dict[str, Any]:
         """OKX: GET /api/v5/account/balance"""
         try:

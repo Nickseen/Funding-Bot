@@ -38,31 +38,45 @@ Delta Neutral Bot
 ### Project Structure
 
 ```
-delta-neutral-bot/
+Funding-Bot/
 ├── src/
-│   ├── exchanges/          # Exchange adapters
-│   │   ├── base.py         # Abstract base class
-│   │   ├── binance.py      # Binance implementation
-│   │   ├── types.py        # Data structures
-│   │   └── enums.py        # Constants & enums
-│   ├── core/               # Core bot logic
-│   │   ├── state.py        # RAM state management
-│   │   ├── bot.py          # Main bot class
-│   │   ├── price_monitor.py
-│   │   ├── risk_monitor.py
-│   │   └── recovery.py
-│   ├── utils/              # Utilities
-│   │   ├── calculations.py
-│   │   ├── validators.py
-│   │   ├── formatters.py
-│   │   ├── logger.py
-│   │   └── constants.py
-│   └── cli/                # CLI interface
-├── config/                 # Configuration
-├── tests/                  # Tests
-├── logs/                   # Log files (auto-generated)
+│   ├── exchanges/              # Exchange adapters
+│   │   ├── base.py             # Abstract base class (Template Method Pattern)
+│   │   ├── binance.py          # Binance implementation
+│   │   ├── bybit.py            # Bybit implementation
+│   │   ├── kucoin.py           # KuCoin implementation
+│   │   ├── okx.py              # OKX implementation
+│   │   ├── types.py            # Data structures (Position, OrderBook, etc.)
+│   │   └── enums.py            # Constants & enums + fees for 13 exchanges
+│   ├── core/                   # Core business logic
+│   │   ├── state.py            # RAM state management (async, thread-safe)
+│   │   ├── execution_engine.py # Position opening (2 modes: hit_the_bid, stable_spread)
+│   │   └── position_closer.py  # Position closing (5 modes: hit_the_bid, flash, market, stable_spread, emergency)
+│   ├── monitors/               # Monitoring & detection (stateful watchers)
+│   │   ├── funding_tracker.py  # Funding monitoring + auto-close (smart intervals)
+│   │   └── emergency_monitor.py # SL/TP detection (REST polling 5 sec)
+│   ├── managers/               # Infrastructure & resource management
+│   │   └── (planned: RiskManager, WebSocketManager)
+│   ├── utils/                  # Stateless utilities
+│   │   ├── calculations.py     # Pure calculation functions
+│   │   ├── validators.py       # Data validation
+│   │   ├── formatters.py       # Output formatting
+│   │   ├── logger.py           # Loguru setup
+│   │   └── constants.py        # Constants
+│   ├── cli/                    # CLI interface
+│   └── main.py                 # Bot orchestration (Bot class with lifecycle)
+├── config/                     # Configuration
+├── tests/                      # Tests (12 passing)
+│   ├── unit/
+│   │   ├── test_calculations.py       # Calculations tests (7 tests)
+│   │   └── test_emergency_monitor.py  # EmergencyMonitor tests (5 tests)
+│   └── conftest.py             # Pytest fixtures
+├── docs/                       # Documentation
+│   └── TEST_CASES.md           # Test cases
+├── logs/                       # Log files (auto-generated)
 ├── requirements.txt
-└── .env                    # Your API keys (create from .env.example)
+├── REQUIREMENTS.md             # Technical specification (AI context)
+└── .env                        # Your API keys (create from .env.example)
 ```
 
 ---
@@ -225,11 +239,13 @@ pytest tests/unit/test_calculations.py
 
 | Exchange | Status | Taker Fee | Maker Fee |
 |----------|--------|-----------|-----------|
-| Binance | ✅ Active | 0.05% | 0.02% |
-| KuCoin | 🚧 Planned | 0.06% | 0.02% |
-| OKX | 🚧 Planned | 0.10% | 0.08% |
-| Bybit | 🚧 Planned | 0.10% | 0.01% |
+| Binance | ✅ Implemented | 0.05% | 0.02% |
+| Bybit | ✅ Implemented | 0.055% | 0.02% |
+| KuCoin | ✅ Implemented | 0.06% | 0.02% |
+| OKX | ✅ Implemented | 0.05% | 0.02% |
 | Hyperliquid | 🚧 Planned | 0.045% | 0.00% |
+| Lighter | 🚧 Planned | 0.00% | 0.00% |
+| Aster | 🚧 Planned | 0.04% | 0.02% |
 
 ---
 
@@ -255,36 +271,44 @@ pytest tests/unit/test_calculations.py
 
 ## 🛠️ Development Roadmap
 
-### Phase 1: Foundation (Weeks 1-2) ✅
+### Phase 1: Foundation ✅ COMPLETED
 - [x] Project structure
-- [x] Types & enums
-- [x] Abstract Exchange class
-- [x] AppState (RAM management)
+- [x] Types & enums (9 dataclasses, 7 enums)
+- [x] Abstract Exchange class (Template Method Pattern)
+- [x] AppState (async, thread-safe RAM management)
+- [x] ExecutionEngine (2 modes: hit_the_bid, stable_spread with full SL/TP)
+- [x] PositionCloser (5 modes: hit_the_bid, flash, market, stable_spread, emergency)
+- [x] FundingTracker (smart monitoring with passive/active modes, PnL threshold)
+- [x] EmergencyMonitor (REST polling 5 sec for SL/TP detection)
 - [x] Utilities (calculations, validators, formatters)
-- [x] Logging setup
+- [x] Logging setup (loguru)
+- [x] Bot class integration (main.py with lifecycle management)
+- [x] Architecture refactor (monitors/, managers/, core/, utils/)
 
-### Phase 2: Core Bot (Weeks 3-6) 🚧
-- [ ] Binance adapter implementation
-- [ ] WebSocket price monitoring
-- [ ] Intersection detector
-- [ ] Limit order manager
-- [ ] Risk monitor
-- [ ] Emergency close system
+### Phase 2: Exchange Adapters ✅ COMPLETED
+- [x] Binance adapter (basic REST API)
+- [x] Bybit adapter (basic REST API)
+- [x] KuCoin adapter (basic REST API)
+- [x] OKX adapter (basic REST API)
+- [x] Unit tests (12/12 passing)
+- [ ] WebSocket price monitoring (skeleton ready, low priority)
+- [ ] Full testing on testnet
 
-### Phase 3: State & Recovery (Week 7)
-- [ ] Position manager
-- [ ] Recovery system
-- [ ] Financial analytics
-
-### Phase 4: Interface (Week 8-9)
-- [ ] CLI commands
+### Phase 3: CLI & Integration 🚧 IN PROGRESS
+- [ ] CLI commands (partner working on this)
 - [ ] Interactive menu
 - [ ] Status displays
+- [ ] Integration with Bot class
 
-### Phase 5: Testing (Weeks 10-12)
-- [ ] Unit tests
+### Phase 4: Persistence & Recovery
+- [ ] SQLite database for position history
+- [ ] Recovery system (restore from exchanges)
+- [ ] Financial analytics (detailed PnL breakdown)
+
+### Phase 5: Testing & Production
+- [x] Unit tests (calculations, emergency_monitor)
 - [ ] Integration tests
-- [ ] Stress tests
+- [ ] Testnet validation
 - [ ] Production deployment
 
 ---

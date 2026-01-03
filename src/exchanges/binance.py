@@ -258,6 +258,92 @@ class BinanceExchange(BaseExchange):
         # In practice, call this when opening first position for each symbol
         return True
     
+    async def _api_set_stop_loss(
+        self,
+        symbol: str,
+        side: 'PositionSide',
+        stop_price: float,
+        quantity: Optional[float]
+    ) -> Dict[str, Any]:
+        """
+        Binance: POST /fapi/v1/order with type=STOP_MARKET
+        
+        For position side:
+        - LONG position -> SELL stop order (price going DOWN triggers loss)
+        - SHORT position -> BUY stop order (price going UP triggers loss)
+        """
+        try:
+            # Determine order side (opposite to position)
+            from .enums import PositionSide
+            order_side = 'SELL' if side == PositionSide.LONG else 'BUY'
+            
+            # If quantity not provided, need to get current position size
+            if quantity is None:
+                positions = await self.client.fapiPrivate_get_positionrisk({'symbol': symbol})
+                position = next((p for p in positions if float(p.get('positionAmt', 0)) != 0), None)
+                if position:
+                    quantity = abs(float(position['positionAmt']))
+                else:
+                    raise ExchangeError(f"No position found for {symbol}")
+            
+            params = {
+                'symbol': symbol,
+                'side': order_side,
+                'type': 'STOP_MARKET',
+                'stopPrice': stop_price,
+                'quantity': quantity,
+                'reduceOnly': True,
+                'workingType': 'MARK_PRICE'  # Use mark price to avoid manipulation
+            }
+            
+            return await self.client.fapiPrivate_post_order(params)
+            
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitError(str(e))
+    
+    async def _api_set_take_profit(
+        self,
+        symbol: str,
+        side: 'PositionSide',
+        take_profit_price: float,
+        quantity: Optional[float]
+    ) -> Dict[str, Any]:
+        """
+        Binance: POST /fapi/v1/order with type=TAKE_PROFIT_MARKET
+        
+        For position side:
+        - LONG position -> SELL take profit (price going UP triggers profit)
+        - SHORT position -> BUY take profit (price going DOWN triggers profit)
+        """
+        try:
+            # Determine order side (opposite to position)
+            from .enums import PositionSide
+            order_side = 'SELL' if side == PositionSide.LONG else 'BUY'
+            
+            # If quantity not provided, need to get current position size
+            if quantity is None:
+                positions = await self.client.fapiPrivate_get_positionrisk({'symbol': symbol})
+                position = next((p for p in positions if float(p.get('positionAmt', 0)) != 0), None)
+                if position:
+                    quantity = abs(float(position['positionAmt']))
+                else:
+                    raise ExchangeError(f"No position found for {symbol}")
+            
+            params = {
+                'symbol': symbol,
+                'side': order_side,
+                'type': 'TAKE_PROFIT_MARKET',
+                'stopPrice': take_profit_price,
+                'quantity': quantity,
+                'reduceOnly': True,
+                'workingType': 'MARK_PRICE'
+            }
+            
+            return await self.client.fapiPrivate_post_order(params)
+            
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitError(str(e))
+    
     async def _api_get_balance(self) -> Dict[str, Any]:
         """Binance: GET /fapi/v2/balance"""
         try:

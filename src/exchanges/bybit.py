@@ -356,6 +356,102 @@ class BybitExchange(BaseExchange):
                 return True
             raise ExchangeError(f"Failed to set margin mode: {e}")
     
+    async def _api_set_stop_loss(
+        self,
+        symbol: str,
+        side: 'PositionSide',
+        stop_price: float,
+        quantity: Optional[float]
+    ) -> Dict[str, Any]:
+        """
+        Bybit: POST /v5/order/create with orderType=Market and triggerPrice
+        
+        Bybit V5 API uses conditional orders with triggerPrice for SL/TP
+        """
+        try:
+            from .enums import PositionSide
+            ccxt_symbol = self._convert_symbol(symbol)
+            order_side = 'sell' if side == PositionSide.LONG else 'buy'
+            
+            # If quantity not provided, get current position size
+            if quantity is None:
+                positions = await self.client.fetch_positions([ccxt_symbol])
+                position = next(
+                    (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
+                    None
+                )
+                if position:
+                    quantity = float(position['contracts'])
+                else:
+                    raise ExchangeError(f"No position found for {symbol}")
+            
+            # Bybit uses conditional order for stop loss
+            params = {
+                'triggerPrice': stop_price,
+                'triggerBy': 'MarkPrice',
+                'reduceOnly': True,
+                'category': 'linear',  # USDT perpetual
+            }
+            
+            order = await self.client.create_order(
+                symbol=ccxt_symbol,
+                type='market',
+                side=order_side,
+                amount=quantity,
+                params=params
+            )
+            return order
+            
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitError(str(e))
+    
+    async def _api_set_take_profit(
+        self,
+        symbol: str,
+        side: 'PositionSide',
+        take_profit_price: float,
+        quantity: Optional[float]
+    ) -> Dict[str, Any]:
+        """
+        Bybit: POST /v5/order/create with orderType=Market and triggerPrice
+        """
+        try:
+            from .enums import PositionSide
+            ccxt_symbol = self._convert_symbol(symbol)
+            order_side = 'sell' if side == PositionSide.LONG else 'buy'
+            
+            # If quantity not provided, get current position size
+            if quantity is None:
+                positions = await self.client.fetch_positions([ccxt_symbol])
+                position = next(
+                    (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
+                    None
+                )
+                if position:
+                    quantity = float(position['contracts'])
+                else:
+                    raise ExchangeError(f"No position found for {symbol}")
+            
+            # Bybit uses conditional order for take profit
+            params = {
+                'triggerPrice': take_profit_price,
+                'triggerBy': 'MarkPrice',
+                'reduceOnly': True,
+                'category': 'linear',
+            }
+            
+            order = await self.client.create_order(
+                symbol=ccxt_symbol,
+                type='market',
+                side=order_side,
+                amount=quantity,
+                params=params
+            )
+            return order
+            
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitError(str(e))
+    
     async def _api_get_balance(self) -> Dict[str, Any]:
         """Bybit: GET /v5/account/wallet-balance"""
         try:
