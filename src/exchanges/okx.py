@@ -169,7 +169,11 @@ class OKXExchange(BaseExchange):
         
         Steps:
         1. Set leverage
-        2. Place order
+        2. Convert quantity to contracts (OKX uses contracts, not base currency)
+        3. Place order
+        
+        Note: OKX contract size for BTC is 0.01 BTC per contract
+        So 0.01 BTC = 1 contract
         """
         try:
             ccxt_symbol = self._convert_symbol(symbol)
@@ -181,7 +185,17 @@ class OKXExchange(BaseExchange):
                 if 'leverage' not in str(e).lower():
                     raise
             
-            # 2. Place order
+            # 2. Convert quantity to contracts
+            # OKX uses contracts, not base currency amount
+            # Contract size is in market info
+            market = self.client.markets.get(ccxt_symbol, {})
+            contract_size = float(market.get('contractSize', 0.01))
+            # quantity is in base currency (BTC), convert to number of contracts
+            contracts = quantity / contract_size
+            # Round to contract precision
+            contracts = round(contracts)  # OKX contracts are whole numbers
+            
+            # 3. Place order
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = 'buy' if side == PositionSide.LONG else 'sell'
             
@@ -194,7 +208,7 @@ class OKXExchange(BaseExchange):
                     symbol=ccxt_symbol,
                     type=order_type_str,
                     side=order_side,
-                    amount=quantity,
+                    amount=contracts,  # Use contracts, not quantity
                     price=price,
                     params=params
                 )
@@ -203,11 +217,11 @@ class OKXExchange(BaseExchange):
                     symbol=ccxt_symbol,
                     type=order_type_str,
                     side=order_side,
-                    amount=quantity,
+                    amount=contracts,  # Use contracts, not quantity
                     params=params
                 )
             
-            # 3. Get position info
+            # 4. Get position info
             positions = await self.client.fetch_positions([ccxt_symbol])
             position_data = next(
                 (p for p in positions if p['symbol'] == ccxt_symbol and float(p['contracts'] or 0) != 0),
@@ -294,11 +308,19 @@ class OKXExchange(BaseExchange):
         price: Optional[float],
         reduce_only: bool
     ) -> Dict[str, Any]:
-        """OKX: POST /api/v5/trade/order"""
+        """OKX: POST /api/v5/trade/order
+        
+        Note: quantity is in base currency (BTC), need to convert to contracts
+        """
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = side.value.lower()
+            
+            # Convert quantity (BTC) to contracts
+            market = self.client.markets.get(ccxt_symbol, {})
+            contract_size = float(market.get('contractSize', 0.01))
+            contracts = round(quantity / contract_size)
             
             params = {
                 'tdMode': 'cross',
@@ -311,7 +333,7 @@ class OKXExchange(BaseExchange):
                     symbol=ccxt_symbol,
                     type=order_type_str,
                     side=order_side,
-                    amount=quantity,
+                    amount=contracts,
                     price=price,
                     params=params
                 )
@@ -320,7 +342,7 @@ class OKXExchange(BaseExchange):
                     symbol=ccxt_symbol,
                     type=order_type_str,
                     side=order_side,
-                    amount=quantity,
+                    amount=contracts,
                     params=params
                 )
             
@@ -374,43 +396,62 @@ class OKXExchange(BaseExchange):
         """
         OKX: POST /api/v5/trade/order-algo with ordType=conditional
         
-        OKX uses algo orders for SL/TP
+        Sets stop loss as conditional algo order attached to position
         """
         try:
             from .enums import PositionSide
             ccxt_symbol = self._convert_symbol(symbol)
-            order_side = 'sell' if side == PositionSide.LONG else 'buy'
             
-            # If quantity not provided, get current position
-            if quantity is None:
-                positions = await self.client.fetch_positions([ccxt_symbol])
-                position = next(
-                    (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
-                    None
-                )
-                if position:
-                    quantity = float(position.get('contracts', 0))
-                else:
-                    raise ExchangeError(f"No position found for {symbol}")
-            
-            # OKX algo order for stop loss
-            params = {
-                'stopLossPrice': stop_price,
-                'triggerPrice': stop_price,
-                'ordType': 'trigger',
-                'tgtCcy': 'base_ccy',
-                'reduceOnly': True,
-            }
-            
-            return await self.client.create_order(
-                symbol=ccxt_symbol,
-                type='market',
-                side=order_side,
-                amount=quantity,
-                params=params
+            # Get position to determine size
+            positions = await self.client.fetch_positions([ccxt_symbol])
+            position = next(
+                (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
+                None
             )
+            
+            if not position:
+                raise ExchangeError(f"No position found for {symbol}")
+            
+            contracts = abs(float(position.get('contracts', 0)))
+            pos_side = position.get('side', '')  # 'long' or 'short'
+            
+            # OKX instrument ID format: BTC-USDT-SWAP
+            inst_id = ccxt_symbol.replace('/', '-').replace(':USDT', '-SWAP')
+            
+            # For SL: if LONG, sell when price falls below SL; if SHORT, buy when price rises above SL
+            order_side = 'sell' if pos_side == 'long' else 'buy'
+            
+            # Use OKX algo order API directly
+            response = await self.client.private_post_trade_order_algo({
+                'instId': inst_id,
+                'tdMode': 'cross',
+                'side': order_side,
+                'ordType': 'conditional',  # Conditional order (SL/TP)
+                'sz': str(int(contracts)),
+                'slTriggerPx': str(stop_price),
+                'slOrdPx': '-1',  # -1 means market price
+                'slTriggerPxType': 'mark',
+                'reduceOnly': 'true',  # OKX requires string 'true', not boolean
+            })
+            
+            # Check response
+            if response.get('code') == '0':
+                data = response.get('data', [{}])[0]
+                return {
+                    'success': True,
+                    'algo_id': data.get('algoId'),
+                    'type': 'stop_loss',
+                    'trigger_price': stop_price
+                }
+            else:
+                raise ExchangeError(f"OKX algo order error: {response}")
+            
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise ExchangeError(f"Failed to set position stop loss: {e}")
     
     async def _api_set_take_profit(
         self,
@@ -421,42 +462,63 @@ class OKXExchange(BaseExchange):
     ) -> Dict[str, Any]:
         """
         OKX: POST /api/v5/trade/order-algo with ordType=conditional
+        
+        Sets take profit as conditional algo order attached to position
         """
         try:
             from .enums import PositionSide
             ccxt_symbol = self._convert_symbol(symbol)
-            order_side = 'sell' if side == PositionSide.LONG else 'buy'
             
-            # If quantity not provided, get current position
-            if quantity is None:
-                positions = await self.client.fetch_positions([ccxt_symbol])
-                position = next(
-                    (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
-                    None
-                )
-                if position:
-                    quantity = float(position.get('contracts', 0))
-                else:
-                    raise ExchangeError(f"No position found for {symbol}")
-            
-            # OKX algo order for take profit
-            params = {
-                'takeProfitPrice': take_profit_price,
-                'triggerPrice': take_profit_price,
-                'ordType': 'trigger',
-                'tgtCcy': 'base_ccy',
-                'reduceOnly': True,
-            }
-            
-            return await self.client.create_order(
-                symbol=ccxt_symbol,
-                type='market',
-                side=order_side,
-                amount=quantity,
-                params=params
+            # Get position to determine size
+            positions = await self.client.fetch_positions([ccxt_symbol])
+            position = next(
+                (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
+                None
             )
+            
+            if not position:
+                raise ExchangeError(f"No position found for {symbol}")
+            
+            contracts = abs(float(position.get('contracts', 0)))
+            pos_side = position.get('side', '')  # 'long' or 'short'
+            
+            # OKX instrument ID format: BTC-USDT-SWAP
+            inst_id = ccxt_symbol.replace('/', '-').replace(':USDT', '-SWAP')
+            
+            # For TP: if LONG, sell when price rises above TP; if SHORT, buy when price falls below TP
+            order_side = 'sell' if pos_side == 'long' else 'buy'
+            
+            # Use OKX algo order API directly
+            response = await self.client.private_post_trade_order_algo({
+                'instId': inst_id,
+                'tdMode': 'cross',
+                'side': order_side,
+                'ordType': 'conditional',  # Conditional order (SL/TP)
+                'sz': str(int(contracts)),
+                'tpTriggerPx': str(take_profit_price),
+                'tpOrdPx': '-1',  # -1 means market price
+                'tpTriggerPxType': 'mark',
+                'reduceOnly': 'true',  # OKX requires string 'true', not boolean
+            })
+            
+            # Check response
+            if response.get('code') == '0':
+                data = response.get('data', [{}])[0]
+                return {
+                    'success': True,
+                    'algo_id': data.get('algoId'),
+                    'type': 'take_profit',
+                    'trigger_price': take_profit_price
+                }
+            else:
+                raise ExchangeError(f"OKX algo order error: {response}")
+            
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise ExchangeError(f"Failed to set position take profit: {e}")
     
     async def _api_get_balance(self) -> Dict[str, Any]:
         """OKX: GET /api/v5/account/balance"""
@@ -528,13 +590,13 @@ class OKXExchange(BaseExchange):
         """OKX: GET /api/v5/public/funding-rate"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
-            ticker = await self.client.fetch_ticker(ccxt_symbol)
-            info = ticker.get('info', {})
+            # OKX doesn't include funding rate in ticker, use dedicated API
+            funding = await self.client.fetch_funding_rate(ccxt_symbol)
             
             return {
                 'symbol': symbol,
-                'fundingRate': info.get('fundingRate', 0),
-                'nextFundingTime': info.get('nextFundingTime', 0),
+                'fundingRate': funding.get('fundingRate', 0),
+                'nextFundingTime': funding.get('nextFundingTimestamp', 0),
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
@@ -577,26 +639,31 @@ class OKXExchange(BaseExchange):
     
     def _parse_order(self, data: Dict[str, Any]) -> Order:
         """Convert OKX order data to Order object"""
+        # Handle None values safely
+        side = data.get('side') or ''
+        order_type = data.get('type') or ''
+        status = data.get('status') or 'open'
+        
         return Order(
-            id=data.get('id', ''),
-            symbol=data.get('symbol', ''),
+            id=data.get('id', '') or '',
+            symbol=data.get('symbol', '') or '',
             exchange=self.exchange_name.value,
-            side=data.get('side', '').upper(),
-            order_type=data.get('type', '').upper(),
+            side=side.upper() if side else '',
+            order_type=order_type.upper() if order_type else '',
             quantity=float(data.get('amount', 0) or 0),
             price=float(data.get('price', 0) or 0),
-            filled=float(data.get('filled', 0) or 0),
-            status=data.get('status', 'open').upper(),
-            created_at=datetime.utcnow(),
+            filled_quantity=float(data.get('filled', 0) or 0),
+            status=status.upper() if status else 'OPEN',
         )
     
     def _parse_orderbook(self, data: Dict[str, Any]) -> OrderBook:
         """Convert OKX orderbook to OrderBook object"""
+        # OKX returns [price, qty, numOrders] - take only first 2
         return OrderBook(
             symbol=data.get('symbol', ''),
             exchange=self.exchange_name.value,
-            bids=[(float(price), float(qty)) for price, qty in data.get('bids', [])],
-            asks=[(float(price), float(qty)) for price, qty in data.get('asks', [])],
+            bids=[(float(item[0]), float(item[1])) for item in data.get('bids', [])],
+            asks=[(float(item[0]), float(item[1])) for item in data.get('asks', [])],
             timestamp=data.get('timestamp', datetime.utcnow().timestamp())
         )
     
@@ -636,13 +703,15 @@ class OKXExchange(BaseExchange):
     def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
         """Convert OKX funding data to FundingRate"""
         next_funding_ts = int(data.get('nextFundingTime', 0) or 0)
+        rate = float(data.get('fundingRate', 0) or 0)
         
         return FundingRate(
             symbol=data.get('symbol', ''),
             exchange=self.exchange_name.value,
-            rate=float(data.get('fundingRate', 0) or 0),
+            rate=rate,
+            rate_bps=rate * 10000,  # Convert to basis points (0.0001 = 1 bps)
             next_funding_time=datetime.fromtimestamp(next_funding_ts / 1000) if next_funding_ts else datetime.utcnow(),
-            timestamp=datetime.utcnow()
+            timestamp=datetime.utcnow().timestamp()
         )
     
     # ============================================

@@ -156,7 +156,7 @@ class FundingTracker:
             logger.warning("No exchange1 set, using fallback 1 hour")
             return 3600
         
-        return await self._get_time_to_next_funding(self.exchange1, position.symbol)
+        return await self._get_time_to_next_funding(self.exchange1, position.pair)
     
     async def _check_position_profitability(
         self,
@@ -183,7 +183,7 @@ class FundingTracker:
             return
         
         logger.info(
-            f"⏰ Funding check for {position.symbol} - checking profitability..."
+            f"⏰ Funding check for {position.pair} - checking profitability..."
         )
         
         # Step 1: Calculate current profitability
@@ -285,13 +285,13 @@ class FundingTracker:
             return False
         
         # 3. PnL < +1% → проверить спред
-        ob1 = await exchange1.get_orderbook(position.symbol)
-        ob2 = await exchange2.get_orderbook(position.symbol)
+        ob1 = await exchange1.get_orderbook(position.pair)
+        ob2 = await exchange2.get_orderbook(position.pair)
         
         current_spread_bps = calculate_spread_bps(
             ob1,
             ob2,
-            position.side1
+            position.exchange1_side
         )
         
         logger.info(

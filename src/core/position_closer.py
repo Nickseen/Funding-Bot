@@ -233,11 +233,11 @@ Close position? [Y/n]: """
         # Закрываем обе позиции одновременно
         tasks = [
             self.exchange1.close_position(
-                symbol=position.symbol,
+                symbol=position.pair,
                 order_type=OrderType.MARKET
             ),
             self.exchange2.close_position(
-                symbol=position.symbol,
+                symbol=position.pair,
                 order_type=OrderType.MARKET
             )
         ]
@@ -378,7 +378,7 @@ Close position? [Y/n]: """
                 close_price = ob.best_ask if position.exchange1_side == "LONG" else ob.best_bid
             
             close_task = other_exchange.close_position(
-                symbol=position.symbol,
+                symbol=position.pair,
                 order_type=OrderType.LIMIT,
                 price=close_price
             )
@@ -404,7 +404,7 @@ Close position? [Y/n]: """
             )
             
             await other_exchange.close_position(
-                symbol=position.symbol,
+                symbol=position.pair,
                 order_type=OrderType.MARKET
             )
             
@@ -454,12 +454,12 @@ Close position? [Y/n]: """
         # Закрываем обе позиции одновременно
         tasks = [
             self.exchange1.close_position(
-                symbol=position.symbol,
+                symbol=position.pair,
                 order_type=OrderType.LIMIT,
                 price=close_price1
             ),
             self.exchange2.close_position(
-                symbol=position.symbol,
+                symbol=position.pair,
                 order_type=OrderType.LIMIT,
                 price=close_price2
             )

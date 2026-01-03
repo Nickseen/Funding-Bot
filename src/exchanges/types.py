@@ -39,14 +39,24 @@ class OrderBook:
     timestamp: float
     
     @property
-    def best_bid(self) -> Optional[Tuple[float, float]]:
-        """Get best bid (highest buy price)"""
-        return self.bids[0] if self.bids else None
+    def best_bid(self) -> Optional[float]:
+        """Get best bid price (highest buy price)"""
+        return self.bids[0][0] if self.bids else None
     
     @property
-    def best_ask(self) -> Optional[Tuple[float, float]]:
-        """Get best ask (lowest sell price)"""
-        return self.asks[0] if self.asks else None
+    def best_ask(self) -> Optional[float]:
+        """Get best ask price (lowest sell price)"""
+        return self.asks[0][0] if self.asks else None
+    
+    @property
+    def best_bid_qty(self) -> Optional[float]:
+        """Get best bid quantity"""
+        return self.bids[0][1] if self.bids else None
+    
+    @property
+    def best_ask_qty(self) -> Optional[float]:
+        """Get best ask quantity"""
+        return self.asks[0][1] if self.asks else None
 
 
 @dataclass

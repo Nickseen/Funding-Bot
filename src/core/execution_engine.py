@@ -361,6 +361,195 @@ Open position anyway? [Y/n]: """
         
         return position
     
+    async def market_open(
+        self,
+        symbol: str,
+        side1: PositionSide,
+        quantity: float,
+        leverage: int,
+        funding_rate_bps: float
+    ) -> Optional[Tuple[Position, str]]:
+        """
+        MARKET MODE - Мгновенное открытие по market ордерам
+        
+        Логика:
+        1. Открыть позиции market ордерами (taker fees)
+        2. Рассчитать и установить SL/TP
+        3. Не отслеживаем спред - просто market execution
+        
+        Args:
+            symbol: Trading pair
+            side1: Side on exchange1 (LONG or SHORT)
+            quantity: Amount in tokens
+            leverage: Leverage
+            funding_rate_bps: Expected funding rate in bps/hour
+        
+        Returns:
+            Tuple[Position, message] or None if failed
+        """
+        log.info(f"⚡ Starting MARKET MODE for {symbol}")
+        
+        side2 = PositionSide.LONG if side1 == PositionSide.SHORT else PositionSide.SHORT
+        
+        # 1. Получить текущие цены
+        ob1 = await self.exchange1.get_orderbook(symbol)
+        ob2 = await self.exchange2.get_orderbook(symbol)
+        
+        # Market orders take the opposite side of orderbook
+        if side1 == PositionSide.LONG:
+            exec_price1 = ob1.best_ask  # Buy takes ask
+            exec_price2 = ob2.best_bid  # Sell takes bid
+        else:
+            exec_price1 = ob1.best_bid  # Sell takes bid
+            exec_price2 = ob2.best_ask  # Buy takes ask
+        
+        # 2. Показать анализ
+        spread_bps = calculate_spread_bps(exec_price1, exec_price2)
+        
+        from ..exchanges.enums import get_total_fees_bps, Exchange
+        total_fees_bps = get_total_fees_bps(
+            Exchange(self.exchange1.get_name()),
+            Exchange(self.exchange2.get_name()),
+            use_maker=False  # Market orders = taker fees
+        )
+        
+        message = f"""
+╔══════════════════════════════════════════════════════════
+║ MARKET MODE - Instant Execution
+╠══════════════════════════════════════════════════════════
+║ Symbol: {symbol}
+║ Mode: Market Order (мгновенное исполнение)
+╠══════════════════════════════════════════════════════════
+║ Execution Prices:
+║   {self.exchange1.get_name()} ({side1.value}): {exec_price1:.6f}
+║   {self.exchange2.get_name()} ({side2.value}): {exec_price2:.6f}
+║ 
+║ Spread: {spread_bps:.2f} bps
+║ Fees (taker): {total_fees_bps:.2f} bps
+║ Funding rate: {funding_rate_bps:.2f} bps/hour
+╚══════════════════════════════════════════════════════════
+"""
+        
+        log.info(message)
+        
+        # 3. Confirm
+        confirm = input("\nOpen position? [Y/n]: ").strip().lower()
+        if confirm == 'n':
+            log.info("Position opening cancelled by user")
+            return None
+        
+        log.info("Opening market position...")
+        log.info(f"  {self.exchange1.get_name()}: {side1.value} {quantity} @ MARKET")
+        log.info(f"  {self.exchange2.get_name()}: {side2.value} {quantity} @ MARKET")
+        
+        # 4. Установить leverage
+        await asyncio.gather(
+            self.exchange1.set_leverage(symbol, leverage),
+            self.exchange2.set_leverage(symbol, leverage)
+        )
+        
+        # 5. Открыть позиции параллельно с MARKET ордерами
+        try:
+            pos1, pos2 = await asyncio.gather(
+                self.exchange1.open_position(
+                    symbol=symbol,
+                    side=side1,
+                    quantity=quantity,
+                    leverage=leverage,
+                    order_type='market'  # Market order!
+                ),
+                self.exchange2.open_position(
+                    symbol=symbol,
+                    side=side2,
+                    quantity=quantity,
+                    leverage=leverage,
+                    order_type='market'  # Market order!
+                )
+            )
+            log.success(f"Positions opened on both exchanges")
+        except Exception as e:
+            log.error(f"Failed to open positions: {e}")
+            raise
+        
+        # 6. Get actual fill prices
+        actual_price1 = getattr(pos1, 'entry_price', exec_price1)
+        actual_price2 = getattr(pos2, 'entry_price', exec_price2)
+        
+        # 7. Calculate liquidation prices
+        liq_price1 = calculate_liquidation_price(
+            entry_price=actual_price1,
+            leverage=leverage,
+            side=side1,
+            maintenance_margin_rate=0.005
+        )
+        liq_price2 = calculate_liquidation_price(
+            entry_price=actual_price2,
+            leverage=leverage,
+            side=side2,
+            maintenance_margin_rate=0.005
+        )
+        
+        log.info(f"Liquidation prices: {self.exchange1.get_name()}={liq_price1:.4f}, {self.exchange2.get_name()}={liq_price2:.4f}")
+        
+        # 8. Calculate and set SL/TP
+        sl1, tp1 = calculate_stop_loss_take_profit(
+            entry_price=actual_price1,
+            liquidation_price=liq_price1,
+            side=side1,
+            distance_percent=20.0
+        )
+        sl2, tp2 = calculate_stop_loss_take_profit(
+            entry_price=actual_price2,
+            liquidation_price=liq_price2,
+            side=side2,
+            distance_percent=20.0
+        )
+        
+        log.info(f"SL/TP calculated:")
+        log.info(f"  {self.exchange1.get_name()}: SL={sl1:.4f}, TP={tp1:.4f}")
+        log.info(f"  {self.exchange2.get_name()}: SL={sl2:.4f}, TP={tp2:.4f}")
+        
+        # 9. Set SL/TP orders
+        try:
+            await asyncio.gather(
+                self.exchange1.set_stop_loss(symbol, side1, sl1, quantity),
+                self.exchange1.set_take_profit(symbol, side1, tp1, quantity),
+                self.exchange2.set_stop_loss(symbol, side2, sl2, quantity),
+                self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
+            )
+            log.success(f"SL/TP orders placed on both exchanges")
+        except Exception as e:
+            log.warning(f"Failed to set SL/TP orders: {e}")
+        
+        # 10. Create position
+        position = Position(
+            id=f"pos_market_{symbol}_{int(asyncio.get_event_loop().time())}",
+            pair=symbol,
+            exchange1=self.exchange1.get_name(),
+            exchange1_pos_id=getattr(pos1, 'id', 'unknown'),
+            exchange1_side=side1.value,
+            exchange1_entry_price=actual_price1,
+            exchange1_current_price=actual_price1,
+            exchange1_leverage=leverage,
+            exchange2=self.exchange2.get_name(),
+            exchange2_pos_id=getattr(pos2, 'id', 'unknown'),
+            exchange2_side=side2.value,
+            exchange2_entry_price=actual_price2,
+            exchange2_current_price=actual_price2,
+            exchange2_leverage=leverage,
+            quantity=quantity,
+            entry_time=asyncio.get_event_loop().time(),
+            execution_mode="market",
+            entry_spread_abs=abs(actual_price2 - actual_price1),
+            entry_spread_bps=spread_bps,
+            stop_loss_price=sl1,
+            take_profit_price=tp1,
+            liquidation_price_ex1=liq_price1,
+            liquidation_price_ex2=liq_price2,
+        )
+        
+        return (position, message)
+
     async def stable_spread(
         self,
         symbol: str,
