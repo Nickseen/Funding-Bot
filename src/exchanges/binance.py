@@ -402,11 +402,30 @@ class BinanceExchange(BaseExchange):
             raise RateLimitError(str(e))
     
     async def _api_get_funding_rate(self, symbol: str) -> Dict[str, Any]:
-        """Binance: GET /fapi/v1/premiumIndex"""
+        """Binance: GET /fapi/v1/premiumIndex or via ccxt fetch_funding_rate"""
         try:
-            return await self.client.fapiPublic_get_premiumindex({'symbol': symbol})
+            ccxt_symbol = self._convert_symbol(symbol)
+            funding = await self.client.fetch_funding_rate(ccxt_symbol)
+            return {
+                'symbol': symbol,
+                'lastFundingRate': funding.get('fundingRate', 0),
+                'nextFundingTime': funding.get('fundingTimestamp', 0),
+            }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
+        except Exception as e:
+            # Fallback to ticker info if funding rate API fails
+            try:
+                ccxt_symbol = self._convert_symbol(symbol)
+                ticker = await self.client.fetch_ticker(ccxt_symbol)
+                info = ticker.get('info', {})
+                return {
+                    'symbol': symbol,
+                    'lastFundingRate': info.get('lastFundingRate', 0),
+                    'nextFundingTime': info.get('nextFundingTime', 0),
+                }
+            except:
+                raise ExchangeError(f"Failed to get funding rate: {e}")
     
     # ============================================
     # PARSERS (convert Binance format to our types)
@@ -444,8 +463,8 @@ class BinanceExchange(BaseExchange):
         return OrderBook(
             symbol=data['symbol'],
             exchange=self.exchange_name,
-            bids=[(float(price), float(qty)) for price, qty in data['bids']],
-            asks=[(float(price), float(qty)) for price, qty in data['asks']],
+            bids=[(float(item[0]), float(item[1])) for item in data['bids']],
+            asks=[(float(item[0]), float(item[1])) for item in data['asks']],
             timestamp=datetime.fromtimestamp(data['timestamp'] / 1000) if 'timestamp' in data else datetime.utcnow()
         )
     
@@ -473,12 +492,15 @@ class BinanceExchange(BaseExchange):
     def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
         """Convert Binance funding data to FundingRate"""
         from datetime import datetime
+        rate = float(data.get('lastFundingRate', 0) or 0)
+        next_funding_ts = int(data.get('nextFundingTime', 0) or 0)
         
         return FundingRate(
-            symbol=data['symbol'],
+            symbol=data.get('symbol', ''),
             exchange=self.exchange_name,
-            rate=float(data['lastFundingRate']),
-            next_funding_time=datetime.fromtimestamp(int(data['nextFundingTime']) / 1000),
+            rate=rate,
+            rate_bps=rate * 10000,
+            next_funding_time=datetime.fromtimestamp(next_funding_ts / 1000) if next_funding_ts else datetime.utcnow(),
             timestamp=datetime.utcnow()
         )
     

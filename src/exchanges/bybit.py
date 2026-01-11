@@ -364,46 +364,35 @@ class BybitExchange(BaseExchange):
         quantity: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Bybit: POST /v5/order/create with orderType=Market and triggerPrice
+        Bybit: POST /v5/position/trading-stop
         
-        Bybit V5 API uses conditional orders with triggerPrice for SL/TP
+        Sets stop loss directly on the position (not a separate trigger order)
         """
         try:
             from .enums import PositionSide
             ccxt_symbol = self._convert_symbol(symbol)
-            order_side = 'sell' if side == PositionSide.LONG else 'buy'
             
-            # If quantity not provided, get current position size
-            if quantity is None:
-                positions = await self.client.fetch_positions([ccxt_symbol])
-                position = next(
-                    (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
-                    None
-                )
-                if position:
-                    quantity = float(position['contracts'])
-                else:
-                    raise ExchangeError(f"No position found for {symbol}")
+            # Get symbol in Bybit format (BTCUSDT)
+            bybit_symbol = ccxt_symbol.replace('/', '').replace(':USDT', '')
             
-            # Bybit uses conditional order for stop loss
-            params = {
-                'triggerPrice': stop_price,
-                'triggerBy': 'MarkPrice',
-                'reduceOnly': True,
-                'category': 'linear',  # USDT perpetual
-            }
+            # positionIdx: 0 = one-way mode, 1 = hedge-mode Buy, 2 = hedge-mode Sell
+            position_idx = 0  # One-way mode
             
-            order = await self.client.create_order(
-                symbol=ccxt_symbol,
-                type='market',
-                side=order_side,
-                amount=quantity,
-                params=params
-            )
-            return order
+            # Use Bybit's trading-stop API to set SL on position
+            response = await self.client.private_post_v5_position_trading_stop({
+                'category': 'linear',
+                'symbol': bybit_symbol,
+                'stopLoss': str(stop_price),
+                'slTriggerBy': 'MarkPrice',
+                'positionIdx': position_idx,
+            })
+            
+            return response
             
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
+        except Exception as e:
+            raise ExchangeError(f"Failed to set position stop loss: {e}")
     
     async def _api_set_take_profit(
         self,
@@ -413,44 +402,35 @@ class BybitExchange(BaseExchange):
         quantity: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Bybit: POST /v5/order/create with orderType=Market and triggerPrice
+        Bybit: POST /v5/position/trading-stop
+        
+        Sets take profit directly on the position (not a separate trigger order)
         """
         try:
             from .enums import PositionSide
             ccxt_symbol = self._convert_symbol(symbol)
-            order_side = 'sell' if side == PositionSide.LONG else 'buy'
             
-            # If quantity not provided, get current position size
-            if quantity is None:
-                positions = await self.client.fetch_positions([ccxt_symbol])
-                position = next(
-                    (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
-                    None
-                )
-                if position:
-                    quantity = float(position['contracts'])
-                else:
-                    raise ExchangeError(f"No position found for {symbol}")
+            # Get symbol in Bybit format (BTCUSDT)
+            bybit_symbol = ccxt_symbol.replace('/', '').replace(':USDT', '')
             
-            # Bybit uses conditional order for take profit
-            params = {
-                'triggerPrice': take_profit_price,
-                'triggerBy': 'MarkPrice',
-                'reduceOnly': True,
+            # positionIdx: 0 = one-way mode
+            position_idx = 0
+            
+            # Use Bybit's trading-stop API to set TP on position
+            response = await self.client.private_post_v5_position_trading_stop({
                 'category': 'linear',
-            }
+                'symbol': bybit_symbol,
+                'takeProfit': str(take_profit_price),
+                'tpTriggerBy': 'MarkPrice',
+                'positionIdx': position_idx,
+            })
             
-            order = await self.client.create_order(
-                symbol=ccxt_symbol,
-                type='market',
-                side=order_side,
-                amount=quantity,
-                params=params
-            )
-            return order
+            return response
             
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
+        except Exception as e:
+            raise ExchangeError(f"Failed to set position take profit: {e}")
     
     async def _api_get_balance(self) -> Dict[str, Any]:
         """Bybit: GET /v5/account/wallet-balance"""
@@ -578,17 +558,21 @@ class BybitExchange(BaseExchange):
         """Convert Bybit order data to Order object"""
         from .types import Order
         
+        # Handle None values safely
+        side = data.get('side') or ''
+        order_type = data.get('type') or ''
+        status = data.get('status') or 'open'
+        
         return Order(
-            id=data.get('id', ''),
-            symbol=data.get('symbol', ''),
+            id=data.get('id', '') or '',
+            symbol=data.get('symbol', '') or '',
             exchange=self.exchange_name.value,
-            side=data.get('side', '').upper(),
-            order_type=data.get('type', '').upper(),
+            side=side.upper() if side else '',
+            order_type=order_type.upper() if order_type else '',
             quantity=float(data.get('amount', 0) or 0),
             price=float(data.get('price', 0) or 0),
-            filled=float(data.get('filled', 0) or 0),
-            status=data.get('status', 'open').upper(),
-            created_at=datetime.utcnow(),
+            filled_quantity=float(data.get('filled', 0) or 0),
+            status=status.upper() if status else 'OPEN',
         )
     
     def _parse_orderbook(self, data: Dict[str, Any]) -> OrderBook:
@@ -643,11 +627,13 @@ class BybitExchange(BaseExchange):
     def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
         """Convert Bybit funding data to FundingRate"""
         next_funding_ts = int(data.get('nextFundingTime', 0) or 0)
+        rate = float(data.get('fundingRate', 0) or 0)
         
         return FundingRate(
             symbol=data.get('symbol', ''),
             exchange=self.exchange_name.value,
-            rate=float(data.get('fundingRate', 0) or 0),
+            rate=rate,
+            rate_bps=rate * 10000,
             next_funding_time=datetime.fromtimestamp(next_funding_ts / 1000) if next_funding_ts else datetime.utcnow(),
             timestamp=datetime.utcnow()
         )

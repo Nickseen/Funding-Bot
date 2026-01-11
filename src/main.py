@@ -1,21 +1,37 @@
 """
 Main entry point for Delta Neutral Bot.
+
+Supports two modes:
+1. CLI mode (default): Interactive menu-driven interface
+2. Bot mode: Automated trading based on configuration
+
+Usage:
+    # CLI mode
+    python -m src.main
+    
+    # CLI mode with exchanges
+    python -m src.main --cli
+    
+    # Bot mode (automated)
+    python -m src.main --bot
 """
 
 import asyncio
-from typing import Optional
+import sys
+from typing import Optional, Dict
 from loguru import logger as log
 
 from config.config import config
-from src.core.state import app_state
+from src.core.state import app_state, AppState
 from src.core.execution_engine import ExecutionEngine
 from src.core.position_closer import PositionCloser
 from src.monitors.funding_tracker import FundingTracker
 from src.monitors.emergency_monitor import EmergencyMonitor
-from src.exchanges.binance import BinanceAdapter
-from src.exchanges.bybit import BybitAdapter
-from src.exchanges.kucoin import KuCoinAdapter
-from src.exchanges.okx import OKXAdapter
+from src.exchanges.base import BaseExchange
+from src.exchanges.binance import BinanceExchange
+from src.exchanges.bybit import BybitExchange
+from src.exchanges.kucoin import KuCoinExchange
+from src.exchanges.okx import OKXExchange
 
 
 class Bot:
@@ -168,8 +184,104 @@ async def main():
     await bot.start()
 
 
+async def main_cli():
+    """
+    Main CLI function - starts interactive menu interface.
+    
+    This is the recommended entry point for manual trading.
+    """
+    from src.cli import CliApp
+    
+    log.info("Starting Delta Neutral Bot CLI...")
+    
+    # Initialize exchanges
+    # TODO: Get API keys from config/environment
+    # For demonstration, create mock exchanges
+    exchanges: Dict[str, BaseExchange] = {}
+    
+    # Try to initialize real exchanges if API keys are available
+    if hasattr(config, 'BINANCE_API_KEY') and config.BINANCE_API_KEY:
+        try:
+            exchanges['binance'] = BinanceExchange(
+                api_key=config.BINANCE_API_KEY,
+                secret_key=config.BINANCE_SECRET_KEY,
+                testnet=config.is_testnet()
+            )
+        except Exception as e:
+            log.warning(f"Error initializing Binance: {e}")
+    
+    if hasattr(config, 'BYBIT_API_KEY') and config.BYBIT_API_KEY:
+        try:
+            exchanges['bybit'] = BybitExchange(
+                api_key=config.BYBIT_API_KEY,
+                secret_key=config.BYBIT_SECRET_KEY,
+                testnet=config.is_testnet()
+            )
+        except Exception as e:
+            log.warning(f"Error initializing Bybit: {e}")
+    
+    # KuCoin adapter is incomplete - skip for now
+    # if hasattr(config, 'KUCOIN_API_KEY') and config.KUCOIN_API_KEY:
+    #     try:
+    #         exchanges['kucoin'] = KuCoinExchange(
+    #             api_key=config.KUCOIN_API_KEY,
+    #             secret_key=config.KUCOIN_SECRET_KEY,
+    #             passphrase=config.KUCOIN_PASSPHRASE,
+    #             testnet=config.is_testnet()
+    #         )
+    #     except Exception as e:
+    #         log.warning(f"Error initializing KuCoin: {e}")
+    
+    if hasattr(config, 'OKX_API_KEY') and config.OKX_API_KEY:
+        try:
+            exchanges['okx'] = OKXExchange(
+                api_key=config.OKX_API_KEY,
+                secret_key=config.OKX_SECRET_KEY,
+                passphrase=config.OKX_PASSPHRASE,
+                testnet=config.is_testnet()
+            )
+        except Exception as e:
+            log.warning(f"Error initializing OKX: {e}")
+    
+    if not exchanges:
+        log.warning("No exchanges configured. CLI will run in demo mode.")
+        log.warning("Configure API keys in .env to enable trading.")
+        # Create stub exchanges for testing UI
+        # STUB: Replace with real exchanges when API keys are configured
+        print("\n⚠️  No exchanges configured!")
+        print("To use the bot, configure API keys in your .env file.")
+        print("\nCLI will start in demo mode with limited functionality.\n")
+    
+    # CLI configuration
+    cli_config = {
+        'default_leverage': config.DEFAULT_LEVERAGE if hasattr(config, 'DEFAULT_LEVERAGE') else 10,
+        'auto_close_enabled': True,
+        'pnl_threshold': 1.0,
+    }
+    
+    # Create and run CLI
+    app = CliApp(exchanges=exchanges, config=cli_config)
+    await app.run()
+
+
 if __name__ == "__main__":
+    # Parse command line arguments
+    mode = "cli"  # Default to CLI mode
+    
+    if len(sys.argv) > 1:
+        arg = sys.argv[1].lower()
+        if arg in ["--bot", "-b", "bot"]:
+            mode = "bot"
+        elif arg in ["--cli", "-c", "cli"]:
+            mode = "cli"
+        elif arg in ["--help", "-h"]:
+            print(__doc__)
+            sys.exit(0)
+    
     try:
-        asyncio.run(main())
+        if mode == "cli":
+            asyncio.run(main_cli())
+        else:
+            asyncio.run(main())
     except KeyboardInterrupt:
         log.info("Bot stopped by user")

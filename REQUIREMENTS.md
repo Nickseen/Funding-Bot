@@ -489,6 +489,7 @@ Funding-Bot/
 │   │   ├── bybit.py        # Bybit адаптер ✅
 │   │   ├── kucoin.py       # KuCoin адаптер ✅
 │   │   ├── okx.py          # OKX адаптер ✅
+│   │   ├── gate.py         # Gate.io адаптер ✅ (добавлен 11 янв 2026)
 │   │   ├── types.py        # 9 dataclasses (Position, Balance, OrderBook...)
 │   │   └── enums.py        # Exchange enum, комиссии в bps
 │   ├── core/               # Бизнес-логика
@@ -960,14 +961,21 @@ async def funding_monitoring_loop():
 - [x] Unit tests (12/12 passing: calculations + emergency_monitor)
 - [x] Venv setup and validation
 
-### Phase 2 ✅ - Exchange Adapters (Completed - 3 Jan 2026)
+### Phase 2 ✅ - Exchange Adapters (Completed - 11 Jan 2026)
 - [x] Binance adapter (basic REST API)
 - [x] Bybit adapter (basic REST API)
 - [x] OKX adapter (basic REST API)
 - [x] KuCoin adapter (basic REST API)
+- [x] Gate.io adapter (full CCXT integration - 11 Jan 2026)
+  - [x] Market/Limit orders (tested on testnet)
+  - [x] Stop Loss / Take Profit (tested on testnet)
+  - [x] Position management
+  - [x] Leverage control
+  - [x] Balance queries
 - [x] Unit testing validation
+- [x] Gate.io testnet testing (all order types verified)
 - [ ] WebSocket price monitoring (skeleton ready, low priority)
-- [ ] Testing on testnets
+- [ ] Testing other exchanges on testnets
 
 ### Phase 3 🚧 - CLI & Integration (Current - Partner Working)
 - [ ] CLI Interface implementation
@@ -1002,5 +1010,26 @@ async def funding_monitoring_loop():
 
 ---
 
-**Дата обновления:** 24 ноября 2025  
-**Статус:** Phase 1 завершена + FundingTracker, Phase 2 в разработке (Binance адаптер)
+## 🎯 Поддерживаемые биржи
+
+### Полностью протестировано ✅
+- **Gate.io** - все типы ордеров (market, limit, SL, TP) протестированы на testnet (11 янв 2026)
+
+### Базовая реализация (требует тестирования)
+- **Binance** - REST API адаптер
+- **Bybit** - REST API адаптер
+- **KuCoin** - REST API адаптер
+- **OKX** - REST API адаптер
+
+### Планируется
+- Hyperliquid
+- MEXC
+- Bitget
+- BingX
+- Aster
+- Lighter
+
+---
+
+**Дата обновления:** 11 января 2026  
+**Статус:** Phase 1 завершена ✅ | Phase 2 завершена ✅ (Gate.io полностью протестирован) | Phase 3 в работе 🚧

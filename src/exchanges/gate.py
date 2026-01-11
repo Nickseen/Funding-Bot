@@ -1,15 +1,16 @@
 """
-OKX Futures Exchange Adapter
+Gate.io Futures Exchange Adapter
 
 This adapter implements only the exchange-specific API calls.
 All validation, logging, and error handling is done in BaseExchange.
 
-OKX API Reference:
-- https://www.okx.com/docs-v5/en/
+Gate.io API Reference:
+- Futures: https://www.gate.io/docs/developers/futures/index.html
+- Uses USDT-settled perpetual contracts
 
-OKX Testnet:
-- https://www.okx.com/docs-v5/en/#overview-demo-trading-services
-- Demo trading available at: https://www.okx.com/trade-swap/btc-usdt-swap (switch to demo mode)
+Gate.io Testnet:
+- https://www.gate.io/docs/developers/futures/index.html#testnet
+- Testnet available at: https://fx-testnet.gateio.ws
 """
 
 from typing import Dict, Any, List, Optional
@@ -21,46 +22,45 @@ from .enums import Exchange, PositionSide, OrderSide, OrderType
 from .types import Position, Order, OrderBook, PriceData, Balance, FundingRate
 
 
-class OKXExchange(BaseExchange):
+class GateExchange(BaseExchange):
     """
-    OKX Futures adapter (USDT-margined perpetual swaps)
+    Gate.io Futures adapter (USDT-settled perpetual contracts)
     
     Implements ONLY:
     1. _api_* methods (raw API calls)
-    2. _parse_* methods (convert OKX response format to our types)
+    2. _parse_* methods (convert Gate response format to our types)
     
     All business logic is in BaseExchange!
     
     Notes:
-    - OKX uses "swap" for perpetual futures
-    - Symbol format: BTC-USDT-SWAP
-    - OKX requires passphrase for API authentication
-    - Demo trading available (testnet)
+    - Gate.io uses "swap" for perpetual futures in ccxt
+    - Symbol format: BTC_USDT (with underscore for API), BTC/USDT:USDT (ccxt)
+    - Contract size varies by symbol
+    - Dual position mode: can have both LONG and SHORT simultaneously
     """
     
     def __init__(
         self,
         api_key: str,
         secret_key: str,
-        passphrase: str = "",
         testnet: bool = False
     ):
-        super().__init__(api_key, secret_key, passphrase=passphrase, testnet=testnet)
-        self.exchange_name = Exchange.OKX
+        super().__init__(api_key, secret_key, testnet=testnet)
+        self.exchange_name = Exchange.GATE
         
         # Initialize ccxt client
-        self.client = ccxt.okx({
+        self.client = ccxt.gate({
             'apiKey': api_key,
             'secret': secret_key,
-            'password': passphrase,  # OKX requires passphrase
             'enableRateLimit': True,
             'options': {
-                'defaultType': 'swap',  # Perpetual swaps
+                'defaultType': 'swap',  # Perpetual futures
+                'defaultSettle': 'usdt',  # USDT-settled
             }
         })
         
         if testnet:
-            # OKX demo trading
+            # Gate.io testnet
             self.client.set_sandbox_mode(True)
     
     # ============================================
@@ -68,7 +68,7 @@ class OKXExchange(BaseExchange):
     # ============================================
     
     async def connect(self) -> bool:
-        """Connect to OKX"""
+        """Connect to Gate.io"""
         try:
             await self.client.load_markets()
             self.connected = True
@@ -77,7 +77,7 @@ class OKXExchange(BaseExchange):
             raise ExchangeError(f"Failed to connect: {e}")
     
     async def disconnect(self) -> None:
-        """Disconnect from OKX"""
+        """Disconnect from Gate.io"""
         await self.client.close()
         self.connected = False
     
@@ -95,13 +95,21 @@ class OKXExchange(BaseExchange):
     
     def _convert_symbol(self, symbol: str) -> str:
         """
-        Convert simple symbol format to OKX ccxt format
+        Convert simple symbol format to Gate.io ccxt format
         
         BTCUSDT -> BTC/USDT:USDT (perpetual swap)
+        BTC_USDT -> BTC/USDT:USDT
         """
         # Already in correct format
-        if '/' in symbol:
+        if '/' in symbol and ':' in symbol:
             return symbol
+        
+        # Handle Gate.io native format BTC_USDT
+        if '_' in symbol:
+            parts = symbol.split('_')
+            if len(parts) == 2:
+                base, quote = parts
+                return f"{base}/{quote}:{quote}"
         
         # Convert BTCUSDT -> BTC/USDT:USDT
         quote_currencies = ['USDT', 'USDC', 'USD']
@@ -113,12 +121,37 @@ class OKXExchange(BaseExchange):
         # Fallback
         return symbol
     
+    def _to_gate_symbol(self, symbol: str) -> str:
+        """
+        Convert to Gate.io native symbol format for API calls
+        
+        BTCUSDT -> BTC_USDT
+        BTC/USDT:USDT -> BTC_USDT
+        """
+        if '_' in symbol and '/' not in symbol:
+            return symbol
+        
+        # From ccxt format
+        if '/' in symbol:
+            base = symbol.split('/')[0]
+            quote = symbol.split('/')[1].split(':')[0]
+            return f"{base}_{quote}"
+        
+        # From simple format
+        quote_currencies = ['USDT', 'USDC', 'USD']
+        for quote in quote_currencies:
+            if symbol.endswith(quote):
+                base = symbol[:-len(quote)]
+                return f"{base}_{quote}"
+        
+        return symbol
+    
     # ============================================
     # API ADAPTERS (pure API calls, no validation!)
     # ============================================
     
     async def _api_get_orderbook(self, symbol: str, limit: int) -> Dict[str, Any]:
-        """OKX: GET /api/v5/market/books"""
+        """Gate.io: GET /api/v4/futures/usdt/order_book"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             return await self.client.fetch_order_book(ccxt_symbol, limit)
@@ -128,30 +161,30 @@ class OKXExchange(BaseExchange):
             raise NetworkError(str(e))
     
     async def _api_get_price_data(self, symbol: str) -> Dict[str, Any]:
-        """OKX: GET /api/v5/market/ticker"""
+        """Gate.io: GET /api/v4/futures/usdt/tickers"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             ticker = await self.client.fetch_ticker(ccxt_symbol)
             return {
                 'symbol': symbol,
-                'bid': ticker['bid'],
-                'ask': ticker['ask'],
-                'bid_qty': ticker.get('bidVolume', 0),
-                'ask_qty': ticker.get('askVolume', 0),
-                'timestamp': ticker['timestamp']
+                'bid': ticker.get('bid') or ticker.get('last'),
+                'ask': ticker.get('ask') or ticker.get('last'),
+                'bid_qty': ticker.get('bidVolume', 0) or 0,
+                'ask_qty': ticker.get('askVolume', 0) or 0,
+                'timestamp': ticker.get('timestamp')
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
     
     async def _api_get_mark_price(self, symbol: str) -> float:
-        """OKX: GET /api/v5/public/mark-price"""
+        """Gate.io: GET /api/v4/futures/usdt/tickers - mark price from ticker"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             ticker = await self.client.fetch_ticker(ccxt_symbol)
-            # OKX includes mark price in ticker info
-            if 'info' in ticker and 'markPx' in ticker['info']:
-                return float(ticker['info']['markPx'])
-            return float(ticker['last'])
+            # Gate.io includes mark price in ticker info
+            if 'info' in ticker and 'mark_price' in ticker['info']:
+                return float(ticker['info']['mark_price'])
+            return float(ticker.get('last', 0))
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
     
@@ -165,15 +198,14 @@ class OKXExchange(BaseExchange):
         price: Optional[float]
     ) -> Dict[str, Any]:
         """
-        OKX: Open position
+        Gate.io: Open position
         
         Steps:
         1. Set leverage
-        2. Convert quantity to contracts (OKX uses contracts, not base currency)
+        2. Convert quantity to contracts
         3. Place order
         
-        Note: OKX contract size for BTC is 0.01 BTC per contract
-        So 0.01 BTC = 1 contract
+        Note: Gate.io uses contracts, contract size varies by symbol
         """
         try:
             ccxt_symbol = self._convert_symbol(symbol)
@@ -182,33 +214,30 @@ class OKXExchange(BaseExchange):
             try:
                 await self.client.set_leverage(leverage, ccxt_symbol)
             except Exception as e:
-                if 'leverage' not in str(e).lower():
+                if 'leverage' not in str(e).lower() and 'not changed' not in str(e).lower():
                     raise
             
-            # 2. Convert quantity to contracts
-            # OKX uses contracts, not base currency amount
-            # Contract size is in market info
+            # 2. Get market info for contract size
             market = self.client.markets.get(ccxt_symbol, {})
-            contract_size = float(market.get('contractSize', 0.01))
-            # quantity is in base currency (BTC), convert to number of contracts
-            contracts = quantity / contract_size
-            # Round to contract precision
-            contracts = round(contracts)  # OKX contracts are whole numbers
+            contract_size = float(market.get('contractSize', 1))
+            
+            # Convert quantity (in base currency like BTC) to contracts
+            # If contract size is 0.001 BTC and quantity is 0.01 BTC, contracts = 10
+            contracts = quantity / contract_size if contract_size else quantity
+            contracts = round(contracts)  # Gate uses integer contracts
             
             # 3. Place order
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = 'buy' if side == PositionSide.LONG else 'sell'
             
-            params = {
-                'tdMode': 'cross',  # Cross margin mode
-            }
+            params = {}
             
             if order_type == OrderType.LIMIT:
                 order = await self.client.create_order(
                     symbol=ccxt_symbol,
                     type=order_type_str,
                     side=order_side,
-                    amount=contracts,  # Use contracts, not quantity
+                    amount=contracts,
                     price=price,
                     params=params
                 )
@@ -217,14 +246,14 @@ class OKXExchange(BaseExchange):
                     symbol=ccxt_symbol,
                     type=order_type_str,
                     side=order_side,
-                    amount=contracts,  # Use contracts, not quantity
+                    amount=contracts,
                     params=params
                 )
             
             # 4. Get position info
             positions = await self.client.fetch_positions([ccxt_symbol])
             position_data = next(
-                (p for p in positions if p['symbol'] == ccxt_symbol and float(p['contracts'] or 0) != 0),
+                (p for p in positions if p['symbol'] == ccxt_symbol and float(p.get('contracts', 0) or 0) != 0),
                 None
             )
             
@@ -242,7 +271,7 @@ class OKXExchange(BaseExchange):
         price: Optional[float]
     ) -> Dict[str, Any]:
         """
-        OKX: Close position
+        Gate.io: Close position
         
         Get current position, place opposite order with reduceOnly=True
         """
@@ -252,7 +281,7 @@ class OKXExchange(BaseExchange):
             # 1. Get current position
             positions = await self.client.fetch_positions([ccxt_symbol])
             position = next(
-                (p for p in positions if p['symbol'] == ccxt_symbol and float(p['contracts'] or 0) != 0),
+                (p for p in positions if p['symbol'] == ccxt_symbol and float(p.get('contracts', 0) or 0) != 0),
                 None
             )
             
@@ -260,16 +289,13 @@ class OKXExchange(BaseExchange):
                 raise ExchangeError(f"No position found for {symbol}")
             
             contracts = float(position['contracts'])
-            position_side = position['side']  # 'long' or 'short'
+            position_side = position.get('side', '')  # 'long' or 'short'
             
             # 2. Place opposite order
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = 'sell' if position_side == 'long' else 'buy'
             
-            params = {
-                'reduceOnly': True,
-                'tdMode': 'cross',
-            }
+            params = {'reduceOnly': True}
             
             if order_type == OrderType.LIMIT:
                 await self.client.create_order(
@@ -308,23 +334,18 @@ class OKXExchange(BaseExchange):
         price: Optional[float],
         reduce_only: bool
     ) -> Dict[str, Any]:
-        """OKX: POST /api/v5/trade/order
-        
-        Note: quantity is in base currency (BTC), need to convert to contracts
-        """
+        """Gate.io: POST /api/v4/futures/usdt/orders"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = side.value.lower()
             
-            # Convert quantity (BTC) to contracts
+            # Convert quantity to contracts
             market = self.client.markets.get(ccxt_symbol, {})
-            contract_size = float(market.get('contractSize', 0.01))
-            contracts = round(quantity / contract_size)
+            contract_size = float(market.get('contractSize', 1))
+            contracts = round(quantity / contract_size) if contract_size else round(quantity)
             
-            params = {
-                'tdMode': 'cross',
-            }
+            params = {}
             if reduce_only:
                 params['reduceOnly'] = True
             
@@ -350,7 +371,7 @@ class OKXExchange(BaseExchange):
             raise RateLimitError(str(e))
     
     async def _api_cancel_order(self, order_id: str, symbol: str) -> bool:
-        """OKX: POST /api/v5/trade/cancel-order"""
+        """Gate.io: DELETE /api/v4/futures/usdt/orders/{order_id}"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             await self.client.cancel_order(order_id, ccxt_symbol)
@@ -359,7 +380,7 @@ class OKXExchange(BaseExchange):
             raise RateLimitError(str(e))
     
     async def _api_set_leverage(self, symbol: str, leverage: int) -> bool:
-        """OKX: POST /api/v5/account/set-leverage"""
+        """Gate.io: POST /api/v4/futures/usdt/positions/{contract}/leverage"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             await self.client.set_leverage(leverage, ccxt_symbol)
@@ -367,22 +388,22 @@ class OKXExchange(BaseExchange):
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except Exception as e:
-            # OKX may return error if leverage is already set
-            if 'leverage' in str(e).lower():
+            # Gate may return error if leverage is already set
+            if 'leverage' in str(e).lower() or 'not changed' in str(e).lower():
                 return True
             raise ExchangeError(f"Failed to set leverage: {e}")
     
     async def _api_set_margin_mode(self, mode: str) -> bool:
-        """OKX: POST /api/v5/account/set-position-mode"""
+        """Gate.io: Set margin mode (cross/isolated)"""
         try:
-            # OKX uses 'cross' or 'isolated'
+            # Gate uses 'cross' or 'isolated'
             margin_mode = 'cross' if mode == 'CROSS' else 'isolated'
             await self.client.set_margin_mode(margin_mode)
             return True
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except Exception as e:
-            if 'already' in str(e).lower():
+            if 'already' in str(e).lower() or 'not changed' in str(e).lower():
                 return True
             raise ExchangeError(f"Failed to set margin mode: {e}")
     
@@ -394,15 +415,13 @@ class OKXExchange(BaseExchange):
         quantity: Optional[float]
     ) -> Dict[str, Any]:
         """
-        OKX: POST /api/v5/trade/order-algo with ordType=conditional
-        
-        Sets stop loss as conditional algo order attached to position
+        Gate.io: Set stop loss order using CCXT createStopLossOrder
         """
         try:
             from .enums import PositionSide
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # Get position to determine size
+            # Get position to determine size and side
             positions = await self.client.fetch_positions([ccxt_symbol])
             position = next(
                 (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
@@ -412,46 +431,39 @@ class OKXExchange(BaseExchange):
             if not position:
                 raise ExchangeError(f"No position found for {symbol}")
             
+            # Get contracts count (Gate uses contracts, not base currency amount)
             contracts = abs(float(position.get('contracts', 0)))
             pos_side = position.get('side', '')  # 'long' or 'short'
             
-            # OKX instrument ID format: BTC-USDT-SWAP
-            inst_id = ccxt_symbol.replace('/', '-').replace(':USDT', '-SWAP')
-            
-            # For SL: if LONG, sell when price falls below SL; if SHORT, buy when price rises above SL
+            # For SL: if LONG, sell when price falls; if SHORT, buy when price rises
             order_side = 'sell' if pos_side == 'long' else 'buy'
             
-            # Use OKX algo order API directly
-            response = await self.client.private_post_trade_order_algo({
-                'instId': inst_id,
-                'tdMode': 'cross',
-                'side': order_side,
-                'ordType': 'conditional',  # Conditional order (SL/TP)
-                'sz': str(int(contracts)),
-                'slTriggerPx': str(stop_price),
-                'slOrdPx': '-1',  # -1 means market price
-                'slTriggerPxType': 'mark',
-                'reduceOnly': 'true',  # OKX requires string 'true', not boolean
-            })
-            
-            # Check response
-            if response.get('code') == '0':
-                data = response.get('data', [{}])[0]
-                return {
-                    'success': True,
-                    'algo_id': data.get('algoId'),
-                    'type': 'stop_loss',
-                    'trigger_price': stop_price
+            # Use CCXT's createStopLossOrder with contracts as amount
+            response = await self.client.create_stop_loss_order(
+                symbol=ccxt_symbol,
+                type='market',  # Market order when triggered
+                side=order_side,
+                amount=contracts,  # Number of contracts
+                stopLossPrice=stop_price,  # Required parameter name
+                params={
+                    'reduceOnly': True,
                 }
-            else:
-                raise ExchangeError(f"OKX algo order error: {response}")
+            )
+            
+            return {
+                'success': True,
+                'order_id': response.get('id'),
+                'type': 'stop_loss',
+                'trigger_price': stop_price,
+                'info': response
+            }
             
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except ExchangeError:
             raise
         except Exception as e:
-            raise ExchangeError(f"Failed to set position stop loss: {e}")
+            raise ExchangeError(f"Failed to set stop loss: {e}")
     
     async def _api_set_take_profit(
         self,
@@ -461,15 +473,13 @@ class OKXExchange(BaseExchange):
         quantity: Optional[float]
     ) -> Dict[str, Any]:
         """
-        OKX: POST /api/v5/trade/order-algo with ordType=conditional
-        
-        Sets take profit as conditional algo order attached to position
+        Gate.io: Set take profit order using CCXT createTakeProfitOrder
         """
         try:
             from .enums import PositionSide
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # Get position to determine size
+            # Get position to determine size and side
             positions = await self.client.fetch_positions([ccxt_symbol])
             position = next(
                 (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
@@ -479,57 +489,50 @@ class OKXExchange(BaseExchange):
             if not position:
                 raise ExchangeError(f"No position found for {symbol}")
             
+            # Get contracts count (Gate uses contracts, not base currency amount)
             contracts = abs(float(position.get('contracts', 0)))
             pos_side = position.get('side', '')  # 'long' or 'short'
             
-            # OKX instrument ID format: BTC-USDT-SWAP
-            inst_id = ccxt_symbol.replace('/', '-').replace(':USDT', '-SWAP')
-            
-            # For TP: if LONG, sell when price rises above TP; if SHORT, buy when price falls below TP
+            # For TP: if LONG, sell when price rises; if SHORT, buy when price falls
             order_side = 'sell' if pos_side == 'long' else 'buy'
             
-            # Use OKX algo order API directly
-            response = await self.client.private_post_trade_order_algo({
-                'instId': inst_id,
-                'tdMode': 'cross',
-                'side': order_side,
-                'ordType': 'conditional',  # Conditional order (SL/TP)
-                'sz': str(int(contracts)),
-                'tpTriggerPx': str(take_profit_price),
-                'tpOrdPx': '-1',  # -1 means market price
-                'tpTriggerPxType': 'mark',
-                'reduceOnly': 'true',  # OKX requires string 'true', not boolean
-            })
-            
-            # Check response
-            if response.get('code') == '0':
-                data = response.get('data', [{}])[0]
-                return {
-                    'success': True,
-                    'algo_id': data.get('algoId'),
-                    'type': 'take_profit',
-                    'trigger_price': take_profit_price
+            # Use CCXT's createTakeProfitOrder with contracts as amount
+            response = await self.client.create_take_profit_order(
+                symbol=ccxt_symbol,
+                type='market',  # Market order when triggered
+                side=order_side,
+                amount=contracts,  # Number of contracts
+                takeProfitPrice=take_profit_price,  # Required parameter name
+                params={
+                    'reduceOnly': True,
                 }
-            else:
-                raise ExchangeError(f"OKX algo order error: {response}")
+            )
+            
+            return {
+                'success': True,
+                'order_id': response.get('id'),
+                'type': 'take_profit',
+                'trigger_price': take_profit_price,
+                'info': response
+            }
             
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except ExchangeError:
             raise
         except Exception as e:
-            raise ExchangeError(f"Failed to set position take profit: {e}")
+            raise ExchangeError(f"Failed to set take profit: {e}")
     
     async def _api_get_balance(self) -> Dict[str, Any]:
-        """OKX: GET /api/v5/account/balance"""
+        """Gate.io: GET /api/v4/futures/usdt/accounts"""
         try:
-            balance = await self.client.fetch_balance()
+            balance = await self.client.fetch_balance({'type': 'swap'})
             return balance
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
     
     async def _api_get_positions(self, symbol: Optional[str]) -> List[Dict[str, Any]]:
-        """OKX: GET /api/v5/account/positions"""
+        """Gate.io: GET /api/v4/futures/usdt/positions"""
         try:
             if symbol:
                 ccxt_symbol = self._convert_symbol(symbol)
@@ -543,7 +546,7 @@ class OKXExchange(BaseExchange):
             raise RateLimitError(str(e))
     
     async def _api_get_position_by_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """OKX: GET /api/v5/account/positions for specific symbol"""
+        """Gate.io: GET /api/v4/futures/usdt/positions/{contract}"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             positions = await self.client.fetch_positions([ccxt_symbol])
@@ -556,14 +559,14 @@ class OKXExchange(BaseExchange):
             raise RateLimitError(str(e))
     
     async def _api_get_account_info(self) -> Dict[str, Any]:
-        """OKX: GET /api/v5/account/config"""
+        """Gate.io: GET /api/v4/futures/usdt/accounts"""
         try:
             return await self._api_get_balance()
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
     
     async def _api_get_symbol_info(self, symbol: str) -> Dict[str, Any]:
-        """OKX: GET /api/v5/public/instruments"""
+        """Gate.io: GET /api/v4/futures/usdt/contracts/{contract}"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             markets = self.client.markets
@@ -581,38 +584,49 @@ class OKXExchange(BaseExchange):
                 'quantity_step': market['precision']['amount'],
                 'min_price': market['limits']['price']['min'],
                 'price_tick': market['precision']['price'],
-                'max_leverage': 125,  # OKX max for major pairs
+                'contract_size': market.get('contractSize', 1),
+                'max_leverage': 100,  # Gate.io max for major pairs
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
     
     async def _api_get_funding_rate(self, symbol: str) -> Dict[str, Any]:
-        """OKX: GET /api/v5/public/funding-rate"""
+        """Gate.io: GET /api/v4/futures/usdt/funding_rate"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
-            # OKX doesn't include funding rate in ticker, use dedicated API
-            funding = await self.client.fetch_funding_rate(ccxt_symbol)
             
-            return {
-                'symbol': symbol,
-                'fundingRate': funding.get('fundingRate', 0),
-                'nextFundingTime': funding.get('nextFundingTimestamp', 0),
-            }
+            # Try to get funding rate via ccxt
+            try:
+                funding = await self.client.fetch_funding_rate(ccxt_symbol)
+                return {
+                    'symbol': symbol,
+                    'fundingRate': funding.get('fundingRate', 0),
+                    'nextFundingTime': funding.get('fundingTimestamp', 0),
+                }
+            except Exception:
+                # Fallback: get from ticker info
+                ticker = await self.client.fetch_ticker(ccxt_symbol)
+                info = ticker.get('info', {})
+                return {
+                    'symbol': symbol,
+                    'fundingRate': float(info.get('funding_rate', 0) or 0),
+                    'nextFundingTime': int(info.get('funding_next_apply', 0) or 0) * 1000,
+                }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
     
     # ============================================
-    # PARSERS (convert OKX format to our types)
+    # PARSERS (convert Gate format to our types)
     # ============================================
     
     def _parse_position(self, data: Dict[str, Any]) -> Position:
-        """Convert OKX position data to Position object"""
+        """Convert Gate.io position data to Position object"""
         symbol = data.get('symbol', '')
         contracts = float(data.get('contracts', 0) or 0)
         side = data.get('side', '')  # 'long' or 'short'
         
         return Position(
-            id=f"okx_{symbol}_{int(datetime.utcnow().timestamp())}",
+            id=f"gate_{symbol}_{int(datetime.utcnow().timestamp())}",
             pair=symbol,
             exchange1=self.exchange_name.value,
             exchange1_pos_id=data.get('id', ''),
@@ -638,8 +652,7 @@ class OKXExchange(BaseExchange):
         )
     
     def _parse_order(self, data: Dict[str, Any]) -> Order:
-        """Convert OKX order data to Order object"""
-        # Handle None values safely
+        """Convert Gate.io order data to Order object"""
         side = data.get('side') or ''
         order_type = data.get('type') or ''
         status = data.get('status') or 'open'
@@ -657,29 +670,33 @@ class OKXExchange(BaseExchange):
         )
     
     def _parse_orderbook(self, data: Dict[str, Any]) -> OrderBook:
-        """Convert OKX orderbook to OrderBook object"""
-        # OKX returns [price, qty, numOrders] - take only first 2
+        """Convert Gate.io orderbook to OrderBook object"""
         return OrderBook(
             symbol=data.get('symbol', ''),
             exchange=self.exchange_name.value,
-            bids=[(float(item[0]), float(item[1])) for item in data.get('bids', [])],
-            asks=[(float(item[0]), float(item[1])) for item in data.get('asks', [])],
+            bids=[(float(price), float(qty)) for price, qty in data.get('bids', [])],
+            asks=[(float(price), float(qty)) for price, qty in data.get('asks', [])],
             timestamp=data.get('timestamp', datetime.utcnow().timestamp())
         )
     
     def _parse_price_data(self, data: Dict[str, Any]) -> PriceData:
-        """Convert OKX ticker to PriceData"""
+        """Convert Gate.io ticker to PriceData"""
+        ts = data.get('timestamp')
+        if ts is None:
+            ts = datetime.utcnow().timestamp() * 1000
+        
         return PriceData(
             symbol=data.get('symbol', ''),
             bid=float(data.get('bid', 0) or 0),
             ask=float(data.get('ask', 0) or 0),
             bid_qty=float(data.get('bid_qty', 0) or 0),
             ask_qty=float(data.get('ask_qty', 0) or 0),
-            timestamp=float(data.get('timestamp', datetime.utcnow().timestamp() * 1000)) / 1000
+            timestamp=float(ts) / 1000
         )
     
     def _parse_balance(self, data: Dict[str, Any]) -> Balance:
-        """Convert OKX balance to Balance object"""
+        """Convert Gate.io balance to Balance object"""
+        # ccxt normalizes balance - look for USDT
         usdt = data.get('USDT', data.get('info', {}).get('USDT', {}))
         
         if isinstance(usdt, dict):
@@ -701,7 +718,7 @@ class OKXExchange(BaseExchange):
         )
     
     def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
-        """Convert OKX funding data to FundingRate"""
+        """Convert Gate.io funding data to FundingRate"""
         next_funding_ts = int(data.get('nextFundingTime', 0) or 0)
         rate = float(data.get('fundingRate', 0) or 0)
         
@@ -709,9 +726,9 @@ class OKXExchange(BaseExchange):
             symbol=data.get('symbol', ''),
             exchange=self.exchange_name.value,
             rate=rate,
-            rate_bps=rate * 10000,  # Convert to basis points (0.0001 = 1 bps)
+            rate_bps=rate * 10000,
             next_funding_time=datetime.fromtimestamp(next_funding_ts / 1000) if next_funding_ts else datetime.utcnow(),
-            timestamp=datetime.utcnow().timestamp()
+            timestamp=datetime.utcnow()
         )
     
     # ============================================
@@ -719,19 +736,24 @@ class OKXExchange(BaseExchange):
     # ============================================
     
     async def subscribe_orderbook(self, symbol: str, callback) -> None:
-        """Subscribe to OKX orderbook WebSocket"""
+        """Subscribe to Gate.io orderbook WebSocket"""
+        # TODO: Implement WebSocket subscription
+        # Gate.io WS: wss://fx-ws.gateio.ws/v4/ws/usdt
         pass
     
     async def subscribe_position_updates(self, callback) -> None:
         """Subscribe to position updates"""
+        # TODO: Implement WebSocket subscription
         pass
     
     async def subscribe_order_updates(self, callback) -> None:
         """Subscribe to order updates"""
+        # TODO: Implement WebSocket subscription
         pass
     
     async def subscribe_account_updates(self, callback) -> None:
         """Subscribe to account updates"""
+        # TODO: Implement WebSocket subscription
         pass
     
     # ============================================
@@ -739,7 +761,7 @@ class OKXExchange(BaseExchange):
     # ============================================
     
     async def get_server_time(self) -> int:
-        """Get OKX server time"""
+        """Get Gate.io server time"""
         try:
             time = await self.client.fetch_time()
             return time
@@ -747,5 +769,47 @@ class OKXExchange(BaseExchange):
             raise ExchangeError(f"Failed to get server time: {e}")
     
     async def sync_time(self) -> None:
-        """Sync time with OKX"""
+        """Sync time with Gate.io"""
+        # ccxt handles this automatically
         pass
+    
+    # ============================================
+    # GATE-SPECIFIC METHODS
+    # ============================================
+    
+    async def set_dual_position_mode(self, dual_mode: bool = True) -> bool:
+        """
+        Set position mode
+        
+        Args:
+            dual_mode: True for dual position mode (can have both LONG and SHORT)
+            
+        Note: Gate.io supports dual position mode by default
+        """
+        try:
+            # Gate.io may not need explicit mode setting through ccxt
+            # The mode is determined by how orders are placed
+            return True
+        except Exception as e:
+            raise ExchangeError(f"Failed to set position mode: {e}")
+    
+    async def get_contract_info(self, symbol: str) -> Dict[str, Any]:
+        """Get detailed contract information"""
+        try:
+            ccxt_symbol = self._convert_symbol(symbol)
+            market = self.client.markets.get(ccxt_symbol)
+            if not market:
+                await self.client.load_markets(True)
+                market = self.client.markets.get(ccxt_symbol)
+            
+            return {
+                'symbol': symbol,
+                'contract_size': market.get('contractSize'),
+                'tick_size': market.get('precision', {}).get('price'),
+                'min_qty': market.get('limits', {}).get('amount', {}).get('min'),
+                'max_leverage': market.get('info', {}).get('leverage_max', 100),
+                'maker_fee': market.get('maker'),
+                'taker_fee': market.get('taker'),
+            }
+        except Exception as e:
+            raise ExchangeError(f"Failed to get contract info: {e}")

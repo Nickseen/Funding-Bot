@@ -1,0 +1,597 @@
+"""
+Commands - Business logic orchestration for CLI operations.
+
+This module contains command handlers that:
+1. Gather user input via input_handler
+2. Call existing core methods (ExecutionEngine, PositionCloser, etc.)
+3. Update state via AppState
+4. Display results via display module
+
+NO trading logic here - only orchestration!
+"""
+
+import asyncio
+from typing import Optional, Tuple, List, Dict, Any
+from datetime import datetime
+
+from ..core.execution_engine import ExecutionEngine
+from ..core.position_closer import PositionCloser
+from ..core.state import AppState
+from ..monitors.funding_tracker import FundingTracker
+from ..exchanges.base import BaseExchange
+from ..exchanges.types import Position, FundingRate
+from ..exchanges.enums import PositionSide, ExecutionMode, Exchange
+from ..utils.calculations import calculate_spread_bps
+
+from .display import (
+    render_exchange_selection_menu,
+    render_execution_mode_menu,
+    render_pair_info,
+    render_position_size_info,
+    render_risk_check,
+    render_position_confirmation,
+    render_positions_list,
+    render_position_detail,
+    render_close_mode_menu,
+    render_hit_the_bid_progress,
+    render_success,
+    render_error,
+    render_warning,
+    render_info,
+    render_loading,
+    clear_screen,
+)
+from .input_handler import (
+    async_input,
+    get_menu_choice,
+    get_integer_input,
+    get_float_input,
+    get_symbol_input,
+    get_confirmation,
+    wait_for_keypress,
+    get_exchange_selection,
+)
+
+
+class OpenPositionCommand:
+    """
+    Command handler for opening new delta-neutral positions.
+    
+    Flow:
+    1. Select exchanges (LONG and SHORT)
+    2. Enter symbol → fetch funding rates
+    3. Enter position size
+    4. Select execution mode
+    5. Confirm and execute
+    """
+    
+    def __init__(
+        self,
+        exchanges: Dict[str, BaseExchange],
+        state: AppState
+    ):
+        """
+        Args:
+            exchanges: Dict of exchange_name -> BaseExchange instance
+            state: AppState for position management
+        """
+        self.exchanges = exchanges
+        self.state = state
+    
+    async def execute(self) -> bool:
+        """
+        Execute open position flow.
+        
+        Returns:
+            True if position was opened, False if cancelled
+        """
+        clear_screen()
+        
+        # Step 1: Select exchanges
+        exchange_list = self._get_exchange_list()
+        print(render_exchange_selection_menu(exchange_list))
+        
+        # Select LONG exchange
+        long_idx = await get_exchange_selection(
+            [ex['name'] for ex in exchange_list],
+            "Select LONG exchange [1-N]: "
+        )
+        if long_idx is None:
+            return False
+        
+        # Select SHORT exchange
+        short_idx = await get_exchange_selection(
+            [ex['name'] for ex in exchange_list],
+            "Select SHORT exchange [1-N]: "
+        )
+        if short_idx is None:
+            return False
+        
+        if long_idx == short_idx:
+            print(render_error("LONG and SHORT exchanges must be different"))
+            await wait_for_keypress()
+            return False
+        
+        long_exchange_name = exchange_list[long_idx]['name']
+        short_exchange_name = exchange_list[short_idx]['name']
+        
+        long_exchange = self.exchanges.get(long_exchange_name.lower())
+        short_exchange = self.exchanges.get(short_exchange_name.lower())
+        
+        if not long_exchange or not short_exchange:
+            print(render_error("Selected exchange not available"))
+            await wait_for_keypress()
+            return False
+        
+        # Step 2: Enter symbol and show funding info
+        symbol = await get_symbol_input()
+        if not symbol:
+            return False
+        
+        print(render_loading("Fetching funding rates..."))
+        
+        try:
+            # Get funding rates from both exchanges
+            funding_long = await long_exchange.get_funding_rate(symbol)
+            funding_short = await short_exchange.get_funding_rate(symbol)
+            
+            print(render_pair_info(
+                symbol=symbol,
+                funding_ex1=funding_long,
+                funding_ex2=funding_short,
+                ex1_name=long_exchange_name,
+                ex2_name=short_exchange_name
+            ))
+        except Exception as e:
+            print(render_error(f"Failed to fetch funding rates: {e}"))
+            await wait_for_keypress()
+            return False
+        
+        # Step 3: Enter position size
+        try:
+            balance_long = await long_exchange.get_balance()
+            balance_short = await short_exchange.get_balance()
+            
+            print(render_position_size_info(
+                balance_ex1=balance_long.available,
+                balance_ex2=balance_short.available,
+                ex1_name=long_exchange_name,
+                ex2_name=short_exchange_name,
+                leverage=10  # Default, will ask user
+            ))
+        except Exception as e:
+            print(render_warning(f"Could not fetch balances: {e}"))
+            # Continue without balance info
+        
+        # Get leverage
+        leverage = await get_integer_input(
+            "Enter leverage [1-100] (default: 10): ",
+            min_val=1,
+            max_val=100,
+            default=10
+        )
+        if leverage is None:
+            return False
+        
+        # Get position size in USD
+        position_size = await get_float_input(
+            "Enter position size per leg in USD: ",
+            min_val=10.0
+        )
+        if position_size is None:
+            return False
+        
+        # Show risk check
+        net_funding_bps = abs(funding_long.rate_bps) + abs(funding_short.rate_bps)
+        funding_per_8h = (net_funding_bps / 100) * position_size
+        print(render_risk_check(position_size, leverage, funding_per_8h))
+        
+        # Step 4: Select execution mode
+        print(render_execution_mode_menu())
+        
+        mode_choice = await get_menu_choice(
+            "Select mode [1-3]: ",
+            valid_choices=["1", "2", "3"]
+        )
+        if mode_choice is None:
+            return False
+        
+        execution_modes = {
+            "1": "hit_the_bid",
+            "2": "stable_spread",
+            "3": "market"
+        }
+        execution_mode = execution_modes[mode_choice]
+        
+        # Step 5: Confirmation
+        print(render_position_confirmation(
+            symbol=symbol,
+            size_usd=position_size,
+            ex1_name=long_exchange_name,
+            ex1_side="LONG",
+            ex2_name=short_exchange_name,
+            ex2_side="SHORT",
+            leverage=leverage,
+            mode=execution_mode,
+            est_funding_8h=funding_per_8h,
+            est_funding_daily=funding_per_8h * 3
+        ))
+        
+        confirmed = await get_confirmation("Proceed? [Y/n]: ", default=True)
+        if not confirmed:
+            print(render_info("Position opening cancelled"))
+            return False
+        
+        # Execute position opening
+        return await self._execute_open(
+            symbol=symbol,
+            long_exchange=long_exchange,
+            short_exchange=short_exchange,
+            position_size=position_size,
+            leverage=leverage,
+            execution_mode=execution_mode,
+            funding_rate_bps=net_funding_bps
+        )
+    
+    async def _execute_open(
+        self,
+        symbol: str,
+        long_exchange: BaseExchange,
+        short_exchange: BaseExchange,
+        position_size: float,
+        leverage: int,
+        execution_mode: str,
+        funding_rate_bps: float
+    ) -> bool:
+        """
+        Execute the actual position opening using ExecutionEngine.
+        
+        Note: ExecutionEngine expects quantity in tokens, so we need to
+        convert USD position size to token quantity.
+        """
+        print(render_loading(f"Opening position in {execution_mode} mode..."))
+        
+        try:
+            # Get current price to calculate quantity
+            # Use minimum price from both exchanges to ensure quantity meets min requirements on both
+            price_long = await long_exchange.get_price_data(symbol)
+            price_short = await short_exchange.get_price_data(symbol)
+            min_price = min(price_long.mid_price, price_short.mid_price)
+            quantity = position_size / min_price
+            
+            # Create ExecutionEngine
+            # Note: long_exchange is exchange1 with LONG side
+            engine = ExecutionEngine(long_exchange, short_exchange)
+            
+            result: Optional[Tuple[Position, str]] = None
+            
+            if execution_mode == "hit_the_bid":
+                # hit_the_bid expects side1 = position on exchange1
+                # We want LONG on exchange1 (long_exchange)
+                result = await engine.hit_the_bid(
+                    symbol=symbol,
+                    side1=PositionSide.LONG,
+                    quantity=quantity,
+                    leverage=leverage,
+                    funding_rate_bps=funding_rate_bps
+                )
+            
+            elif execution_mode == "stable_spread":
+                result = await engine.stable_spread(
+                    symbol=symbol,
+                    side1=PositionSide.LONG,
+                    quantity=quantity,
+                    leverage=leverage,
+                    funding_rate_bps=funding_rate_bps
+                )
+            
+            elif execution_mode == "market":
+                # Market mode - instant execution with market orders
+                result = await engine.market_open(
+                    symbol=symbol,
+                    side1=PositionSide.LONG,
+                    quantity=quantity,
+                    leverage=leverage,
+                    funding_rate_bps=funding_rate_bps
+                )
+            
+            if result:
+                position, message = result
+                
+                # Set initial capital for PnL calculations
+                position.initial_capital = position_size * 2  # Both legs
+                
+                # Add to state
+                await self.state.add_position(position)
+                
+                print(render_success(f"Position opened: {position.id}"))
+                print(message)
+                await wait_for_keypress()
+                return True
+            else:
+                print(render_info("Position opening cancelled or timed out"))
+                await wait_for_keypress()
+                return False
+                
+        except Exception as e:
+            print(render_error(f"Failed to open position: {e}"))
+            await wait_for_keypress()
+            return False
+    
+    def _get_exchange_list(self) -> List[Dict[str, Any]]:
+        """Get list of available exchanges with connection status"""
+        exchange_list = []
+        
+        for name, exchange in self.exchanges.items():
+            exchange_list.append({
+                'name': name.capitalize(),
+                'connected': exchange.connected,
+                'configured': True
+            })
+        
+        return exchange_list
+
+
+class ViewPositionsCommand:
+    """Command handler for viewing open positions."""
+    
+    def __init__(self, state: AppState, exchanges: Dict[str, BaseExchange]):
+        self.state = state
+        self.exchanges = exchanges
+    
+    async def execute(self) -> Optional[Position]:
+        """
+        Execute view positions flow.
+        
+        Returns:
+            Selected position if user wants to view details, None otherwise
+        """
+        clear_screen()
+        
+        positions = await self.state.get_open_positions()
+        print(render_positions_list(positions))
+        
+        if not positions:
+            await wait_for_keypress()
+            return None
+        
+        # Get selection
+        valid_choices = ["0"] + [str(i) for i in range(1, len(positions) + 1)]
+        choice = await get_menu_choice(
+            "Select position for analysis [1-N] or [0] to go back: ",
+            valid_choices
+        )
+        
+        if choice is None or choice == "0":
+            return None
+        
+        selected_position = positions[int(choice) - 1]
+        
+        # Show detailed view
+        await self._show_position_detail(selected_position)
+        
+        return selected_position
+    
+    async def _show_position_detail(self, position: Position) -> None:
+        """Show detailed position view with options"""
+        clear_screen()
+        
+        # Update current prices before showing
+        try:
+            await self._update_position_prices(position)
+        except Exception as e:
+            print(render_warning(f"Could not update prices: {e}"))
+        
+        print(render_position_detail(position))
+        
+        print("\nOptions:")
+        print("1. Close this position")
+        print("2. Refresh prices")
+        print("0. Back to positions list")
+        
+        choice = await get_menu_choice(
+            "Select [0-2]: ",
+            valid_choices=["0", "1", "2"]
+        )
+        
+        if choice == "1":
+            # Trigger close flow
+            closer = ClosePositionCommand(self.state, self.exchanges)
+            await closer.execute_for_position(position)
+        elif choice == "2":
+            # Refresh and show again
+            await self._show_position_detail(position)
+    
+    async def _update_position_prices(self, position: Position) -> None:
+        """Update position with current prices from exchanges"""
+        ex1 = self.exchanges.get(position.exchange1.lower())
+        ex2 = self.exchanges.get(position.exchange2.lower())
+        
+        if ex1:
+            price1 = await ex1.get_price_data(position.pair)
+            position.exchange1_current_price = price1.mid_price
+        
+        if ex2:
+            price2 = await ex2.get_price_data(position.pair)
+            position.exchange2_current_price = price2.mid_price
+        
+        await self.state.update_position(position)
+
+
+class ClosePositionCommand:
+    """
+    Command handler for closing positions.
+    
+    Uses PositionCloser from core module for actual closing logic.
+    """
+    
+    def __init__(self, state: AppState, exchanges: Dict[str, BaseExchange]):
+        self.state = state
+        self.exchanges = exchanges
+    
+    async def execute(self) -> bool:
+        """
+        Execute close position flow.
+        
+        Returns:
+            True if position was closed, False otherwise
+        """
+        clear_screen()
+        
+        positions = await self.state.get_open_positions()
+        print(render_positions_list(positions))
+        
+        if not positions:
+            await wait_for_keypress()
+            return False
+        
+        # Get selection
+        valid_choices = ["0"] + [str(i) for i in range(1, len(positions) + 1)]
+        choice = await get_menu_choice(
+            "Select position to close [1-N] or [0] to cancel: ",
+            valid_choices
+        )
+        
+        if choice is None or choice == "0":
+            return False
+        
+        selected_position = positions[int(choice) - 1]
+        return await self.execute_for_position(selected_position)
+    
+    async def execute_for_position(self, position: Position) -> bool:
+        """
+        Execute close flow for a specific position.
+        
+        Args:
+            position: Position to close
+        
+        Returns:
+            True if closed, False if cancelled
+        """
+        # Get exchanges
+        ex1 = self.exchanges.get(position.exchange1.lower())
+        ex2 = self.exchanges.get(position.exchange2.lower())
+        
+        if not ex1 or not ex2:
+            print(render_error("Exchange not available for closing"))
+            await wait_for_keypress()
+            return False
+        
+        # Get current spread for display
+        try:
+            ob1 = await ex1.get_orderbook(position.pair)
+            ob2 = await ex2.get_orderbook(position.pair)
+            current_spread_bps = calculate_spread_bps(ob1, ob2, position.exchange1_side)
+        except Exception:
+            current_spread_bps = None
+        
+        # Show close mode menu
+        print(render_close_mode_menu(position, current_spread_bps))
+        
+        # Determine valid choices based on execution mode
+        if position.execution_mode == "stable_spread":
+            valid_choices = ["0", "1", "2", "3"]
+        else:
+            valid_choices = ["0", "1", "2", "3"]
+        
+        mode_choice = await get_menu_choice(
+            "Select mode [1-3] or [0] to cancel: ",
+            valid_choices
+        )
+        
+        if mode_choice is None or mode_choice == "0":
+            return False
+        
+        # Create PositionCloser
+        closer = PositionCloser(ex1, ex2, self.state)
+        
+        print(render_loading("Closing position..."))
+        
+        try:
+            success = False
+            
+            if mode_choice == "1":
+                # Hit-the-bid close
+                success = await closer.close_hit_the_bid(position)
+            
+            elif mode_choice == "2":
+                # Flash close
+                success = await closer.close_flash(position)
+            
+            elif mode_choice == "3":
+                if position.execution_mode == "stable_spread":
+                    # Stable spread close
+                    success = await closer.close_stable_spread(position)
+                else:
+                    # Market close
+                    confirmed = await get_confirmation(
+                        "⚠️ Market close will have high slippage. Continue? [y/N]: ",
+                        default=False
+                    )
+                    if confirmed:
+                        success = await closer.close_market(position)
+            
+            if success:
+                print(render_success(f"Position {position.id} closed successfully"))
+            else:
+                print(render_info("Position close cancelled"))
+            
+            await wait_for_keypress()
+            return success
+            
+        except Exception as e:
+            print(render_error(f"Failed to close position: {e}"))
+            await wait_for_keypress()
+            return False
+
+
+
+class SettingsCommand:
+    """
+    Command handler for settings menu.
+    
+    Currently a placeholder - implement as needed.
+    """
+    
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+    
+    async def execute(self) -> None:
+        """Execute settings flow."""
+        from .display import render_settings_menu
+        
+        clear_screen()
+        print(render_settings_menu(
+            default_leverage=self.config.get('default_leverage', 10),
+            auto_close_enabled=self.config.get('auto_close_enabled', True),
+            pnl_threshold=self.config.get('pnl_threshold', 1.0)
+        ))
+        
+        choice = await get_menu_choice(
+            "Select [0-4]: ",
+            valid_choices=["0", "1", "2", "3", "4"]
+        )
+        
+        if choice == "0":
+            return
+        
+        # TODO: Implement settings changes
+        print(render_info("Settings modification not yet implemented"))
+        await wait_for_keypress()
+
+
+class ViewLogsCommand:
+    """Command handler for viewing logs."""
+    
+    async def execute(self) -> None:
+        """Display recent logs."""
+        clear_screen()
+        print("═" * 60)
+        print(" RECENT LOGS")
+        print("═" * 60)
+        
+        # TODO: Read from loguru log file
+        print("\nLog viewing not yet implemented.")
+        print("Check logs in: logs/delta_bot.log")
+        
+        await wait_for_keypress()
