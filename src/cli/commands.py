@@ -40,6 +40,13 @@ from .display import (
     render_info,
     render_loading,
     clear_screen,
+    render_balances_view,
+    render_close_summary,
+    render_smart_pnl_status,
+    render_smart_pnl_stop_menu,
+    render_position_detail_v2,
+    render_insufficient_balance_error,
+    render_position_confirmation_v2,
 )
 from .input_handler import (
     async_input,
@@ -486,20 +493,17 @@ class ClosePositionCommand:
             current_spread_bps = None
         
         # Show close mode menu
-        print(render_close_mode_menu(position, current_spread_bps))
+        print(render_close_mode_menu(position, current_spread_bps, pnl, pnl_pct))
         
-        # Determine valid choices based on execution mode
-        if position.execution_mode == "stable_spread":
-            valid_choices = ["0", "1", "2", "3"]
-        else:
-            valid_choices = ["0", "1", "2", "3"]
+        # 5 options per CLI_SPECIFICATION.md
+        valid_choices = ["1", "2", "3", "4", "5"]
         
         mode_choice = await get_menu_choice(
-            "Select mode [1-3] or [0] to cancel: ",
+            "Select mode [1-5]: ",
             valid_choices
         )
         
-        if mode_choice is None or mode_choice == "0":
+        if mode_choice is None or mode_choice == "5":
             return False
         
         # Create PositionCloser
@@ -509,30 +513,31 @@ class ClosePositionCommand:
         
         try:
             success = False
+            close_method = ""
             
             if mode_choice == "1":
                 # Hit-the-bid close
+                close_method = "Hit-the-bid"
                 success = await closer.close_hit_the_bid(position)
             
             elif mode_choice == "2":
-                # Flash close
-                success = await closer.close_flash(position)
+                # Stable Spread close
+                close_method = "Stable Spread"
+                success = await closer.close_stable_spread(position)
             
             elif mode_choice == "3":
-                if position.execution_mode == "stable_spread":
-                    # Stable spread close
-                    success = await closer.close_stable_spread(position)
-                else:
-                    # Market close
-                    confirmed = await get_confirmation(
-                        "⚠️ Market close will have high slippage. Continue? [y/N]: ",
-                        default=False
-                    )
-                    if confirmed:
-                        success = await closer.close_market(position)
+                # Smart PnL close with 'q' to stop
+                close_method = "Smart PnL"
+                success = await self._execute_smart_pnl_close(position, closer, ex1, ex2)
+            
+            elif mode_choice == "4":
+                # Market close
+                close_method = "Market"
+                success = await closer.close_market(position)
             
             if success:
-                print(render_success(f"Position {position.id} closed successfully"))
+                # Show close summary
+                await self._show_close_summary(position, close_method)
             else:
                 print(render_info("Position close cancelled"))
             
@@ -543,6 +548,155 @@ class ClosePositionCommand:
             print(render_error(f"Failed to close position: {e}"))
             await wait_for_keypress()
             return False
+    
+    async def _execute_smart_pnl_close(
+        self,
+        position: Position,
+        closer: PositionCloser,
+        ex1: BaseExchange,
+        ex2: BaseExchange
+    ) -> bool:
+        """
+        Execute Smart PnL close with 'q' to stop and 10-sec updates.
+        
+        According to CLI_SPECIFICATION.md:
+        - No timeout (wait indefinitely)
+        - Press 'q' to stop
+        - Show current PnL every 10 seconds
+        """
+        from datetime import datetime
+        import select
+        import sys
+        
+        print("\n[Smart PnL Close] Monitoring... Press 'q' + Enter to stop\n")
+        
+        check_interval = 0.5  # 500ms internal check
+        log_interval = 10.0   # 10 sec display update
+        last_log_time = 0.0
+        
+        while True:
+            try:
+                # Check for 'q' input (non-blocking)
+                if self._check_for_quit():
+                    # User pressed 'q' - show stop menu
+                    current_pnl = position.total_pnl
+                    current_pnl_pct = (current_pnl / position.initial_capital * 100) if position.initial_capital > 0 else 0
+                    
+                    print(render_smart_pnl_stop_menu(current_pnl, current_pnl_pct))
+                    
+                    choice = await get_menu_choice(
+                        "Select [1-3]: ",
+                        valid_choices=["1", "2", "3"]
+                    )
+                    
+                    if choice == "1":
+                        # Resume monitoring
+                        print("\n[Smart PnL Close] Resuming...\n")
+                        continue
+                    elif choice == "2":
+                        # Market close
+                        print(render_loading("Executing market close..."))
+                        return await closer.close_market(position)
+                    else:
+                        # Cancel
+                        return False
+                
+                # Get current orderbooks
+                ob1 = await ex1.get_orderbook(position.pair)
+                ob2 = await ex2.get_orderbook(position.pair)
+                
+                # Calculate PnL using smart_pnl logic
+                from ..utils.calculations import calculate_unrealized_pnl_from_orderbooks, can_instant_fill, get_close_prices_and_sides
+                
+                pnl = calculate_unrealized_pnl_from_orderbooks(position, ob1, ob2)
+                pnl_pct = (pnl / position.initial_capital * 100) if position.initial_capital > 0 else 0
+                
+                # Get close prices and check instant fill
+                close_price_ex1, close_price_ex2, close_side_ex1, close_side_ex2 = get_close_prices_and_sides(
+                    position, ob1, ob2
+                )
+                
+                instant_ex1 = can_instant_fill(ob1, close_side_ex1, close_price_ex1)
+                instant_ex2 = can_instant_fill(ob2, close_side_ex2, close_price_ex2)
+                
+                # Log every 10 seconds
+                current_time = asyncio.get_event_loop().time()
+                if current_time - last_log_time >= log_interval:
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    
+                    if pnl >= 0 and instant_ex1 and instant_ex2:
+                        status = "Checking instant fill... ✅"
+                    elif pnl >= 0:
+                        status = "Checking instant fill..."
+                    else:
+                        status = "Waiting..."
+                    
+                    print(render_smart_pnl_status(timestamp, pnl, pnl_pct, status))
+                    last_log_time = current_time
+                
+                # Check close conditions
+                if pnl >= 0 and instant_ex1 and instant_ex2:
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    print(f"[{timestamp}] ✅ Both orders instant fill! Closing...")
+                    
+                    # Execute close via PositionCloser
+                    success = await closer.close_smart_pnl(position)
+                    return success
+                
+                await asyncio.sleep(check_interval)
+                
+            except asyncio.CancelledError:
+                return False
+            except Exception as e:
+                print(render_error(f"Error during monitoring: {e}"))
+                return False
+    
+    def _check_for_quit(self) -> bool:
+        """Check if 'q' was pressed (non-blocking)"""
+        import sys
+        import select
+        
+        # Check if running on Unix (has select.select for stdin)
+        try:
+            if select.select([sys.stdin], [], [], 0.0)[0]:
+                line = sys.stdin.readline().strip().lower()
+                return line == 'q'
+        except (ValueError, OSError):
+            pass
+        
+        return False
+    
+    async def _show_close_summary(self, position: Position, close_method: str) -> None:
+        """Show close summary according to CLI_SPECIFICATION.md"""
+        # Calculate age string
+        age_hours = position.age_hours
+        if age_hours < 24:
+            time_open = f"{int(age_hours)}h {int((age_hours % 1) * 60)}min"
+        else:
+            days = int(age_hours / 24)
+            hours = int(age_hours % 24)
+            time_open = f"{days}d {hours}h"
+        
+        # Calculate values
+        entry_capital = position.initial_capital
+        exit_value = entry_capital + position.total_pnl
+        net_pnl = position.total_pnl
+        net_pnl_pct = (net_pnl / entry_capital * 100) if entry_capital > 0 else 0
+        
+        print(render_close_summary(
+            symbol=position.pair,
+            exchanges=f"{position.exchange1}-{position.exchange2}",
+            close_method=close_method,
+            time_open=time_open,
+            entry_capital=entry_capital,
+            exit_value=exit_value,
+            net_pnl=net_pnl,
+            net_pnl_pct=net_pnl_pct,
+            funding_earned=position.funding_received,
+            spread_pnl=position.unrealized_pnl,
+            entry_fees=position.fees_paid / 2,  # Approximate
+            exit_fees=position.fees_paid / 2
+        ))
 
 
 
@@ -593,5 +747,77 @@ class ViewLogsCommand:
         # TODO: Read from loguru log file
         print("\nLog viewing not yet implemented.")
         print("Check logs in: logs/delta_bot.log")
+        
+        await wait_for_keypress()
+
+
+class ViewBalancesCommand:
+    """
+    Command handler for viewing balances and financial analysis.
+    
+    According to CLI_SPECIFICATION.md - shows:
+    - Total balances across all exchanges
+    - Active positions summary with PnL
+    """
+    
+    def __init__(self, state: AppState, exchanges: Dict[str, BaseExchange]):
+        self.state = state
+        self.exchanges = exchanges
+    
+    async def execute(self) -> None:
+        """Execute view balances flow."""
+        clear_screen()
+        print(render_loading("Fetching balances from exchanges..."))
+        
+        balances = []
+        total_initial = 0.0
+        total_current = 0.0
+        
+        # Fetch balance from each exchange
+        for name, exchange in self.exchanges.items():
+            try:
+                if exchange.connected:
+                    balance = await exchange.get_balance()
+                    balances.append({
+                        'exchange': name.capitalize(),
+                        'total': balance.total,
+                        'free': balance.available,
+                        'used': balance.margin_used
+                    })
+                else:
+                    balances.append({
+                        'exchange': name.capitalize(),
+                        'total': 0.0,
+                        'free': 0.0,
+                        'used': 0.0
+                    })
+            except Exception as e:
+                balances.append({
+                    'exchange': f"{name.capitalize()} (error)",
+                    'total': 0.0,
+                    'free': 0.0,
+                    'used': 0.0
+                })
+        
+        # Get positions summary
+        positions = await self.state.get_open_positions()
+        active_count = len(positions)
+        
+        for pos in positions:
+            total_initial += pos.initial_capital
+            total_current += pos.initial_capital + pos.total_pnl
+        
+        net_pnl = total_current - total_initial
+        net_pnl_pct = (net_pnl / total_initial * 100) if total_initial > 0 else 0
+        
+        clear_screen()
+        print(render_balances_view(
+            balances=balances,
+            active_positions_count=active_count,
+            initial_capital=total_initial,
+            current_value=total_current,
+            net_pnl=net_pnl,
+            net_pnl_pct=net_pnl_pct
+        ))
         
         await wait_for_keypress()
