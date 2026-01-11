@@ -336,3 +336,167 @@ def calculate_spread_bps(
     spread_bps = ((price_ex2 - price_ex1) / price_ex1) * 10000
     
     return spread_bps
+
+
+def calculate_unrealized_pnl(
+    entry_price_ex1: float,
+    entry_price_ex2: float,
+    close_price_ex1: float,
+    close_price_ex2: float,
+    quantity: float,
+    side1: PositionSide
+) -> float:
+    """
+    Calculate unrealized PnL for a delta-neutral position
+    
+    PnL = PnL_ex1 + PnL_ex2
+    
+    For SHORT on Ex1, LONG on Ex2:
+        PnL_ex1 = (entry_ex1 - close_ex1) * qty  (SHORT profit when price drops)
+        PnL_ex2 = (close_ex2 - entry_ex2) * qty  (LONG profit when price rises)
+    
+    For LONG on Ex1, SHORT on Ex2:
+        PnL_ex1 = (close_ex1 - entry_ex1) * qty  (LONG profit when price rises)
+        PnL_ex2 = (entry_ex2 - close_ex2) * qty  (SHORT profit when price drops)
+    
+    Args:
+        entry_price_ex1: Entry price on exchange 1
+        entry_price_ex2: Entry price on exchange 2
+        close_price_ex1: Current close price on exchange 1
+        close_price_ex2: Current close price on exchange 2
+        quantity: Position size in tokens
+        side1: Side on exchange 1 (LONG or SHORT)
+    
+    Returns:
+        Unrealized PnL in USD (positive = profit, negative = loss)
+    """
+    if side1 == PositionSide.SHORT:
+        # SHORT на Ex1, LONG на Ex2
+        pnl_ex1 = (entry_price_ex1 - close_price_ex1) * quantity
+        pnl_ex2 = (close_price_ex2 - entry_price_ex2) * quantity
+    else:  # LONG на Ex1, SHORT на Ex2
+        pnl_ex1 = (close_price_ex1 - entry_price_ex1) * quantity
+        pnl_ex2 = (entry_price_ex2 - close_price_ex2) * quantity
+    
+    return pnl_ex1 + pnl_ex2
+
+
+def calculate_unrealized_pnl_from_orderbooks(
+    position,  # Position object
+    orderbook1,  # OrderBook from exchange1
+    orderbook2   # OrderBook from exchange2
+) -> float:
+    """
+    Calculate unrealized PnL using current orderbook prices
+    
+    Wrapper that extracts prices from orderbooks and calls calculate_unrealized_pnl()
+    
+    Args:
+        position: Position object with entry prices and side
+        orderbook1: Current orderbook from exchange 1
+        orderbook2: Current orderbook from exchange 2
+    
+    Returns:
+        Unrealized PnL in USD
+    """
+    # Determine side from position
+    side1 = PositionSide.SHORT if position.exchange1_side == "SHORT" else PositionSide.LONG
+    
+    # Get close prices based on side
+    if side1 == PositionSide.SHORT:
+        # To close SHORT: BUY at ask
+        # To close LONG: SELL at bid
+        close_price_ex1 = orderbook1.best_ask
+        close_price_ex2 = orderbook2.best_bid
+    else:  # LONG
+        # To close LONG: SELL at bid
+        # To close SHORT: BUY at ask
+        close_price_ex1 = orderbook1.best_bid
+        close_price_ex2 = orderbook2.best_ask
+    
+    # Handle tuple format (price, quantity)
+    if isinstance(close_price_ex1, tuple):
+        close_price_ex1 = close_price_ex1[0]
+    if isinstance(close_price_ex2, tuple):
+        close_price_ex2 = close_price_ex2[0]
+    
+    return calculate_unrealized_pnl(
+        entry_price_ex1=position.exchange1_entry_price,
+        entry_price_ex2=position.exchange2_entry_price,
+        close_price_ex1=close_price_ex1,
+        close_price_ex2=close_price_ex2,
+        quantity=position.quantity,
+        side1=side1
+    )
+
+
+def can_instant_fill(
+    orderbook,  # OrderBook
+    side: str,  # "BUY" or "SELL"
+    price: float
+) -> bool:
+    """
+    Check if a limit order would execute instantly
+    
+    Instant fill conditions:
+    - BUY limit @ price: executes if price >= best_ask (crosses the spread)
+    - SELL limit @ price: executes if price <= best_bid (crosses the spread)
+    
+    Args:
+        orderbook: OrderBook with best_bid and best_ask
+        side: Order side ("BUY" or "SELL")
+        price: Limit order price
+    
+    Returns:
+        True if order would fill instantly
+    """
+    if side == "BUY":
+        best_ask = orderbook.best_ask
+        if isinstance(best_ask, tuple):
+            best_ask = best_ask[0]
+        return price >= best_ask
+    else:  # SELL
+        best_bid = orderbook.best_bid
+        if isinstance(best_bid, tuple):
+            best_bid = best_bid[0]
+        return price <= best_bid
+
+
+def get_close_prices_and_sides(
+    orderbook1,  # OrderBook
+    orderbook2,  # OrderBook
+    side1: PositionSide
+) -> tuple:
+    """
+    Get close prices and order sides for both exchanges
+    
+    Args:
+        orderbook1: OrderBook from exchange 1
+        orderbook2: OrderBook from exchange 2
+        side1: Position side on exchange 1
+    
+    Returns:
+        Tuple of (close_price_ex1, close_price_ex2, close_side_ex1, close_side_ex2)
+    """
+    if side1 == PositionSide.SHORT:
+        # SHORT on Ex1 → BUY to close (at ask)
+        # LONG on Ex2 → SELL to close (at bid)
+        close_price_ex1 = orderbook1.best_ask
+        close_price_ex2 = orderbook2.best_bid
+        close_side_ex1 = "BUY"
+        close_side_ex2 = "SELL"
+    else:  # LONG
+        # LONG on Ex1 → SELL to close (at bid)
+        # SHORT on Ex2 → BUY to close (at ask)
+        close_price_ex1 = orderbook1.best_bid
+        close_price_ex2 = orderbook2.best_ask
+        close_side_ex1 = "SELL"
+        close_side_ex2 = "BUY"
+    
+    # Handle tuple format (price, quantity)
+    if isinstance(close_price_ex1, tuple):
+        close_price_ex1 = close_price_ex1[0]
+    if isinstance(close_price_ex2, tuple):
+        close_price_ex2 = close_price_ex2[0]
+    
+    return (close_price_ex1, close_price_ex2, close_side_ex1, close_side_ex2)

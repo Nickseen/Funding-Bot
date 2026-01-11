@@ -18,7 +18,12 @@ from loguru import logger as log
 from ..exchanges.base import BaseExchange
 from ..exchanges.types import Position, OrderBook
 from ..exchanges.enums import OrderType, PositionSide, PositionStatus
-from ..utils.calculations import calculate_spread_bps
+from ..utils.calculations import (
+    calculate_spread_bps,
+    calculate_unrealized_pnl_from_orderbooks,
+    can_instant_fill,
+    get_close_prices_and_sides,
+)
 from .state import AppState
 
 
@@ -329,7 +334,183 @@ Close position? [Y/n]: """
             return False
     
     # ============================================
-    # 5. EMERGENCY CLOSE
+    # 5. SMART PNL CLOSE
+    # ============================================
+    
+    async def close_smart_pnl(
+        self,
+        position: Position,
+        timeout: Optional[int] = None,
+        progress_callback: Optional[Callable] = None
+    ) -> bool:
+        """
+        Smart PnL-based closing - closes only when profitable and instant fill
+        
+        Условия закрытия (ОБА должны выполняться):
+        1. Unrealized PnL >= 0 (не теряем деньги)
+        2. Обе лимитки исполнятся моментально (instant fill)
+        
+        Это гарантирует:
+        - Отсутствие потерь на спреде при закрытии
+        - Одновременное исполнение на обеих биржах (no delta risk)
+        
+        Args:
+            position: Позиция для закрытия
+            timeout: Таймаут в секундах (None = бесконечно)
+            progress_callback: Callback для обновления UI (optional)
+        
+        Returns:
+            True если закрыта, False если отменено/timeout
+        """
+        log.info(f"🎯 Smart PnL close for {position.id}")
+        
+        start_time = time.time()
+        check_interval = 0.5  # 500ms
+        last_log_time = 0
+        
+        # Определяем side для расчётов
+        side1 = PositionSide.SHORT if position.exchange1_side == "SHORT" else PositionSide.LONG
+        
+        print(f"""
+╔══════════════════════════════════════════════════════════
+║ SMART PNL CLOSE - Waiting for optimal conditions...
+╠══════════════════════════════════════════════════════════
+║ Position: {position.id}
+║ Pair: {position.pair}
+║ Exchanges: {position.exchange1} ({position.exchange1_side}) / {position.exchange2} ({position.exchange2_side})
+╠══════════════════════════════════════════════════════════
+║ Strategy: Close ONLY when:
+║   1. Unrealized PnL >= 0 (no loss)
+║   2. Limit orders execute INSTANTLY on both exchanges
+║ 
+║ Monitoring every 0.5 seconds...
+║ Press Ctrl+C to force menu
+╚══════════════════════════════════════════════════════════
+""")
+        
+        try:
+            while True:
+                # Check timeout
+                if timeout and (time.time() - start_time) > timeout:
+                    log.warning(f"⏰ Smart PnL close timeout after {timeout}s")
+                    return await self._show_smart_pnl_timeout_menu(position)
+                
+                # 1. Получить текущие стаканы
+                ob1 = await self.exchange1.get_orderbook(position.pair)
+                ob2 = await self.exchange2.get_orderbook(position.pair)
+                
+                # 2. Рассчитать unrealized PnL
+                pnl_usd = calculate_unrealized_pnl_from_orderbooks(position, ob1, ob2)
+                pnl_pct = (pnl_usd / position.initial_capital) * 100 if position.initial_capital > 0 else 0
+                
+                # 3. Получить цены закрытия и стороны
+                close_price_ex1, close_price_ex2, close_side_ex1, close_side_ex2 = \
+                    get_close_prices_and_sides(ob1, ob2, side1)
+                
+                # 4. Проверить instant fill на обеих биржах
+                instant_ex1 = can_instant_fill(ob1, close_side_ex1, close_price_ex1)
+                instant_ex2 = can_instant_fill(ob2, close_side_ex2, close_price_ex2)
+                
+                # Логирование каждые 5 секунд
+                current_time = time.time()
+                if current_time - last_log_time >= 5:
+                    elapsed = int(current_time - start_time)
+                    status_ex1 = "✅" if instant_ex1 else "⏳"
+                    status_ex2 = "✅" if instant_ex2 else "⏳"
+                    pnl_status = "✅" if pnl_usd >= 0 else "❌"
+                    
+                    print(
+                        f"⏱️  [{elapsed}s] PnL: ${pnl_usd:+.2f} ({pnl_pct:+.2f}%) {pnl_status} | "
+                        f"Ex1: {status_ex1} | Ex2: {status_ex2}"
+                    )
+                    last_log_time = current_time
+                    
+                    # Callback для UI
+                    if progress_callback:
+                        await progress_callback({
+                            'elapsed': elapsed,
+                            'pnl_usd': pnl_usd,
+                            'pnl_pct': pnl_pct,
+                            'instant_ex1': instant_ex1,
+                            'instant_ex2': instant_ex2,
+                        })
+                
+                # 5. УСЛОВИЕ ЗАКРЫТИЯ: PnL >= 0 И обе instant fill
+                if pnl_usd >= 0 and instant_ex1 and instant_ex2:
+                    elapsed = int(time.time() - start_time)
+                    log.success(
+                        f"✅ Optimal conditions met after {elapsed}s! "
+                        f"PnL=${pnl_usd:+.2f} ({pnl_pct:+.2f}%), both instant fill"
+                    )
+                    
+                    # Выставить лимитки одновременно
+                    await self._close_with_limit_orders(position, ob1, ob2)
+                    
+                    print(f"""
+╔══════════════════════════════════════════════════════════
+║ ✅ POSITION CLOSED SUCCESSFULLY
+╠══════════════════════════════════════════════════════════
+║ Position: {position.id}
+║ Final PnL: ${pnl_usd:+.2f} ({pnl_pct:+.2f}%)
+║ Time waited: {elapsed}s
+║ Close prices:
+║   {position.exchange1}: {close_price_ex1:.6f}
+║   {position.exchange2}: {close_price_ex2:.6f}
+╚══════════════════════════════════════════════════════════
+""")
+                    return True
+                
+                await asyncio.sleep(check_interval)
+        
+        except KeyboardInterrupt:
+            log.info("🛑 Smart PnL close interrupted by user")
+            return await self._show_smart_pnl_timeout_menu(position)
+    
+    async def _show_smart_pnl_timeout_menu(self, position: Position) -> bool:
+        """
+        Меню после timeout/прерывания Smart PnL close
+        """
+        ob1 = await self.exchange1.get_orderbook(position.pair)
+        ob2 = await self.exchange2.get_orderbook(position.pair)
+        
+        pnl_usd = calculate_unrealized_pnl_from_orderbooks(position, ob1, ob2)
+        pnl_pct = (pnl_usd / position.initial_capital) * 100 if position.initial_capital > 0 else 0
+        current_spread_bps = calculate_spread_bps(ob1, ob2, position.exchange1_side)
+        
+        print(f"""
+╔══════════════════════════════════════════════════════════
+║ SMART PNL CLOSE - Interrupted
+╠══════════════════════════════════════════════════════════
+║ Position: {position.id}
+║ Current PnL: ${pnl_usd:+.2f} ({pnl_pct:+.2f}%)
+║ Current Spread: {current_spread_bps:.2f} bps
+╠══════════════════════════════════════════════════════════
+║ Options:
+║ 1. Continue Smart PnL monitoring
+║ 2. Force close (MARKET orders) ⚠️
+║ 3. Cancel (keep position open)
+╚══════════════════════════════════════════════════════════
+Select [1-3]: """, end='')
+        
+        choice = input().strip()
+        
+        if choice == '1':
+            return await self.close_smart_pnl(position)
+        elif choice == '2':
+            print("\n⚠️  WARNING: Market close will cause slippage!")
+            confirm = input("Are you sure? [y/N]: ").strip().lower()
+            if confirm == 'y':
+                return await self.close_market(position)
+            return await self._show_smart_pnl_timeout_menu(position)
+        elif choice == '3':
+            log.info(f"Position {position.id} remains OPEN")
+            return False
+        else:
+            print("Invalid choice, try again...")
+            return await self._show_smart_pnl_timeout_menu(position)
+    
+    # ============================================
+    # 6. EMERGENCY CLOSE
     # ============================================
     
     async def emergency_close(
