@@ -38,6 +38,10 @@ class Config:
     OKX_SECRET_KEY: str = os.getenv("OKX_SECRET_KEY", "")
     OKX_PASSPHRASE: str = os.getenv("OKX_PASSPHRASE", "")
     
+    # Gate.io
+    GATE_API_KEY: str = os.getenv("GATE_API_KEY", "")
+    GATE_SECRET_KEY: str = os.getenv("GATE_SECRET_KEY", "")
+    
     # Bot settings
     MAX_POSITIONS: int = int(os.getenv("MAX_POSITIONS", "100"))
     
