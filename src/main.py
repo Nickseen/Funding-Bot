@@ -302,9 +302,60 @@ async def main_cli():
             if orphans:
                 print(f"\n⚠️  Found {len(orphans)} UNTRACKED position(s) on exchanges!")
                 print("   These positions exist but are not tracked by the bot.")
-                for pos in orphans:
-                    print(f"   - {pos.exchange1}: {pos.pair} {pos.exchange1_side} (qty: {pos.quantity})")
-                print("\n   Use menu option [3] Manage Positions to close them.\n")
+                for i, pos in enumerate(orphans, 1):
+                    print(f"   {i}. {pos.exchange1}: {pos.pair} {pos.exchange1_side} (qty: {pos.quantity})")
+                
+                print("\n   Options:")
+                print("   [C] Close ALL orphan positions with MARKET orders")
+                print("   [S] Skip and continue to CLI (positions remain open)")
+                print("   [1-N] Close specific position")
+                print("\n   Select option: ", end="")
+                
+                try:
+                    response = input().strip().upper()
+                    
+                    if response == 'C':
+                        # Close all orphan positions
+                        print("\n   ⏳ Closing all orphan positions...")
+                        from src.exchanges.enums import OrderType
+                        
+                        for pos in orphans:
+                            try:
+                                ex = exchanges.get(pos.exchange1.lower())
+                                if ex:
+                                    await ex.close_position(pos.pair, OrderType.MARKET)
+                                    print(f"   ✓ Closed {pos.exchange1} {pos.pair} {pos.exchange1_side}")
+                                else:
+                                    print(f"   ✗ Exchange {pos.exchange1} not available")
+                            except Exception as e:
+                                print(f"   ✗ Failed to close {pos.exchange1} {pos.pair}: {e}")
+                        print()
+                        
+                    elif response.isdigit():
+                        idx = int(response) - 1
+                        if 0 <= idx < len(orphans):
+                            pos = orphans[idx]
+                            print(f"\n   ⏳ Closing {pos.exchange1} {pos.pair}...")
+                            from src.exchanges.enums import OrderType
+                            
+                            try:
+                                ex = exchanges.get(pos.exchange1.lower())
+                                if ex:
+                                    await ex.close_position(pos.pair, OrderType.MARKET)
+                                    print(f"   ✓ Closed successfully")
+                                else:
+                                    print(f"   ✗ Exchange {pos.exchange1} not available")
+                            except Exception as e:
+                                print(f"   ✗ Failed: {e}")
+                        else:
+                            print("   Invalid selection")
+                        print()
+                        
+                    else:
+                        print("   Skipping. Positions remain open on exchanges.\n")
+                        
+                except EOFError:
+                    print("\n   Skipping orphan position handling.\n")
     
     # CLI configuration
     cli_config = {
