@@ -12,7 +12,7 @@ Position Closer - Управление закрытием позиций в ра
 import asyncio
 import time
 from typing import Optional, Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from loguru import logger as log
 
 from ..exchanges.base import BaseExchange
@@ -251,7 +251,7 @@ Close position? [Y/n]: """
         
         # Обновляем статус в AppState
         position.status = PositionStatus.CLOSED
-        position.closed_at = datetime.utcnow()
+        position.closed_at = datetime.now(timezone.utc)
         position.close_reason = "market_close"
         await self.state.update_position(position)
         
@@ -571,7 +571,7 @@ Select [1-3]: """, end='')
             
             # Обновляем статус
             position.status = PositionStatus.CLOSED
-            position.closed_at = datetime.utcnow()
+            position.closed_at = datetime.now(timezone.utc)
             position.close_reason = "emergency_close_limit"
             await self.state.update_position(position)
             
@@ -591,7 +591,7 @@ Select [1-3]: """, end='')
             
             # Обновляем статус
             position.status = PositionStatus.CLOSED
-            position.closed_at = datetime.utcnow()
+            position.closed_at = datetime.now(timezone.utc)
             position.close_reason = "emergency_close_market"
             await self.state.update_position(position)
             
@@ -650,7 +650,7 @@ Select [1-3]: """, end='')
         
         # Обновляем статус в AppState
         position.status = PositionStatus.CLOSED
-        position.closed_at = datetime.utcnow()
+        position.closed_at = datetime.now(timezone.utc)
         position.close_reason = "manual_close"
         await self.state.update_position(position)
         

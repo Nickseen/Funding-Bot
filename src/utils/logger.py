@@ -60,5 +60,20 @@ def setup_logger(log_level: str = "INFO", log_dir: str = "logs"):
     return logger
 
 
+def get_logger(name: str = None):
+    """
+    Get a logger instance. 
+    For loguru, we return the same global logger.
+    The name parameter is accepted for compatibility but ignored.
+    
+    Args:
+        name: Module name (ignored, for compatibility)
+    
+    Returns:
+        The global loguru logger instance
+    """
+    return log
+
+
 # Initialize logger
 log = setup_logger()

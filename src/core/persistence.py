@@ -14,7 +14,7 @@ import os
 import asyncio
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import asdict
 
 from ..exchanges.types import Position
@@ -67,7 +67,7 @@ class PositionPersistence:
                 # Convert positions to serializable format
                 data = {
                     "version": "1.0",
-                    "saved_at": datetime.utcnow().isoformat(),
+                    "saved_at": datetime.now(timezone.utc).isoformat(),
                     "positions": {}
                 }
                 
@@ -115,7 +115,7 @@ class PositionPersistence:
                         del data["positions"][position.id]
                     await self._archive_position(position)
                 
-                data["saved_at"] = datetime.utcnow().isoformat()
+                data["saved_at"] = datetime.now(timezone.utc).isoformat()
                 
                 # Atomic write
                 temp_file = self.positions_file.with_suffix('.tmp')
@@ -145,7 +145,7 @@ class PositionPersistence:
                 
                 if position_id in data["positions"]:
                     del data["positions"][position_id]
-                    data["saved_at"] = datetime.utcnow().isoformat()
+                    data["saved_at"] = datetime.now(timezone.utc).isoformat()
                     
                     temp_file = self.positions_file.with_suffix('.tmp')
                     with open(temp_file, 'w') as f:
@@ -204,7 +204,7 @@ class PositionPersistence:
         
         return {
             "version": "1.0",
-            "saved_at": datetime.utcnow().isoformat(),
+            "saved_at": datetime.now(timezone.utc).isoformat(),
             "positions": {}
         }
     

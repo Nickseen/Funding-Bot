@@ -13,6 +13,9 @@ from datetime import datetime
 from ..exchanges.types import Position, Balance, PriceData
 from ..exchanges.enums import PositionStatus, Exchange
 from .persistence import position_persistence, PositionPersistence
+from ..utils.logger import get_logger
+
+log = get_logger(__name__)
 
 
 class AppState:
@@ -81,26 +84,44 @@ class AppState:
         """
         Update existing position and persist to disk.
         
+        IMPORTANT: If the position object comes from get_open_positions(),
+        it's the SAME object as stored in _positions. In that case,
+        if you modified position.status before calling update_position,
+        we can't detect the change because old_position IS position.
+        
+        Solution: We look up current index membership and compare with
+        the new status to determine if re-indexing is needed.
+        
         Args:
-            position: Updated position object
+            position: Updated position object (may be same reference as stored)
         """
         async with self._position_lock:
-            old_position = self._positions.get(position.id)
+            new_status = PositionStatus(position.status)
             
-            # Update indexes if status changed
-            if old_position and old_position.status != position.status:
-                old_status = PositionStatus(old_position.status)
-                new_status = PositionStatus(position.status)
+            # Find which index currently contains this position
+            current_index_status = None
+            for status in PositionStatus:
+                if position.id in self._positions_by_status[status]:
+                    current_index_status = status
+                    break
+            
+            # Re-index if status doesn't match current index
+            if current_index_status is not None and current_index_status != new_status:
+                log.debug(f"update_position: {position.id}, reindex {current_index_status} -> {new_status}")
                 
                 # Remove from old status index
-                if position.id in self._positions_by_status[old_status]:
-                    self._positions_by_status[old_status].remove(position.id)
+                self._positions_by_status[current_index_status].remove(position.id)
                 
                 # Add to new status index
                 if position.id not in self._positions_by_status[new_status]:
                     self._positions_by_status[new_status].append(position.id)
+            elif current_index_status is None:
+                # Position not in any index - add it
+                log.warning(f"Position {position.id} not in any index, adding to {new_status}")
+                if position.id not in self._positions_by_status[new_status]:
+                    self._positions_by_status[new_status].append(position.id)
             
-            # Update position
+            # Update position in main dict
             self._positions[position.id] = position
         
         # Auto-save to disk
