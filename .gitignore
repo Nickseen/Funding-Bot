@@ -24,6 +24,9 @@ build/
 logs/*.log
 logs/*.log.*
 
+# User data (positions, history)
+data/
+
 # Testing
 .pytest_cache/
 .coverage
