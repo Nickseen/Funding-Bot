@@ -9,6 +9,7 @@ NOTE: Flash Funding режим УДАЛЁН - заменён на Stable Spread 
 """
 
 import asyncio
+import time
 from typing import Optional, Tuple, Dict
 from datetime import datetime
 
@@ -352,7 +353,7 @@ Open position anyway? [Y/n]: """
             exchange2_current_price=price2,
             exchange2_leverage=leverage,
             quantity=quantity,
-            entry_time=asyncio.get_event_loop().time(),
+            entry_time=time.time(),
             stop_loss_price=sl1,  # Используем SL первой биржи как "общий"
             take_profit_price=tp1,
             liquidation_price_ex1=liq_price1,
@@ -538,7 +539,7 @@ Open position anyway? [Y/n]: """
             exchange2_current_price=actual_price2,
             exchange2_leverage=leverage,
             quantity=quantity,
-            entry_time=asyncio.get_event_loop().time(),
+            entry_time=time.time(),
             execution_mode="market",
             entry_spread_abs=abs(actual_price2 - actual_price1),
             entry_spread_bps=spread_bps,
@@ -758,7 +759,7 @@ Open position? [Y/n]: """
             exchange2_current_price=exec_price2,
             exchange2_leverage=leverage,
             quantity=quantity,
-            entry_time=asyncio.get_event_loop().time(),
+            entry_time=time.time(),
             execution_mode="stable_spread",
             entry_spread_abs=entry_spread_abs,
             entry_spread_bps=entry_spread_bps,

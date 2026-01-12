@@ -224,15 +224,22 @@ class FundingTracker:
             funding_info = await exchange.get_funding_rate(symbol)
             
             if funding_info.next_funding_time:
-                now = datetime.utcnow()
-                delta = funding_info.next_funding_time - now
+                from datetime import timezone
+                now = datetime.now(timezone.utc)
+                
+                # Handle naive datetime from next_funding_time (shouldn't happen after fixes)
+                next_funding = funding_info.next_funding_time
+                if next_funding.tzinfo is None:
+                    next_funding = next_funding.replace(tzinfo=timezone.utc)
+                
+                delta = next_funding - now
                 seconds = int(delta.total_seconds())
                 
                 logger.debug(
                     f"Next funding for {symbol} on {exchange.__class__.__name__}: "
-                    f"{funding_info.next_funding_time} ({seconds}s)"
+                    f"{next_funding} ({seconds}s)"
                 )
-                return seconds
+                return max(0, seconds)  # Never return negative
             
             # Fallback only if API doesn't provide next_funding_time
             logger.warning(

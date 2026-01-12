@@ -616,8 +616,11 @@ class ClosePositionCommand:
                 pnl_pct = (pnl / position.initial_capital * 100) if position.initial_capital > 0 else 0
                 
                 # Get close prices and check instant fill
+                # Determine position side on exchange 1
+                from ..exchanges.enums import PositionSide
+                side1 = PositionSide.SHORT if position.exchange1_side == "SHORT" else PositionSide.LONG
                 close_price_ex1, close_price_ex2, close_side_ex1, close_side_ex2 = get_close_prices_and_sides(
-                    position, ob1, ob2
+                    ob1, ob2, side1
                 )
                 
                 instant_ex1 = can_instant_fill(ob1, close_side_ex1, close_price_ex1)
