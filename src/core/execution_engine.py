@@ -9,6 +9,7 @@ NOTE: Flash Funding режим УДАЛЁН - заменён на Stable Spread 
 """
 
 import asyncio
+import time
 from typing import Optional, Tuple, Dict
 from datetime import datetime
 
@@ -321,14 +322,32 @@ Open position anyway? [Y/n]: """
         log.info(f"  {self.exchange1.get_name()}: SL={sl1:.4f}, TP={tp1:.4f}")
         log.info(f"  {self.exchange2.get_name()}: SL={sl2:.4f}, TP={tp2:.4f}")
         
-        # 4. Устанавливаем SL/TP ордера (параллельно)
+        # 4. Устанавливаем SL/TP ордера (с задержкой для синхронизации)
+        await asyncio.sleep(1.0)  # Wait for exchanges to sync
+        
         try:
-            await asyncio.gather(
-                self.exchange1.set_stop_loss(symbol, side1, sl1, quantity),
-                self.exchange1.set_take_profit(symbol, side1, tp1, quantity),
-                self.exchange2.set_stop_loss(symbol, side2, sl2, quantity),
-                self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
-            )
+            for attempt in range(2):
+                try:
+                    await self.exchange1.set_stop_loss(symbol, side1, sl1, quantity)
+                    await self.exchange1.set_take_profit(symbol, side1, tp1, quantity)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        log.warning(f"Failed SL/TP for {self.exchange1.get_name()}: {e}")
+            
+            for attempt in range(2):
+                try:
+                    await self.exchange2.set_stop_loss(symbol, side2, sl2, quantity)
+                    await self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        log.warning(f"Failed SL/TP for {self.exchange2.get_name()}: {e}")
+            
             log.success(f"SL/TP orders placed on both exchanges")
         except Exception as e:
             log.warning(f"Failed to set SL/TP orders: {e}")
@@ -352,7 +371,7 @@ Open position anyway? [Y/n]: """
             exchange2_current_price=price2,
             exchange2_leverage=leverage,
             quantity=quantity,
-            entry_time=asyncio.get_event_loop().time(),
+            entry_time=time.time(),
             stop_loss_price=sl1,  # Используем SL первой биржи как "общий"
             take_profit_price=tp1,
             liquidation_price_ex1=liq_price1,
@@ -509,14 +528,32 @@ Open position anyway? [Y/n]: """
         log.info(f"  {self.exchange1.get_name()}: SL={sl1:.4f}, TP={tp1:.4f}")
         log.info(f"  {self.exchange2.get_name()}: SL={sl2:.4f}, TP={tp2:.4f}")
         
-        # 9. Set SL/TP orders
+        # 9. Set SL/TP orders (with delay for sync)
+        await asyncio.sleep(1.0)
+        
         try:
-            await asyncio.gather(
-                self.exchange1.set_stop_loss(symbol, side1, sl1, quantity),
-                self.exchange1.set_take_profit(symbol, side1, tp1, quantity),
-                self.exchange2.set_stop_loss(symbol, side2, sl2, quantity),
-                self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
-            )
+            for attempt in range(2):
+                try:
+                    await self.exchange1.set_stop_loss(symbol, side1, sl1, quantity)
+                    await self.exchange1.set_take_profit(symbol, side1, tp1, quantity)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        log.warning(f"Failed SL/TP for {self.exchange1.get_name()}: {e}")
+            
+            for attempt in range(2):
+                try:
+                    await self.exchange2.set_stop_loss(symbol, side2, sl2, quantity)
+                    await self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        log.warning(f"Failed SL/TP for {self.exchange2.get_name()}: {e}")
+            
             log.success(f"SL/TP orders placed on both exchanges")
         except Exception as e:
             log.warning(f"Failed to set SL/TP orders: {e}")
@@ -538,7 +575,7 @@ Open position anyway? [Y/n]: """
             exchange2_current_price=actual_price2,
             exchange2_leverage=leverage,
             quantity=quantity,
-            entry_time=asyncio.get_event_loop().time(),
+            entry_time=time.time(),
             execution_mode="market",
             entry_spread_abs=abs(actual_price2 - actual_price1),
             entry_spread_bps=spread_bps,
@@ -652,23 +689,32 @@ Open position? [Y/n]: """
         # TODO: В CLI добавить подтверждение
         # Пока открываем позицию
         
-        # 6. Открыть позиции на обеих биржах (параллельно)
+        # 6. Открыть позиции на обеих биржах (SEQUENTIALLY for atomic rollback)
         from ..exchanges.enums import OrderType
         
         log.info(f"Opening stable spread position...")
         log.info(f"  {self.exchange1.get_name()}: {side1.value} {quantity} @ {exec_price1}")
         log.info(f"  {self.exchange2.get_name()}: {side2.value} {quantity} @ {exec_price2}")
         
-        pos1, pos2 = await asyncio.gather(
-            self.exchange1.open_position(
+        pos1 = None
+        pos2 = None
+        
+        try:
+            # Open first leg
+            log.info(f"Opening {self.exchange1.get_name()} position...")
+            pos1 = await self.exchange1.open_position(
                 symbol=symbol,
                 side=side1,
                 quantity=quantity,
                 leverage=leverage,
                 order_type=OrderType.LIMIT,
                 price=exec_price1
-            ),
-            self.exchange2.open_position(
+            )
+            log.success(f"✓ {self.exchange1.get_name()} position opened")
+            
+            # Open second leg
+            log.info(f"Opening {self.exchange2.get_name()} position...")
+            pos2 = await self.exchange2.open_position(
                 symbol=symbol,
                 side=side2,
                 quantity=quantity,
@@ -676,7 +722,22 @@ Open position? [Y/n]: """
                 order_type=OrderType.LIMIT,
                 price=exec_price2
             )
-        )
+            log.success(f"✓ {self.exchange2.get_name()} position opened")
+            
+        except Exception as e:
+            log.error(f"Position opening failed: {e}")
+            
+            # ROLLBACK: Close any opened positions
+            if pos1:
+                log.warning(f"Rolling back {self.exchange1.get_name()} position...")
+                try:
+                    await self.exchange1.close_position(symbol=symbol, order_type=OrderType.MARKET)
+                    log.success(f"✓ {self.exchange1.get_name()} position closed (rollback)")
+                except Exception as rollback_err:
+                    log.critical(f"ROLLBACK FAILED for {self.exchange1.get_name()}: {rollback_err}")
+                    log.critical(f"MANUAL INTERVENTION REQUIRED - Close position manually!")
+            
+            raise Exception(f"Failed to open delta-neutral position: {e}")
         
         log.success(f"Positions opened on both exchanges")
         
@@ -704,14 +765,36 @@ Open position? [Y/n]: """
         log.info(f"  {self.exchange1.get_name()}: SL={sl1:.4f}, TP={tp1:.4f}")
         log.info(f"  {self.exchange2.get_name()}: SL={sl2:.4f}, TP={tp2:.4f}")
         
-        # 9. Установить SL/TP ордера (параллельно)
+        # 9. Установить SL/TP ордера (с задержкой для синхронизации позиций)
+        # OKX может не сразу показывать позицию после открытия
+        await asyncio.sleep(1.0)  # Wait for exchanges to sync
+        
         try:
-            await asyncio.gather(
-                self.exchange1.set_stop_loss(symbol, side1, sl1, quantity),
-                self.exchange1.set_take_profit(symbol, side1, tp1, quantity),
-                self.exchange2.set_stop_loss(symbol, side2, sl2, quantity),
-                self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
-            )
+            # Set SL/TP sequentially with retry for better reliability
+            for attempt in range(2):
+                try:
+                    await self.exchange1.set_stop_loss(symbol, side1, sl1, quantity)
+                    await self.exchange1.set_take_profit(symbol, side1, tp1, quantity)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        log.warning(f"Retry SL/TP for {self.exchange1.get_name()}: {e}")
+                        await asyncio.sleep(0.5)
+                    else:
+                        log.warning(f"Failed SL/TP for {self.exchange1.get_name()}: {e}")
+            
+            for attempt in range(2):
+                try:
+                    await self.exchange2.set_stop_loss(symbol, side2, sl2, quantity)
+                    await self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        log.warning(f"Retry SL/TP for {self.exchange2.get_name()}: {e}")
+                        await asyncio.sleep(0.5)
+                    else:
+                        log.warning(f"Failed SL/TP for {self.exchange2.get_name()}: {e}")
+            
             log.success(f"SL/TP orders placed on both exchanges")
         except Exception as e:
             log.warning(f"Failed to set SL/TP orders: {e}")
@@ -734,7 +817,7 @@ Open position? [Y/n]: """
             exchange2_current_price=exec_price2,
             exchange2_leverage=leverage,
             quantity=quantity,
-            entry_time=asyncio.get_event_loop().time(),
+            entry_time=time.time(),
             execution_mode="stable_spread",
             entry_spread_abs=entry_spread_abs,
             entry_spread_bps=entry_spread_bps,

@@ -99,7 +99,7 @@ class TestDisplayRendering:
     """Test display rendering functions."""
     
     def test_render_main_menu(self):
-        """Test main menu rendering."""
+        """Test main menu rendering with updated 5-item format."""
         from src.cli.display import render_main_menu
         
         result = render_main_menu(
@@ -111,9 +111,11 @@ class TestDisplayRendering:
         
         assert "DELTA NEUTRAL BOT" in result
         assert "Main Menu" in result
-        assert "Open New Position" in result
-        assert "View Positions" in result
+        # Updated menu items per CLI_SPECIFICATION.md
+        assert "Open Position" in result
+        assert "View Open Positions" in result
         assert "Close Position" in result
+        assert "View Balances" in result
         assert "Exit" in result
     
     def test_render_execution_mode_menu(self):

@@ -71,10 +71,52 @@ class OKXExchange(BaseExchange):
         """Connect to OKX"""
         try:
             await self.client.load_markets()
+            
+            # Ensure account is in correct mode for futures trading
+            await self._ensure_account_mode()
+            
             self.connected = True
             return True
         except Exception as e:
             raise ExchangeError(f"Failed to connect: {e}")
+    
+    async def _ensure_account_mode(self) -> None:
+        """
+        Ensure account is in correct mode for futures trading.
+        
+        OKX requires account mode to be set before trading perpetuals.
+        Account levels:
+        - 1: Simple mode (spot only)
+        - 2: Single-currency margin
+        - 3: Multi-currency margin
+        - 4: Portfolio margin
+        """
+        try:
+            # Check current account mode via ccxt
+            account_config = await self.client.private_get_account_config()
+            
+            if account_config and 'data' in account_config and len(account_config['data']) > 0:
+                current_mode = account_config['data'][0].get('acctLv', '1')
+                
+                # If not in margin mode (2, 3, or 4), try to set it
+                if current_mode not in ['2', '3', '4']:
+                    from ..utils.logger import log
+                    log.warning(
+                        "OKX Account Mode Error:\n"
+                        "Your account is in Simple mode (spot only).\n"
+                        "Please set your OKX account to 'Multi-currency margin' mode:\n"
+                        "1. Go to OKX app/website → Trade → Settings\n"
+                        "2. Select 'Account Mode' → 'Multi-currency margin'\n"
+                        "3. Confirm the change\n"
+                        "4. Restart the bot"
+                    )
+                else:
+                    from ..utils.logger import log
+                    log.info(f"OKX account in margin mode (level: {current_mode})")
+                    
+        except Exception as e:
+            from ..utils.logger import log
+            log.warning(f"Could not check OKX account mode: {e}")
     
     async def disconnect(self) -> None:
         """Disconnect from OKX"""
@@ -701,17 +743,29 @@ class OKXExchange(BaseExchange):
         )
     
     def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
-        """Convert OKX funding data to FundingRate"""
+        """
+        Convert OKX funding data to FundingRate.
+        
+        Uses timezone-aware datetime to ensure correct time calculations.
+        """
+        from datetime import timezone
+        
         next_funding_ts = int(data.get('nextFundingTime', 0) or 0)
         rate = float(data.get('fundingRate', 0) or 0)
+        
+        # Convert timestamp to timezone-aware UTC datetime
+        if next_funding_ts:
+            next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc)
+        else:
+            next_funding_time = datetime.now(timezone.utc)
         
         return FundingRate(
             symbol=data.get('symbol', ''),
             exchange=self.exchange_name.value,
             rate=rate,
             rate_bps=rate * 10000,  # Convert to basis points (0.0001 = 1 bps)
-            next_funding_time=datetime.fromtimestamp(next_funding_ts / 1000) if next_funding_ts else datetime.utcnow(),
-            timestamp=datetime.utcnow().timestamp()
+            next_funding_time=next_funding_time,
+            timestamp=datetime.now(timezone.utc).timestamp()
         )
     
     # ============================================

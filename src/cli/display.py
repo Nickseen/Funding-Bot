@@ -66,7 +66,7 @@ def render_main_menu(
     next_funding_str: str = "N/A"
 ) -> str:
     """
-    Render main menu
+    Render main menu according to CLI_SPECIFICATION.md
     
     Args:
         active_positions_count: Number of open positions
@@ -78,20 +78,21 @@ def render_main_menu(
         Formatted menu string
     """
     pnl_sign = "+" if total_pnl >= 0 else ""
+    pnl_pct = f"{pnl_sign}{total_pnl:.1f}%" if total_pnl != 0 else "0.0%"
+    
+    # Status line with positions and PnL
+    status_line = f"Open positions: {active_positions_count} | Total PnL: {pnl_pct}"
     
     lines = [
         _create_header(),
         _create_line("DELTA NEUTRAL BOT - Main Menu"),
+        _create_line(status_line),
         _create_separator(),
-        _create_line(f"Active Positions: {active_positions_count}    │  Total P&L: {pnl_sign}${total_pnl:.2f}"),
-        _create_line(f"Pending Funding: ${pending_funding:.2f}   │  Next Funding: {next_funding_str}"),
-        _create_separator(),
-        _create_line("1. 📈 Open New Position"),
-        _create_line("2. 📊 View Positions"),
-        _create_line("3. 🔴 Close Position"),
-        _create_line("4. ⚙️  Settings"),
-        _create_line("5. 📜 View Logs"),
-        _create_line("6. ❌ Exit"),
+        _create_line("1. Open Position"),
+        _create_line(f"2. View Open Positions ({active_positions_count})"),
+        _create_line("3. Close Position"),
+        _create_line("4. View Balances"),
+        _create_line("5. Exit"),
         _create_footer(),
     ]
     
@@ -409,45 +410,42 @@ def render_position_detail(position: Position) -> str:
 
 def render_close_mode_menu(
     position: Position,
-    current_spread_bps: Optional[float] = None
+    current_spread_bps: Optional[float] = None,
+    current_pnl: Optional[float] = None,
+    current_pnl_pct: Optional[float] = None
 ) -> str:
     """
-    Render close mode selection menu
+    Render close mode selection menu according to CLI_SPECIFICATION.md
     
     Args:
         position: Position to close
-        current_spread_bps: Current spread (optional, for stable spread info)
+        current_spread_bps: Current spread (optional)
+        current_pnl: Current PnL in USD
+        current_pnl_pct: Current PnL percentage
     """
+    # Format current PnL line
+    pnl_line = ""
+    if current_pnl is not None and current_pnl_pct is not None:
+        pnl_sign = "+" if current_pnl >= 0 else ""
+        pnl_line = f"Current PnL: {pnl_sign}${current_pnl:.2f} ({pnl_sign}{current_pnl_pct:.1f}%)"
+    
     lines = [
         _create_header(),
-        _create_line("SELECT CLOSE MODE"),
-        _create_separator(),
-        _create_line("1. Hit-the-bid (Wait for orderbook intersection)"),
-        _create_line("   └─ Maker fees, best price, may take time"),
-        _create_line(""),
-        _create_line("2. Flash Close (Quick execution with analysis)"),
-        _create_line("   └─ Maker fees, shows P&L before closing"),
+        _create_line(f"Position: {position.pair} {position.exchange1}-{position.exchange2}"),
     ]
     
-    # Add stable spread option if position was opened in that mode
-    if position.execution_mode == "stable_spread":
-        entry_spread = position.entry_spread_bps or 0
-        current = current_spread_bps or 0
-        lines.extend([
-            _create_line(""),
-            _create_line("3. Stable Spread Close (Wait for spread to match entry)"),
-            _create_line(f"   └─ Entry spread: {entry_spread:.2f} bps, Current: {current:.2f} bps"),
-        ])
-    else:
-        lines.extend([
-            _create_line(""),
-            _create_line("3. Market Close (Instant, taker fees)"),
-            _create_line("   └─ Guaranteed close, higher fees"),
-        ])
+    if pnl_line:
+        lines.append(_create_line(pnl_line))
     
     lines.extend([
         _create_separator(),
-        _create_line("Select mode [1-3] or [0] to cancel:"),
+        _create_line("Close Mode:"),
+        _create_separator(),
+        _create_line("1. Hit-the-bid (Wait 5 min for better spread)"),
+        _create_line("2. Stable Spread (Wait until spread matches entry)"),
+        _create_line("3. Smart PnL (Close when PnL>=0 + instant fill) *"),
+        _create_line("4. Market order (Instant)"),
+        _create_line("5. Cancel"),
         _create_footer(),
     ])
     
@@ -530,3 +528,344 @@ def render_loading(message: str = "Loading...") -> str:
 def clear_screen() -> None:
     """Clear terminal screen"""
     print("\033[2J\033[H", end="")
+
+
+# ============================================
+# VIEW BALANCES (Financial Analysis)
+# ============================================
+
+def render_balances_view(
+    balances: List[Dict[str, Any]],
+    active_positions_count: int = 0,
+    initial_capital: float = 0.0,
+    current_value: float = 0.0,
+    net_pnl: float = 0.0,
+    net_pnl_pct: float = 0.0
+) -> str:
+    """
+    Render financial analysis / balances view according to CLI_SPECIFICATION.md
+    
+    Args:
+        balances: List of dicts with 'exchange', 'total', 'free', 'used' keys
+        active_positions_count: Number of active positions
+        initial_capital: Total initial capital in USD
+        current_value: Current total value in USD  
+        net_pnl: Net PnL in USD
+        net_pnl_pct: Net PnL percentage
+    """
+    lines = [
+        _create_header(),
+        _create_line("FINANCIAL ANALYSIS"),
+        _create_separator(),
+        _create_line("Total Balances Across Exchanges:"),
+    ]
+    
+    # Calculate total
+    total_balance = 0.0
+    
+    for b in balances:
+        exchange = b.get('exchange', 'Unknown')
+        total = b.get('total', 0.0)
+        free = b.get('free', 0.0)
+        used = b.get('used', 0.0)
+        total_balance += total
+        
+        lines.append(_create_line(
+            f"  {exchange:<10} ${total:>10,.2f} (Free: ${free:,.0f} | Used: ${used:,.0f})"
+        ))
+    
+    lines.extend([
+        _create_line("  " + "─" * 50),
+        _create_line(f"  {'TOTAL':<10} ${total_balance:>10,.2f}"),
+        _create_line(""),
+    ])
+    
+    # Active positions summary
+    if active_positions_count > 0:
+        pnl_sign = "+" if net_pnl >= 0 else ""
+        lines.extend([
+            _create_line(f"Active Positions: {active_positions_count}"),
+            _create_line(f"  Initial capital: ${initial_capital:,.2f}"),
+            _create_line(f"  Current value:   ${current_value:,.2f}"),
+            _create_line(f"  Net PnL:         {pnl_sign}${net_pnl:.2f} ({pnl_sign}{net_pnl_pct:.2f}%)"),
+        ])
+    else:
+        lines.append(_create_line("No active positions"))
+    
+    lines.append(_create_footer())
+    
+    return "\n".join(lines)
+
+
+# ============================================
+# CLOSE SUMMARY
+# ============================================
+
+def render_close_summary(
+    symbol: str,
+    exchanges: str,
+    close_method: str,
+    time_open: str,
+    entry_capital: float,
+    exit_value: float,
+    net_pnl: float,
+    net_pnl_pct: float,
+    funding_earned: float = 0.0,
+    spread_pnl: float = 0.0,
+    entry_fees: float = 0.0,
+    exit_fees: float = 0.0
+) -> str:
+    """
+    Render close position summary according to CLI_SPECIFICATION.md
+    
+    Args:
+        symbol: Trading pair
+        exchanges: Exchange pair string (e.g., "BINANCE-BYBIT")
+        close_method: Method used to close (e.g., "Smart PnL")
+        time_open: Duration position was open
+        entry_capital: Initial capital invested
+        exit_value: Value at exit
+        net_pnl: Net profit/loss in USD
+        net_pnl_pct: Net PnL percentage
+        funding_earned: Total funding received
+        spread_pnl: PnL from spread changes
+        entry_fees: Fees paid on entry
+        exit_fees: Fees paid on exit
+    """
+    pnl_sign = "+" if net_pnl >= 0 else ""
+    funding_sign = "+" if funding_earned >= 0 else ""
+    spread_sign = "+" if spread_pnl >= 0 else ""
+    total_fees = entry_fees + exit_fees
+    
+    lines = [
+        _create_header(),
+        _create_line("POSITION CLOSED"),
+        _create_separator(),
+        _create_line(f"Symbol: {symbol} {exchanges}"),
+        _create_line(f"Close method: {close_method}"),
+        _create_line(f"Time open: {time_open}"),
+        _create_line(""),
+        _create_line("Financial Results:"),
+        _create_line(f"  Entry capital: ${entry_capital:,.2f}"),
+        _create_line(f"  Exit value:    ${exit_value:,.2f}"),
+        _create_line(f"  Net PnL:       {pnl_sign}${net_pnl:.2f} ({pnl_sign}{net_pnl_pct:.2f}%)"),
+        _create_line(""),
+        _create_line("Breakdown:"),
+        _create_line(f"  Funding earned: {funding_sign}${funding_earned:.2f}"),
+        _create_line(f"  Spread PnL:     {spread_sign}${spread_pnl:.2f}"),
+        _create_line(f"  Total:          {pnl_sign}${net_pnl:.2f}"),
+        _create_line(""),
+        _create_line("Fees:"),
+        _create_line(f"  Entry fees:  ${entry_fees:.2f}"),
+        _create_line(f"  Exit fees:   ${exit_fees:.2f}"),
+        _create_line(f"  Total fees:  ${total_fees:.2f}"),
+        _create_footer(),
+    ]
+    
+    return "\n".join(lines)
+
+
+# ============================================
+# SMART PNL CLOSE MONITORING
+# ============================================
+
+def render_smart_pnl_status(
+    timestamp: str,
+    pnl: float,
+    pnl_pct: float,
+    status: str = "Waiting..."
+) -> str:
+    """
+    Render Smart PnL Close monitoring status line
+    
+    Args:
+        timestamp: Current time string (HH:MM:SS)
+        pnl: Current PnL in USD
+        pnl_pct: Current PnL percentage
+        status: Status message
+    
+    Returns:
+        Formatted status line
+    """
+    pnl_sign = "+" if pnl >= 0 else ""
+    return f"[{timestamp}] Current PnL: {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%) | {status}"
+
+
+def render_smart_pnl_stop_menu(pnl: float, pnl_pct: float) -> str:
+    """
+    Render menu when user stops Smart PnL monitoring with 'q'
+    
+    Args:
+        pnl: Current PnL in USD
+        pnl_pct: Current PnL percentage
+    """
+    pnl_sign = "+" if pnl >= 0 else ""
+    
+    lines = [
+        "",
+        "⚠️  Monitoring stopped by user",
+        "",
+        f"Current PnL: {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.2f}%)",
+        "",
+        "1. Resume monitoring (no timeout)",
+        "2. Market close (instant)",
+        "3. Cancel (back to menu)",
+        "",
+    ]
+    
+    return "\n".join(lines)
+
+
+# ============================================
+# POSITION DETAIL (Updated according to spec)
+# ============================================
+
+def render_position_detail_v2(
+    position: Position,
+    balance_ex1: float = 0.0,
+    balance_ex2: float = 0.0,
+    initial_balance_ex1: float = 0.0,
+    initial_balance_ex2: float = 0.0
+) -> str:
+    """
+    Render detailed position view with actions according to CLI_SPECIFICATION.md
+    
+    Args:
+        position: Position object
+        balance_ex1: Current balance on exchange 1
+        balance_ex2: Current balance on exchange 2
+        initial_balance_ex1: Initial balance on exchange 1
+        initial_balance_ex2: Initial balance on exchange 2
+    """
+    # Side formatting
+    ex1_side_str = f"({position.exchange1_side}, {position.exchange1_leverage}x)"
+    ex2_side_str = f"({position.exchange2_side}, {position.exchange2_leverage}x)"
+    
+    # Entry spread
+    entry_spread = position.entry_spread_bps or 0
+    
+    # PnL
+    pnl = position.total_pnl
+    pnl_pct = (pnl / position.initial_capital * 100) if position.initial_capital > 0 else 0
+    pnl_sign = "+" if pnl >= 0 else ""
+    
+    # Funding payments estimate (8h intervals)
+    age_hours = position.age_hours
+    funding_payments = int(age_hours / 8)
+    
+    # Age formatting
+    if age_hours < 24:
+        age_str = f"{age_hours:.0f}h {int((age_hours % 1) * 60)}min"
+    else:
+        days = int(age_hours / 24)
+        hours = int(age_hours % 24)
+        age_str = f"{days}d {hours}h"
+    
+    lines = [
+        _create_header(),
+        _create_line(f"Position #{position.id}: {position.pair} {position.exchange1}-{position.exchange2}"),
+        _create_separator(),
+        _create_line("Entry:"),
+        _create_line(f"  {position.exchange1}: ${position.exchange1_entry_price:.6f} {ex1_side_str}"),
+        _create_line(f"  {position.exchange2}: ${position.exchange2_entry_price:.6f} {ex2_side_str}"),
+        _create_line(f"  Spread: {entry_spread:+.0f} bps"),
+        _create_line(""),
+        _create_line("Current State:"),
+        _create_line(f"  PnL: {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.1f}%)"),
+        _create_line(f"  Funding: +{position.funding_received:.0f} bps ({funding_payments} payments)"),
+        _create_line(f"  Time open: {age_str}"),
+        _create_line(""),
+        _create_line("Balances (from API):"),
+        _create_line(f"  {position.exchange1}: ${balance_ex1:.2f} (was ${initial_balance_ex1:.2f})"),
+        _create_line(f"  {position.exchange2}: ${balance_ex2:.2f} (was ${initial_balance_ex2:.2f})"),
+        _create_line(""),
+        _create_line("Risk Management:"),
+        _create_line(f"  SL: ${position.stop_loss_price:.2f}"),
+        _create_line(f"  TP: ${position.take_profit_price:.2f}"),
+        _create_line(f"  Liquidation: ${position.liquidation_price_ex1:.2f} / ${position.liquidation_price_ex2:.2f}"),
+        _create_separator(),
+        _create_line("Actions:"),
+        _create_line("[1] Close position"),
+        _create_line("[2] View logs"),
+        _create_line("[3] <- Back"),
+        _create_footer(),
+    ]
+    
+    return "\n".join(lines)
+
+
+# ============================================
+# BALANCE VALIDATION ERROR
+# ============================================
+
+def render_insufficient_balance_error(
+    exchange: str,
+    required: float,
+    available: float
+) -> str:
+    """
+    Render insufficient balance error according to CLI_SPECIFICATION.md
+    
+    Args:
+        exchange: Exchange name
+        required: Required capital
+        available: Available balance
+    """
+    missing = required - available
+    
+    return f"""
+❌ ERROR: Insufficient balance
+
+Required capital:
+  {exchange}: ${required:.2f}
+  Available: ${available:.2f}
+  Missing: ${missing:.2f}
+
+Press any key to return to menu...
+"""
+
+
+# ============================================
+# POSITION CONFIRMATION (Updated)
+# ============================================
+
+def render_position_confirmation_v2(
+    symbol: str,
+    exchange1: str,
+    side1: str,
+    exchange2: str,
+    side2: str,
+    leverage: int,
+    quantity: float,
+    mode: str,
+    required_ex1: float,
+    required_ex2: float,
+    total_required: float
+) -> str:
+    """
+    Render position confirmation screen according to CLI_SPECIFICATION.md
+    """
+    mode_descriptions = {
+        "hit_the_bid": "Hit-the-bid (5 min timeout)",
+        "stable_spread": "Stable Spread",
+        "market": "Market Order (instant)",
+    }
+    
+    lines = [
+        _create_header(),
+        _create_line("POSITION PREVIEW - Confirm before opening"),
+        _create_separator(),
+        _create_line(f"Symbol:     {symbol}"),
+        _create_line(f"Exchange 1: {exchange1} ({side1}, {leverage}x leverage)"),
+        _create_line(f"Exchange 2: {exchange2} ({side2}, {leverage}x leverage)"),
+        _create_line(f"Quantity:   {quantity}"),
+        _create_line(f"Mode:       {mode_descriptions.get(mode, mode)}"),
+        _create_line(""),
+        _create_line("Required Capital:"),
+        _create_line(f"  Exchange 1: ${required_ex1:.2f}"),
+        _create_line(f"  Exchange 2: ${required_ex2:.2f}"),
+        _create_line(f"  Total:      ${total_required:.2f}"),
+        _create_footer(),
+    ]
+    
+    return "\n".join(lines)

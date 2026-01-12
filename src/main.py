@@ -252,6 +252,111 @@ async def main_cli():
         print("To use the bot, configure API keys in your .env file.")
         print("\nCLI will start in demo mode with limited functionality.\n")
     
+    # ============================================
+    # LOAD PERSISTED POSITIONS
+    # ============================================
+    
+    # Step 1: Load positions from disk
+    loaded_count = await app_state.load_positions_from_disk()
+    if loaded_count > 0:
+        log.info(f"📂 Loaded {loaded_count} positions from disk")
+        print(f"\n📂 Loaded {loaded_count} saved position(s) from {app_state.get_positions_file_path()}")
+        
+        # Step 2: Connect exchanges before sync
+        if exchanges:
+            print("🔄 Connecting to exchanges to verify positions...")
+            for name, exchange in exchanges.items():
+                try:
+                    await exchange.connect()
+                    log.info(f"✓ Connected to {name}")
+                except Exception as e:
+                    log.error(f"Failed to connect to {name}: {e}")
+            
+            # Step 3: Sync with exchanges to verify positions still exist
+            print("🔍 Verifying positions on exchanges...")
+            sync_result = await app_state.sync_positions_with_exchanges(exchanges)
+            
+            if sync_result["verified"] > 0:
+                print(f"   ✓ {sync_result['verified']} position(s) verified")
+            if sync_result["orphaned"]:
+                print(f"   ⚠️  {len(sync_result['orphaned'])} ORPHANED position(s) - check immediately!")
+                for pos_id in sync_result["orphaned"]:
+                    print(f"      - {pos_id}")
+            if sync_result["removed"]:
+                print(f"   ✗ {len(sync_result['removed'])} position(s) no longer exist")
+            
+            print()
+    else:
+        # No saved positions - check if there are positions on exchanges
+        if exchanges:
+            print("\n🔄 Connecting to exchanges...")
+            for name, exchange in exchanges.items():
+                try:
+                    await exchange.connect()
+                    log.info(f"✓ Connected to {name}")
+                except Exception as e:
+                    log.error(f"Failed to connect to {name}: {e}")
+            
+            # Discover any orphan positions
+            orphans = await app_state.discover_exchange_positions(exchanges)
+            if orphans:
+                print(f"\n⚠️  Found {len(orphans)} UNTRACKED position(s) on exchanges!")
+                print("   These positions exist but are not tracked by the bot.")
+                for i, pos in enumerate(orphans, 1):
+                    print(f"   {i}. {pos.exchange1}: {pos.pair} {pos.exchange1_side} (qty: {pos.quantity})")
+                
+                print("\n   Options:")
+                print("   [C] Close ALL orphan positions with MARKET orders")
+                print("   [S] Skip and continue to CLI (positions remain open)")
+                print("   [1-N] Close specific position")
+                print("\n   Select option: ", end="")
+                
+                try:
+                    response = input().strip().upper()
+                    
+                    if response == 'C':
+                        # Close all orphan positions
+                        print("\n   ⏳ Closing all orphan positions...")
+                        from src.exchanges.enums import OrderType
+                        
+                        for pos in orphans:
+                            try:
+                                ex = exchanges.get(pos.exchange1.lower())
+                                if ex:
+                                    await ex.close_position(pos.pair, OrderType.MARKET)
+                                    print(f"   ✓ Closed {pos.exchange1} {pos.pair} {pos.exchange1_side}")
+                                else:
+                                    print(f"   ✗ Exchange {pos.exchange1} not available")
+                            except Exception as e:
+                                print(f"   ✗ Failed to close {pos.exchange1} {pos.pair}: {e}")
+                        print()
+                        
+                    elif response.isdigit():
+                        idx = int(response) - 1
+                        if 0 <= idx < len(orphans):
+                            pos = orphans[idx]
+                            print(f"\n   ⏳ Closing {pos.exchange1} {pos.pair}...")
+                            from src.exchanges.enums import OrderType
+                            
+                            try:
+                                ex = exchanges.get(pos.exchange1.lower())
+                                if ex:
+                                    await ex.close_position(pos.pair, OrderType.MARKET)
+                                    print(f"   ✓ Closed successfully")
+                                else:
+                                    print(f"   ✗ Exchange {pos.exchange1} not available")
+                            except Exception as e:
+                                print(f"   ✗ Failed: {e}")
+                        else:
+                            print("   Invalid selection")
+                        print()
+                        
+                    else:
+                        print("   Skipping. Positions remain open on exchanges.\n")
+                        
+                except EOFError:
+                    print("\n   Skipping orphan position handling.\n")
+    
     # CLI configuration
     cli_config = {
         'default_leverage': config.DEFAULT_LEVERAGE if hasattr(config, 'DEFAULT_LEVERAGE') else 10,
@@ -261,7 +366,20 @@ async def main_cli():
     
     # Create and run CLI
     app = CliApp(exchanges=exchanges, config=cli_config)
-    await app.run()
+    
+    try:
+        await app.run()
+    finally:
+        # Save positions before exit
+        log.info("💾 Saving positions before exit...")
+        await app_state.save_all_positions()
+        
+        # Close exchange connections
+        for name, exchange in exchanges.items():
+            try:
+                await exchange.disconnect()
+            except Exception as e:
+                log.warning(f"Error disconnecting {name}: {e}")
 
 
 if __name__ == "__main__":

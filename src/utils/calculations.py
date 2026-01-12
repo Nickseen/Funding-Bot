@@ -42,7 +42,9 @@ def calculate_stop_loss_take_profit(
     distance_percent: float = 20.0
 ) -> Tuple[float, float]:
     """
-    Calculate Stop Loss and Take Profit prices
+    Calculate Stop Loss and Take Profit prices (OLD METHOD - for backward compatibility).
+    
+    DEPRECATED: Use calculate_sl_tp_by_roi() for ROI-based SL/TP.
     
     SL размещается на 80% расстояния от entry к liquidation (остается 20% до ликвидации).
     TP размещается зеркально в противоположную сторону.
@@ -80,6 +82,86 @@ def calculate_stop_loss_take_profit(
         take_profit = entry_price - (distance * distance_ratio)
     
     return (stop_loss, take_profit)
+
+
+def calculate_sl_tp_by_roi(
+    entry_price: float,
+    position_size_usd: float,
+    leverage: int,
+    side: str,
+    sl_roi_pct: float = -80.0,
+    tp_roi_pct: float = 80.0
+) -> Tuple[float, float]:
+    """
+    Calculate Stop-Loss and Take-Profit prices based on ROI percentage.
+    
+    This is the RECOMMENDED method for SL/TP calculation.
+    
+    Args:
+        entry_price: Entry price of position
+        position_size_usd: Position size in USD (notional)
+        leverage: Leverage used (e.g., 10)
+        side: 'LONG' or 'SHORT'
+        sl_roi_pct: Stop-Loss ROI % (default: -80%)
+        tp_roi_pct: Take-Profit ROI % (default: +80%)
+    
+    Returns:
+        (stop_loss_price, take_profit_price)
+    
+    Formula:
+        Margin = position_size_usd / leverage
+        PnL = Margin × (ROI% / 100)
+        
+        For LONG:
+            SL Price = entry_price + (PnL / quantity)  # PnL is negative
+            TP Price = entry_price + (PnL / quantity)  # PnL is positive
+        
+        For SHORT:
+            SL Price = entry_price - (PnL / quantity)  # Opposite
+            TP Price = entry_price - (PnL / quantity)
+    
+    Example:
+        entry_price = $90,000
+        position_size = $10,000
+        leverage = 10x
+        margin = $1,000
+        
+        For -80% ROI (SL):
+            loss = $1,000 × 0.80 = $800
+            quantity = $10,000 / $90,000 = 0.111 BTC
+            price_move = $800 / 0.111 = $7,200
+            
+            LONG SL = $90,000 - $7,200 = $82,800
+            SHORT SL = $90,000 + $7,200 = $97,200
+    """
+    # Calculate margin (capital at risk)
+    margin = position_size_usd / leverage
+    
+    # Calculate quantity (in base asset)
+    quantity = position_size_usd / entry_price
+    
+    # Calculate PnL in USD
+    sl_pnl = margin * (sl_roi_pct / 100)  # Negative value
+    tp_pnl = margin * (tp_roi_pct / 100)  # Positive value
+    
+    # Convert PnL to price movement
+    sl_price_move = sl_pnl / quantity
+    tp_price_move = tp_pnl / quantity
+    
+    if side.upper() == 'LONG':
+        # LONG: Price down = loss, price up = profit
+        stop_loss = entry_price + sl_price_move    # Lower price (sl_price_move is negative)
+        take_profit = entry_price + tp_price_move  # Higher price
+    else:  # SHORT
+        # SHORT: Price up = loss, price down = profit
+        stop_loss = entry_price - sl_price_move    # Higher price (sl_price_move is negative, so subtract = add)
+        take_profit = entry_price - tp_price_move  # Lower price
+    
+    # Ensure prices are positive
+    stop_loss = max(stop_loss, entry_price * 0.01)  # At least 1% of entry
+    take_profit = max(take_profit, entry_price * 0.01)
+    
+    return stop_loss, take_profit
 
 
 def calculate_position_pnl(

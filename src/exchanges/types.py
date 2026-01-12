@@ -265,18 +265,48 @@ class FundingRate:
     
     @property
     def time_to_funding_minutes(self) -> float:
-        """Minutes until next funding"""
+        """
+        Minutes until next funding.
+        
+        Uses timezone-aware comparison to avoid time drift issues.
+        """
         if not self.next_funding_time:
             return 0.0
-        delta = self.next_funding_time - datetime.utcnow()
+        
+        from datetime import timezone
+        
+        # Ensure we compare timezone-aware datetimes
+        now = datetime.now(timezone.utc)
+        
+        # If next_funding_time is naive, assume UTC
+        funding_time = self.next_funding_time
+        if funding_time.tzinfo is None:
+            funding_time = funding_time.replace(tzinfo=timezone.utc)
+        
+        delta = funding_time - now
         return delta.total_seconds() / 60
     
     @property
     def time_to_funding_seconds(self) -> int:
-        """Seconds until next funding"""
+        """
+        Seconds until next funding.
+        
+        Uses timezone-aware comparison to avoid time drift issues.
+        """
         if not self.next_funding_time:
             return 0
-        delta = self.next_funding_time - datetime.utcnow()
+        
+        from datetime import timezone
+        
+        # Ensure we compare timezone-aware datetimes
+        now = datetime.now(timezone.utc)
+        
+        # If next_funding_time is naive, assume UTC
+        funding_time = self.next_funding_time
+        if funding_time.tzinfo is None:
+            funding_time = funding_time.replace(tzinfo=timezone.utc)
+        
+        delta = funding_time - now
         return int(delta.total_seconds())
     
     @property

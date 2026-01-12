@@ -34,6 +34,7 @@ from .commands import (
     ClosePositionCommand,
     SettingsCommand,
     ViewLogsCommand,
+    ViewBalancesCommand,
 )
 from .display import render_info, render_error, clear_screen
 
@@ -165,6 +166,7 @@ class CliApp:
             MenuAction.OPEN_POSITION: self._handle_open_position,
             MenuAction.VIEW_POSITIONS: self._handle_view_positions,
             MenuAction.CLOSE_POSITION: self._handle_close_position,
+            MenuAction.VIEW_BALANCES: self._handle_view_balances,
             MenuAction.SETTINGS: self._handle_settings,
             MenuAction.VIEW_LOGS: self._handle_view_logs,
         }
@@ -248,6 +250,14 @@ class CliApp:
     async def _handle_settings(self) -> None:
         """Handle Settings menu action."""
         command = SettingsCommand(config=self.config)
+        await command.execute()
+    
+    async def _handle_view_balances(self) -> None:
+        """Handle View Balances menu action."""
+        command = ViewBalancesCommand(
+            state=self.state,
+            exchanges=self.exchanges
+        )
         await command.execute()
     
     async def _handle_view_logs(self) -> None:
