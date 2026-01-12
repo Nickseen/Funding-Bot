@@ -322,14 +322,32 @@ Open position anyway? [Y/n]: """
         log.info(f"  {self.exchange1.get_name()}: SL={sl1:.4f}, TP={tp1:.4f}")
         log.info(f"  {self.exchange2.get_name()}: SL={sl2:.4f}, TP={tp2:.4f}")
         
-        # 4. Устанавливаем SL/TP ордера (параллельно)
+        # 4. Устанавливаем SL/TP ордера (с задержкой для синхронизации)
+        await asyncio.sleep(1.0)  # Wait for exchanges to sync
+        
         try:
-            await asyncio.gather(
-                self.exchange1.set_stop_loss(symbol, side1, sl1, quantity),
-                self.exchange1.set_take_profit(symbol, side1, tp1, quantity),
-                self.exchange2.set_stop_loss(symbol, side2, sl2, quantity),
-                self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
-            )
+            for attempt in range(2):
+                try:
+                    await self.exchange1.set_stop_loss(symbol, side1, sl1, quantity)
+                    await self.exchange1.set_take_profit(symbol, side1, tp1, quantity)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        log.warning(f"Failed SL/TP for {self.exchange1.get_name()}: {e}")
+            
+            for attempt in range(2):
+                try:
+                    await self.exchange2.set_stop_loss(symbol, side2, sl2, quantity)
+                    await self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        log.warning(f"Failed SL/TP for {self.exchange2.get_name()}: {e}")
+            
             log.success(f"SL/TP orders placed on both exchanges")
         except Exception as e:
             log.warning(f"Failed to set SL/TP orders: {e}")
@@ -510,14 +528,32 @@ Open position anyway? [Y/n]: """
         log.info(f"  {self.exchange1.get_name()}: SL={sl1:.4f}, TP={tp1:.4f}")
         log.info(f"  {self.exchange2.get_name()}: SL={sl2:.4f}, TP={tp2:.4f}")
         
-        # 9. Set SL/TP orders
+        # 9. Set SL/TP orders (with delay for sync)
+        await asyncio.sleep(1.0)
+        
         try:
-            await asyncio.gather(
-                self.exchange1.set_stop_loss(symbol, side1, sl1, quantity),
-                self.exchange1.set_take_profit(symbol, side1, tp1, quantity),
-                self.exchange2.set_stop_loss(symbol, side2, sl2, quantity),
-                self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
-            )
+            for attempt in range(2):
+                try:
+                    await self.exchange1.set_stop_loss(symbol, side1, sl1, quantity)
+                    await self.exchange1.set_take_profit(symbol, side1, tp1, quantity)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        log.warning(f"Failed SL/TP for {self.exchange1.get_name()}: {e}")
+            
+            for attempt in range(2):
+                try:
+                    await self.exchange2.set_stop_loss(symbol, side2, sl2, quantity)
+                    await self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        log.warning(f"Failed SL/TP for {self.exchange2.get_name()}: {e}")
+            
             log.success(f"SL/TP orders placed on both exchanges")
         except Exception as e:
             log.warning(f"Failed to set SL/TP orders: {e}")
@@ -729,14 +765,36 @@ Open position? [Y/n]: """
         log.info(f"  {self.exchange1.get_name()}: SL={sl1:.4f}, TP={tp1:.4f}")
         log.info(f"  {self.exchange2.get_name()}: SL={sl2:.4f}, TP={tp2:.4f}")
         
-        # 9. Установить SL/TP ордера (параллельно)
+        # 9. Установить SL/TP ордера (с задержкой для синхронизации позиций)
+        # OKX может не сразу показывать позицию после открытия
+        await asyncio.sleep(1.0)  # Wait for exchanges to sync
+        
         try:
-            await asyncio.gather(
-                self.exchange1.set_stop_loss(symbol, side1, sl1, quantity),
-                self.exchange1.set_take_profit(symbol, side1, tp1, quantity),
-                self.exchange2.set_stop_loss(symbol, side2, sl2, quantity),
-                self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
-            )
+            # Set SL/TP sequentially with retry for better reliability
+            for attempt in range(2):
+                try:
+                    await self.exchange1.set_stop_loss(symbol, side1, sl1, quantity)
+                    await self.exchange1.set_take_profit(symbol, side1, tp1, quantity)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        log.warning(f"Retry SL/TP for {self.exchange1.get_name()}: {e}")
+                        await asyncio.sleep(0.5)
+                    else:
+                        log.warning(f"Failed SL/TP for {self.exchange1.get_name()}: {e}")
+            
+            for attempt in range(2):
+                try:
+                    await self.exchange2.set_stop_loss(symbol, side2, sl2, quantity)
+                    await self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        log.warning(f"Retry SL/TP for {self.exchange2.get_name()}: {e}")
+                        await asyncio.sleep(0.5)
+                    else:
+                        log.warning(f"Failed SL/TP for {self.exchange2.get_name()}: {e}")
+            
             log.success(f"SL/TP orders placed on both exchanges")
         except Exception as e:
             log.warning(f"Failed to set SL/TP orders: {e}")

@@ -1,0 +1,39 @@
+{
+  "version": "1.0",
+  "positions": [
+    {
+      "id": "pos_stable_BTCUSDT_34256",
+      "pair": "BTCUSDT",
+      "exchange1": "bybit",
+      "exchange1_pos_id": "bybit_BTC/USDT:USDT_1768214971",
+      "exchange1_side": "LONG",
+      "exchange1_entry_price": 83990.3,
+      "exchange1_current_price": 82588.25,
+      "exchange1_leverage": 10,
+      "exchange2": "okx",
+      "exchange2_pos_id": "okx_BTC/USDT:USDT_1768214972",
+      "exchange2_side": "SHORT",
+      "exchange2_entry_price": 91078.1,
+      "exchange2_current_price": 91114.95,
+      "exchange2_leverage": 10,
+      "quantity": 0.011913441697999018,
+      "entry_time": 1768222173.278698,
+      "stop_loss_price": 77539.84496,
+      "take_profit_price": 90440.75504,
+      "liquidation_price_ex1": 75927.23120000001,
+      "liquidation_price_ex2": 99821.59760000001,
+      "execution_mode": "stable_spread",
+      "entry_spread_abs": 7087.800000000003,
+      "entry_spread_bps": 843.88316269855,
+      "status": "CLOSED",
+      "closed_at": "2026-01-12T12:53:33.891329",
+      "close_reason": "manual_close",
+      "initial_capital": 2000.0,
+      "funding_received": 0.0,
+      "fees_paid": 0.0,
+      "unrealized_pnl": 0.0,
+      "realized_pnl": 0.0,
+      "notes": ""
+    }
+  ]
+}

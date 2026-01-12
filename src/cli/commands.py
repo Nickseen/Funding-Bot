@@ -410,7 +410,7 @@ class ViewPositionsCommand:
             await self._show_position_detail(position)
     
     async def _update_position_prices(self, position: Position) -> None:
-        """Update position with current prices from exchanges"""
+        """Update position with current prices and calculate unrealized PnL"""
         ex1 = self.exchanges.get(position.exchange1.lower())
         ex2 = self.exchanges.get(position.exchange2.lower())
         
@@ -421,6 +421,24 @@ class ViewPositionsCommand:
         if ex2:
             price2 = await ex2.get_price_data(position.pair)
             position.exchange2_current_price = price2.mid_price
+        
+        # Calculate unrealized PnL based on current prices
+        # LONG: profit when price goes up, loss when down
+        # SHORT: profit when price goes down, loss when up
+        pnl_ex1 = 0.0
+        pnl_ex2 = 0.0
+        
+        if position.exchange1_side == "LONG":
+            pnl_ex1 = (position.exchange1_current_price - position.exchange1_entry_price) * position.quantity
+        else:  # SHORT
+            pnl_ex1 = (position.exchange1_entry_price - position.exchange1_current_price) * position.quantity
+        
+        if position.exchange2_side == "LONG":
+            pnl_ex2 = (position.exchange2_current_price - position.exchange2_entry_price) * position.quantity
+        else:  # SHORT
+            pnl_ex2 = (position.exchange2_entry_price - position.exchange2_current_price) * position.quantity
+        
+        position.unrealized_pnl = pnl_ex1 + pnl_ex2
         
         await self.state.update_position(position)
 
