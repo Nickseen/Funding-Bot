@@ -2,15 +2,17 @@
 AppState - In-memory state management for Delta Neutral Bot.
 
 All data is stored in RAM for maximum speed.
-Upon restart, state is recovered from exchanges.
+Positions are auto-saved to disk for persistence across restarts.
+Upon restart, positions are loaded from disk and verified with exchanges.
 """
 
 import asyncio
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from datetime import datetime
 
 from ..exchanges.types import Position, Balance, PriceData
 from ..exchanges.enums import PositionStatus, Exchange
+from .persistence import position_persistence, PositionPersistence
 
 
 class AppState:
@@ -25,11 +27,14 @@ class AppState:
     Completely acceptable even for large-scale operations.
     """
     
-    def __init__(self):
+    def __init__(self, persistence: Optional[PositionPersistence] = None):
         # Locks for thread-safe operations
         self._position_lock = asyncio.Lock()
         self._balance_lock = asyncio.Lock()
         self._price_lock = asyncio.Lock()
+        
+        # Persistence manager for saving positions to disk
+        self._persistence = persistence or position_persistence
         
         # State storage (all in RAM)
         self._positions: Dict[str, Position] = {}  # position_id -> Position
@@ -46,6 +51,9 @@ class AppState:
         
         # Stats (computed on-the-fly, no storage needed)
         self._start_time = datetime.now().timestamp()
+        
+        # Track if positions were loaded from disk
+        self._positions_loaded = False
     
     # ============================================
     # POSITION MANAGEMENT
@@ -53,7 +61,7 @@ class AppState:
     
     async def add_position(self, position: Position) -> None:
         """
-        Add a new position to state
+        Add a new position to state and persist to disk.
         
         Args:
             position: Position object to add
@@ -65,10 +73,13 @@ class AppState:
             status = PositionStatus(position.status)
             if position.id not in self._positions_by_status[status]:
                 self._positions_by_status[status].append(position.id)
+        
+        # Auto-save to disk
+        await self._persistence.save_single_position(position)
     
     async def update_position(self, position: Position) -> None:
         """
-        Update existing position
+        Update existing position and persist to disk.
         
         Args:
             position: Updated position object
@@ -91,6 +102,9 @@ class AppState:
             
             # Update position
             self._positions[position.id] = position
+        
+        # Auto-save to disk
+        await self._persistence.save_single_position(position)
     
     async def get_position(self, position_id: str) -> Optional[Position]:
         """
@@ -329,6 +343,134 @@ class AppState:
             "price_data_mb": (price_data_count * 200) / (1024 * 1024),  # ~200 bytes per price
             "total_estimated_mb": ((positions_count * 500) + (price_data_count * 200)) / (1024 * 1024),
         }
+    
+    # ============================================
+    # PERSISTENCE & RECOVERY
+    # ============================================
+    
+    async def load_positions_from_disk(self) -> int:
+        """
+        Load positions from disk file.
+        
+        Call this on startup BEFORE connecting to exchanges.
+        
+        Returns:
+            Number of positions loaded
+        """
+        if self._positions_loaded:
+            return len(self._positions)
+        
+        positions = self._persistence.load_positions()
+        
+        async with self._position_lock:
+            for position in positions:
+                self._positions[position.id] = position
+                
+                # Update index
+                try:
+                    status = PositionStatus(position.status)
+                    if position.id not in self._positions_by_status[status]:
+                        self._positions_by_status[status].append(position.id)
+                except ValueError:
+                    # Unknown status, default to OPEN
+                    if position.id not in self._positions_by_status[PositionStatus.OPEN]:
+                        self._positions_by_status[PositionStatus.OPEN].append(position.id)
+        
+        self._positions_loaded = True
+        return len(positions)
+    
+    async def sync_positions_with_exchanges(
+        self,
+        exchanges: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Sync loaded positions with actual exchange state.
+        
+        Call this AFTER load_positions_from_disk() and connecting to exchanges.
+        
+        Args:
+            exchanges: Dict of exchange_name -> ExchangeAdapter
+            
+        Returns:
+            Dict with sync results:
+            - verified: positions confirmed on both exchanges
+            - orphaned: positions only on one exchange
+            - removed: positions that no longer exist
+        """
+        results = {
+            "verified": 0,
+            "orphaned": [],
+            "removed": [],
+            "errors": []
+        }
+        
+        # Get all loaded positions
+        positions = await self.get_all_positions()
+        
+        if not positions:
+            return results
+        
+        verified_positions = await self._persistence.sync_with_exchanges(
+            exchanges, positions
+        )
+        
+        # Update state based on sync results
+        async with self._position_lock:
+            # Clear current positions
+            self._positions.clear()
+            for status in self._positions_by_status:
+                self._positions_by_status[status].clear()
+            
+            # Add verified positions back
+            for position in verified_positions:
+                self._positions[position.id] = position
+                status = PositionStatus(position.status) if position.status in [s.value for s in PositionStatus] else PositionStatus.OPEN
+                if position.id not in self._positions_by_status[status]:
+                    self._positions_by_status[status].append(position.id)
+                
+                if "ORPHANED" in (position.notes or ""):
+                    results["orphaned"].append(position.id)
+                else:
+                    results["verified"] += 1
+        
+        # Calculate removed
+        original_ids = {p.id for p in positions}
+        verified_ids = {p.id for p in verified_positions}
+        results["removed"] = list(original_ids - verified_ids)
+        
+        return results
+    
+    async def discover_exchange_positions(
+        self,
+        exchanges: Dict[str, Any]
+    ) -> List[Position]:
+        """
+        Discover any positions on exchanges not tracked by the bot.
+        
+        Useful after crash recovery or when positions were opened externally.
+        
+        Args:
+            exchanges: Dict of exchange_name -> ExchangeAdapter
+            
+        Returns:
+            List of discovered positions
+        """
+        return await self._persistence.discover_orphan_positions(exchanges)
+    
+    async def save_all_positions(self) -> bool:
+        """
+        Force save all positions to disk.
+        
+        Useful before graceful shutdown.
+        
+        Returns:
+            True if saved successfully
+        """
+        return await self._persistence.save_positions(self._positions)
+    
+    def get_positions_file_path(self) -> str:
+        """Get path to positions file (for display in CLI)"""
+        return str(self._persistence.positions_file)
 
 
 # Global state instance
