@@ -492,6 +492,10 @@ class ClosePositionCommand:
         except Exception:
             current_spread_bps = None
         
+        # Calculate current PnL for display
+        pnl = position.total_pnl if hasattr(position, 'total_pnl') else 0.0
+        pnl_pct = (pnl / position.initial_capital * 100) if hasattr(position, 'initial_capital') and position.initial_capital > 0 else 0.0
+        
         # Show close mode menu
         print(render_close_mode_menu(position, current_spread_bps, pnl, pnl_pct))
         

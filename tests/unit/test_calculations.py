@@ -5,6 +5,7 @@ Unit tests for calculation functions.
 from src.utils.calculations import (
     calculate_liquidation_price,
     calculate_stop_loss_take_profit,
+    calculate_sl_tp_by_roi,
     calculate_spread_bps_from_prices,
     calculate_net_profit_bps,
     is_profitable_spread,
@@ -128,3 +129,70 @@ def test_calculate_stop_loss_take_profit_short():
     # Verify remaining distance to liquidation is 20%
     remaining_pct = (liquidation_price - sl) / (liquidation_price - entry_price) * 100
     assert abs(remaining_pct - 20.0) < 1.0
+
+
+# ============================================
+# Tests for calculate_sl_tp_by_roi (Issue #5)
+# ============================================
+
+def test_calculate_sl_tp_by_roi_long():
+    """Test ROI-based SL/TP calculation for LONG position"""
+    sl, tp = calculate_sl_tp_by_roi(
+        entry_price=90000,
+        position_size_usd=10000,
+        leverage=10,
+        side='LONG',
+        sl_roi_pct=-80,
+        tp_roi_pct=80
+    )
+    
+    # Margin = 10000/10 = 1000
+    # Quantity = 10000/90000 = 0.111 BTC
+    # SL: -80% = -800 USD → price move = -800/0.111 = -7200
+    # SL Price = 90000 - 7200 = 82800
+    assert abs(sl - 82800) < 100, f"LONG SL failed: {sl}"
+    
+    # TP: +80% = +800 USD → price move = +800/0.111 = +7200
+    # TP Price = 90000 + 7200 = 97200
+    assert abs(tp - 97200) < 100, f"LONG TP failed: {tp}"
+
+
+def test_calculate_sl_tp_by_roi_short():
+    """Test ROI-based SL/TP calculation for SHORT position"""
+    sl, tp = calculate_sl_tp_by_roi(
+        entry_price=90000,
+        position_size_usd=10000,
+        leverage=10,
+        side='SHORT',
+        sl_roi_pct=-80,
+        tp_roi_pct=80
+    )
+    
+    # SHORT SL: price goes UP = loss
+    # SL Price = 90000 + 7200 = 97200
+    assert abs(sl - 97200) < 100, f"SHORT SL failed: {sl}"
+    
+    # SHORT TP: price goes DOWN = profit
+    # TP Price = 90000 - 7200 = 82800
+    assert abs(tp - 82800) < 100, f"SHORT TP failed: {tp}"
+
+
+def test_calculate_sl_tp_by_roi_with_different_leverage():
+    """Test ROI-based SL/TP with 20x leverage"""
+    sl, tp = calculate_sl_tp_by_roi(
+        entry_price=1000,
+        position_size_usd=1000,
+        leverage=20,
+        side='LONG',
+        sl_roi_pct=-80,
+        tp_roi_pct=80
+    )
+    
+    # Margin = 1000/20 = 50
+    # Quantity = 1000/1000 = 1
+    # SL: -80% = -40 USD → price move = -40
+    # SL Price = 1000 - 40 = 960
+    assert abs(sl - 960) < 5, f"20x leverage SL failed: {sl}"
+    
+    # TP Price = 1000 + 40 = 1040
+    assert abs(tp - 1040) < 5, f"20x leverage TP failed: {tp}"

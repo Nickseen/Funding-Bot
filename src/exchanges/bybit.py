@@ -625,17 +625,29 @@ class BybitExchange(BaseExchange):
         )
     
     def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
-        """Convert Bybit funding data to FundingRate"""
+        """
+        Convert Bybit funding data to FundingRate.
+        
+        Uses timezone-aware datetime to ensure correct time calculations.
+        """
+        from datetime import timezone
+        
         next_funding_ts = int(data.get('nextFundingTime', 0) or 0)
         rate = float(data.get('fundingRate', 0) or 0)
+        
+        # Convert timestamp to timezone-aware UTC datetime
+        if next_funding_ts:
+            next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc)
+        else:
+            next_funding_time = datetime.now(timezone.utc)
         
         return FundingRate(
             symbol=data.get('symbol', ''),
             exchange=self.exchange_name.value,
             rate=rate,
             rate_bps=rate * 10000,
-            next_funding_time=datetime.fromtimestamp(next_funding_ts / 1000) if next_funding_ts else datetime.utcnow(),
-            timestamp=datetime.utcnow()
+            next_funding_time=next_funding_time,
+            timestamp=datetime.now(timezone.utc)
         )
     
     # ============================================

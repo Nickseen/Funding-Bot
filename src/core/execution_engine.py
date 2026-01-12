@@ -652,23 +652,32 @@ Open position? [Y/n]: """
         # TODO: В CLI добавить подтверждение
         # Пока открываем позицию
         
-        # 6. Открыть позиции на обеих биржах (параллельно)
+        # 6. Открыть позиции на обеих биржах (SEQUENTIALLY for atomic rollback)
         from ..exchanges.enums import OrderType
         
         log.info(f"Opening stable spread position...")
         log.info(f"  {self.exchange1.get_name()}: {side1.value} {quantity} @ {exec_price1}")
         log.info(f"  {self.exchange2.get_name()}: {side2.value} {quantity} @ {exec_price2}")
         
-        pos1, pos2 = await asyncio.gather(
-            self.exchange1.open_position(
+        pos1 = None
+        pos2 = None
+        
+        try:
+            # Open first leg
+            log.info(f"Opening {self.exchange1.get_name()} position...")
+            pos1 = await self.exchange1.open_position(
                 symbol=symbol,
                 side=side1,
                 quantity=quantity,
                 leverage=leverage,
                 order_type=OrderType.LIMIT,
                 price=exec_price1
-            ),
-            self.exchange2.open_position(
+            )
+            log.success(f"✓ {self.exchange1.get_name()} position opened")
+            
+            # Open second leg
+            log.info(f"Opening {self.exchange2.get_name()} position...")
+            pos2 = await self.exchange2.open_position(
                 symbol=symbol,
                 side=side2,
                 quantity=quantity,
@@ -676,7 +685,22 @@ Open position? [Y/n]: """
                 order_type=OrderType.LIMIT,
                 price=exec_price2
             )
-        )
+            log.success(f"✓ {self.exchange2.get_name()} position opened")
+            
+        except Exception as e:
+            log.error(f"Position opening failed: {e}")
+            
+            # ROLLBACK: Close any opened positions
+            if pos1:
+                log.warning(f"Rolling back {self.exchange1.get_name()} position...")
+                try:
+                    await self.exchange1.close_position(symbol=symbol, order_type=OrderType.MARKET)
+                    log.success(f"✓ {self.exchange1.get_name()} position closed (rollback)")
+                except Exception as rollback_err:
+                    log.critical(f"ROLLBACK FAILED for {self.exchange1.get_name()}: {rollback_err}")
+                    log.critical(f"MANUAL INTERVENTION REQUIRED - Close position manually!")
+            
+            raise Exception(f"Failed to open delta-neutral position: {e}")
         
         log.success(f"Positions opened on both exchanges")
         
