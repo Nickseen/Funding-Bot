@@ -696,17 +696,39 @@ class GateExchange(BaseExchange):
     
     def _parse_balance(self, data: Dict[str, Any]) -> Balance:
         """Convert Gate.io balance to Balance object"""
-        # ccxt normalizes balance - look for USDT
-        usdt = data.get('USDT', data.get('info', {}).get('USDT', {}))
+        # ccxt normalizes balance - data is a dict with currency keys
+        # Structure: {'USDT': {'free': X, 'used': Y, 'total': Z}, 'info': [...]}
         
-        if isinstance(usdt, dict):
+        # Gate.io testnet may return list in 'info', or balances directly
+        usdt = None
+        
+        # Try to get USDT directly from data
+        if 'USDT' in data and isinstance(data['USDT'], dict):
+            usdt = data['USDT']
+        elif 'info' in data:
+            info = data['info']
+            # info could be a list of balances
+            if isinstance(info, list):
+                for item in info:
+                    if item.get('currency', '').upper() == 'USDT':
+                        usdt = {
+                            'total': float(item.get('total', 0) or 0),
+                            'free': float(item.get('available', item.get('free', 0)) or 0),
+                            'used': float(item.get('position_margin', item.get('used', 0)) or 0)
+                        }
+                        break
+            elif isinstance(info, dict) and 'USDT' in info:
+                usdt = info['USDT']
+        
+        if usdt and isinstance(usdt, dict):
             total = float(usdt.get('total', 0) or 0)
-            free = float(usdt.get('free', 0) or 0)
-            used = float(usdt.get('used', 0) or 0)
+            free = float(usdt.get('free', usdt.get('available', 0)) or 0)
+            used = float(usdt.get('used', usdt.get('position_margin', 0)) or 0)
         else:
-            total = float(usdt or 0)
-            free = total
-            used = 0
+            # Fallback - try to sum all from free dict
+            total = float(data.get('total', {}).get('USDT', 0) or 0)
+            free = float(data.get('free', {}).get('USDT', 0) or 0)
+            used = float(data.get('used', {}).get('USDT', 0) or 0)
         
         return Balance(
             exchange=self.exchange_name.value,
