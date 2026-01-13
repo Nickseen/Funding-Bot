@@ -627,6 +627,7 @@ Funding-Bot/
 │   │   ├── kucoin.py       # KuCoin адаптер ✅
 │   │   ├── okx.py          # OKX адаптер ✅
 │   │   ├── gate.py         # Gate.io адаптер ✅ (добавлен 11 янв 2026)
+│   │   ├── bingx.py        # BingX адаптер ✅ (добавлен 13 янв 2026)
 │   │   ├── types.py        # 9 dataclasses (Position, Balance, OrderBook...)
 │   │   └── enums.py        # Exchange enum, комиссии в bps
 │   ├── core/               # Бизнес-логика
@@ -1100,7 +1101,7 @@ async def funding_monitoring_loop():
 - [x] Unit tests (12/12 passing: calculations + emergency_monitor)
 - [x] Venv setup and validation
 
-### Phase 2 ✅ - Exchange Adapters (Completed - 11 Jan 2026)
+### Phase 2 ✅ - Exchange Adapters (Completed - 13 Jan 2026)
 - [x] Binance adapter (basic REST API)
 - [x] Bybit adapter (basic REST API)
 - [x] OKX adapter (basic REST API)
@@ -1111,8 +1112,16 @@ async def funding_monitoring_loop():
   - [x] Position management
   - [x] Leverage control
   - [x] Balance queries
+- [x] BingX adapter (full CCXT integration - 13 Jan 2026)
+  - [x] Market/Limit orders (tested on demo)
+  - [x] Stop Loss / Take Profit (tested on demo)
+  - [x] Position management
+  - [x] Leverage control (Hedge mode support)
+  - [x] Balance queries
+  - [x] Demo mode with VST (Virtual Standard Token)
 - [x] Unit testing validation
 - [x] Gate.io testnet testing (all order types verified)
+- [x] BingX demo testing (all order types verified)
 - [ ] WebSocket price monitoring (skeleton ready, low priority)
 - [ ] Testing other exchanges on testnets
 
@@ -1187,6 +1196,14 @@ async def funding_monitoring_loop():
   - Market/Limit orders
   - Stop Loss / Take Profit
   - Протестировано на testnet
+- **BingX** - полная CCXT интеграция (13 Jan 2026)
+  - Market/Limit orders
+  - Stop Loss / Take Profit
+  - Hedge mode (positionSide: LONG/SHORT)
+  - Leverage control (per-side в hedge mode)
+  - Funding rate queries
+  - Demo mode (VST - Virtual Standard Token)
+  - Протестировано на demo (100k VST)
 
 ### Базовая реализация (требует тестирования)
 - **Binance** - REST API адаптер через CCXT
@@ -1196,16 +1213,22 @@ async def funding_monitoring_loop():
 - Hyperliquid
 - MEXC
 - Bitget
-- BingX
 - Aster
 - Lighter
 
 ---
 
-**Дата обновления:** 12 января 2026  
+**Дата обновления:** 13 января 2026  
 **Статус:** Phase 1-4 завершены ✅ | Production ready 🚀
 
 **Последние обновления:**
+- ✅ **BingX адаптер добавлен** (13 Jan 2026)
+  - Полная CCXT интеграция с hedge mode support
+  - positionSide параметр для всех ордеров
+  - Leverage per-side (LONG/SHORT отдельно)
+  - Demo mode с VST (100,000 виртуальных токенов)
+  - Все типы ордеров протестированы на demo
+- ✅ Gate.io адаптер добавлен и протестирован на testnet (11 Jan 2026)
 - ✅ CLI полностью реализован и протестирован (12 Jan 2026)
 - ✅ Position persistence система с JSON storage (12 Jan 2026)
 - ✅ Orphan position detection и обработка (12 Jan 2026)
@@ -1219,5 +1242,7 @@ async def funding_monitoring_loop():
   - ✅ OKX account mode handling (51010 error fix)
 - ✅ 52/52 tests passing
 - ✅ Bybit + OKX полностью протестированы на production
+- ✅ Gate.io протестирован на testnet
+- ✅ BingX протестирован на demo (VST)
 - ✅ Data directory excluded from Git (.gitignore)
-- 🚀 Ready for production use
+- 🚀 Ready for production use (6 бирж поддерживается)

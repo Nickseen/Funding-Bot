@@ -42,6 +42,10 @@ class Config:
     GATE_API_KEY: str = os.getenv("GATE_API_KEY", "")
     GATE_SECRET_KEY: str = os.getenv("GATE_SECRET_KEY", "")
     
+    # BingX
+    BINGX_API_KEY: str = os.getenv("BINGX_API_KEY", "")
+    BINGX_SECRET_KEY: str = os.getenv("BINGX_SECRET_KEY", "")
+    
     # Bot settings
     MAX_POSITIONS: int = int(os.getenv("MAX_POSITIONS", "100"))
     
