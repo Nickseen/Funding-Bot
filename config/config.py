@@ -46,6 +46,11 @@ class Config:
     BINGX_API_KEY: str = os.getenv("BINGX_API_KEY", "")
     BINGX_SECRET_KEY: str = os.getenv("BINGX_SECRET_KEY", "")
     
+    # Bitget
+    BITGET_API_KEY: str = os.getenv("BITGET_API_KEY", "")
+    BITGET_SECRET_KEY: str = os.getenv("BITGET_SECRET_KEY", "")
+    BITGET_PASSPHRASE: str = os.getenv("BITGET_PASSPHRASE", "")
+    
     # Bot settings
     MAX_POSITIONS: int = int(os.getenv("MAX_POSITIONS", "100"))
     

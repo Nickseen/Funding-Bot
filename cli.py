@@ -19,6 +19,7 @@ from src.exchanges.okx import OKXExchange
 from src.exchanges.kucoin import KuCoinExchange
 from src.exchanges.gate import GateExchange
 from src.exchanges.bingx import BingXExchange
+from src.exchanges.bitget import BitgetExchange
 from src.exchanges.base import BaseExchange
 from src.exchanges.enums import PositionSide, OrderType, Exchange
 from src.utils.calculations import (
@@ -63,6 +64,11 @@ AVAILABLE_EXCHANGES = {
         "name": "BingX",
         "class": BingXExchange,
         "has_testnet": True,  # BingX has demo trading
+    },
+    "bitget": {
+        "name": "Bitget",
+        "class": BitgetExchange,
+        "has_testnet": True,  # Bitget has demo trading
     },
 }
 
@@ -125,6 +131,8 @@ def get_exchange_credentials(exchange_name: str) -> Tuple[str, str, Optional[str
         return config.GATE_API_KEY, config.GATE_SECRET_KEY, None
     elif exchange_name == "bingx":
         return config.BINGX_API_KEY, config.BINGX_SECRET_KEY, None
+    elif exchange_name == "bitget":
+        return config.BITGET_API_KEY, config.BITGET_SECRET_KEY, config.BITGET_PASSPHRASE
     else:
         return "", "", None
 
