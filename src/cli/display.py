@@ -103,6 +103,55 @@ def render_main_menu(
 # OPEN POSITION MENUS
 # ============================================
 
+def render_side_selection_menu() -> str:
+    """Render side selection menu (LONG or SHORT first)"""
+    lines = [
+        _create_header(),
+        _create_line("SELECT POSITION SIDE"),
+        _create_separator(),
+        _create_line("1. 🟢 LONG  (Buy position)"),
+        _create_line("2. 🔴 SHORT (Sell position)"),
+        _create_line(""),
+        _create_line("q. Cancel"),
+        _create_footer(),
+    ]
+    
+    return "\n".join(lines)
+
+
+def render_exchange_selection_for_side(
+    exchanges: List[Dict[str, Any]],
+    side: str
+) -> str:
+    """
+    Render exchange selection menu for a specific side
+    
+    Args:
+        exchanges: List of dicts with 'name', 'connected', 'configured' keys
+        side: "LONG" or "SHORT"
+    """
+    side_emoji = "🟢" if side == "LONG" else "🔴"
+    
+    lines = [
+        _create_header(),
+        _create_line(f"SELECT EXCHANGE FOR {side_emoji} {side}"),
+        _create_separator(),
+        _create_line("Available Exchanges:"),
+    ]
+    
+    for i, ex in enumerate(exchanges, 1):
+        status = "[✓]" if ex.get('connected') else "[ ]"
+        state = "Connected" if ex.get('connected') else "Not configured"
+        lines.append(_create_line(f"{i}. {status} {ex['name']:<20} - {state}"))
+    
+    lines.extend([
+        _create_line(""),
+        _create_footer(),
+    ])
+    
+    return "\n".join(lines)
+
+
 def render_exchange_selection_menu(
     exchanges: List[Dict[str, Any]]
 ) -> str:
