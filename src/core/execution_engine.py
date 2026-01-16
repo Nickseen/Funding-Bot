@@ -43,7 +43,81 @@ class ExecutionEngine:
         self.hit_bid_timeout_seconds = 300  # 5 минут
         self.intersection_tolerance_bps = 2.0  # ±2 bps
         self.emergency_close_timeout_seconds = 3  # 3 секунды для лимитки
+        
+        # Position verification settings
+        self.position_verification_max_retries = 3
+        self.position_verification_retry_delay = 1.0
+        self.position_verification_initial_delay = 0.5
     
+    async def _verify_position_exists(
+        self,
+        exchange: BaseExchange,
+        symbol: str,
+        exchange_name: str,
+        max_retries: int = None,
+        retry_delay: float = None
+    ) -> Optional[Position]:
+        """
+        Verify position actually exists on exchange (with retry).
+        
+        After opening a position, exchanges need time to register it.
+        This method polls the exchange until position is visible.
+        
+        Args:
+            exchange: Exchange instance
+            symbol: Trading symbol (e.g., "BTCUSDT")
+            exchange_name: Exchange name for logging
+            max_retries: Maximum verification attempts
+            retry_delay: Seconds between retries
+        
+        Returns:
+            Position object if found and verified
+            None if position not found after retries
+        """
+        if max_retries is None:
+            max_retries = self.position_verification_max_retries
+        if retry_delay is None:
+            retry_delay = self.position_verification_retry_delay
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Fetch position from exchange
+                position = await exchange.get_position_by_symbol(symbol)
+                
+                # Check if position exists with non-zero quantity
+                if position and abs(position.quantity) > 0:
+                    log.success(
+                        f"{exchange_name}: Position VERIFIED "
+                        f"(qty={position.quantity:.4f}, side={position.exchange1_side})"
+                    )
+                    return position
+                
+                # Position not found or has zero quantity
+                if attempt < max_retries:
+                    log.warning(
+                        f"{exchange_name}: Position not found or zero quantity, "
+                        f"retry {attempt}/{max_retries} in {retry_delay}s..."
+                    )
+                    await asyncio.sleep(retry_delay)
+                
+            except Exception as e:
+                if attempt < max_retries:
+                    log.warning(
+                        f"{exchange_name}: Failed to verify position: {e}, "
+                        f"retry {attempt}/{max_retries} in {retry_delay}s..."
+                    )
+                    await asyncio.sleep(retry_delay)
+                else:
+                    log.error(
+                        f"{exchange_name}: Position verification error: {e}"
+                    )
+        
+        # Position not found after all retries
+        log.error(
+            f"{exchange_name}: ❌ Position NOT FOUND after {max_retries} attempts"
+        )
+        return None
+
     async def hit_the_bid(
         self,
         symbol: str,
@@ -712,6 +786,21 @@ Open position? [Y/n]: """
             )
             log.success(f"✓ {self.exchange1.get_name()} position opened")
             
+            # VERIFY position 1 exists (wait for exchange to register it)
+            log.info(f"Verifying {self.exchange1.get_name()} position...")
+            await asyncio.sleep(self.position_verification_initial_delay)
+            verified_pos1 = await self._verify_position_exists(
+                exchange=self.exchange1,
+                symbol=symbol,
+                exchange_name=self.exchange1.get_name()
+            )
+            
+            if not verified_pos1:
+                raise Exception(f"Position verification failed on {self.exchange1.get_name()}")
+            
+            # Update position with verified data
+            pos1 = verified_pos1
+            
             # Open second leg
             log.info(f"Opening {self.exchange2.get_name()} position...")
             pos2 = await self.exchange2.open_position(
@@ -724,8 +813,32 @@ Open position? [Y/n]: """
             )
             log.success(f"✓ {self.exchange2.get_name()} position opened")
             
+            # VERIFY position 2 exists (wait for exchange to register it)
+            log.info(f"Verifying {self.exchange2.get_name()} position...")
+            await asyncio.sleep(self.position_verification_initial_delay)
+            verified_pos2 = await self._verify_position_exists(
+                exchange=self.exchange2,
+                symbol=symbol,
+                exchange_name=self.exchange2.get_name()
+            )
+            
+            if not verified_pos2:
+                # Position 2 verification failed - close position 1
+                log.error(f"Position 2 verification failed, closing {self.exchange1.get_name()} position...")
+                try:
+                    await self.exchange1.close_position(symbol=symbol, order_type=OrderType.MARKET)
+                    log.success(f"Closed {self.exchange1.get_name()} position after verification failure")
+                except Exception as close_err:
+                    log.critical(f"Failed to close {self.exchange1.get_name()} position: {close_err}")
+                    log.critical(f"MANUAL INTERVENTION REQUIRED - Close position manually!")
+                
+                raise Exception(f"Position verification failed on {self.exchange2.get_name()}")
+            
+            # Update position with verified data
+            pos2 = verified_pos2
+            
         except Exception as e:
-            log.error(f"Position opening failed: {e}")
+            log.error(f"Position opening/verification failed: {e}")
             
             # ROLLBACK: Close any opened positions
             if pos1:
@@ -739,7 +852,7 @@ Open position? [Y/n]: """
             
             raise Exception(f"Failed to open delta-neutral position: {e}")
         
-        log.success(f"Positions opened on both exchanges")
+        log.success(f"Positions opened AND VERIFIED on both exchanges")
         
         # 7. Рассчитать liquidation prices
         liq_price1 = calculate_liquidation_price(exec_price1, leverage, side1)
@@ -765,16 +878,15 @@ Open position? [Y/n]: """
         log.info(f"  {self.exchange1.get_name()}: SL={sl1:.4f}, TP={tp1:.4f}")
         log.info(f"  {self.exchange2.get_name()}: SL={sl2:.4f}, TP={tp2:.4f}")
         
-        # 9. Установить SL/TP ордера (с задержкой для синхронизации позиций)
-        # OKX может не сразу показывать позицию после открытия
-        await asyncio.sleep(1.0)  # Wait for exchanges to sync
-        
+        # 9. Установить SL/TP ордера
+        # Позиции уже верифицированы выше, можно сразу ставить SL/TP
         try:
             # Set SL/TP sequentially with retry for better reliability
             for attempt in range(2):
                 try:
                     await self.exchange1.set_stop_loss(symbol, side1, sl1, quantity)
                     await self.exchange1.set_take_profit(symbol, side1, tp1, quantity)
+                    log.success(f"✓ {self.exchange1.get_name()} SL/TP set")
                     break
                 except Exception as e:
                     if attempt == 0:
@@ -787,6 +899,7 @@ Open position? [Y/n]: """
                 try:
                     await self.exchange2.set_stop_loss(symbol, side2, sl2, quantity)
                     await self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
+                    log.success(f"✓ {self.exchange2.get_name()} SL/TP set")
                     break
                 except Exception as e:
                     if attempt == 0:
