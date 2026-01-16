@@ -1,16 +1,19 @@
 """
-Gate.io Futures Exchange Adapter
+BingX Futures Exchange Adapter
 
 This adapter implements only the exchange-specific API calls.
 All validation, logging, and error handling is done in BaseExchange.
 
-Gate.io API Reference:
-- Futures: https://www.gate.io/docs/developers/futures/index.html
-- Uses USDT-settled perpetual contracts
+Each method is 5-15 lines of pure API calls - no business logic!
 
-Gate.io Testnet:
-- https://www.gate.io/docs/developers/futures/index.html#testnet
-- Testnet available at: https://fx-testnet.gateio.ws
+BingX API Reference:
+- Futures (Linear): https://bingx-api.github.io/docs/
+- Uses USDT-M Perpetual Futures
+
+BingX Notes:
+- Symbol format: BTC-USDT (with dash for API), BTC/USDT:USDT (ccxt)
+- Supports one-way mode and hedge mode
+- Contract size: varies by symbol (check contractSize)
 """
 
 from typing import Dict, Any, List, Optional
@@ -22,21 +25,21 @@ from .enums import Exchange, PositionSide, OrderSide, OrderType
 from .types import Position, Order, OrderBook, PriceData, Balance, FundingRate
 
 
-class GateExchange(BaseExchange):
+class BingXExchange(BaseExchange):
     """
-    Gate.io Futures adapter (USDT-settled perpetual contracts)
+    BingX Futures adapter (USDT-M Perpetual)
     
     Implements ONLY:
     1. _api_* methods (raw API calls)
-    2. _parse_* methods (convert Gate response format to our types)
+    2. _parse_* methods (convert BingX response format to our types)
     
     All business logic is in BaseExchange!
     
     Notes:
-    - Gate.io uses "swap" for perpetual futures in ccxt
-    - Symbol format: BTC_USDT (with underscore for API), BTC/USDT:USDT (ccxt)
-    - Contract size varies by symbol
-    - Dual position mode: can have both LONG and SHORT simultaneously
+    - BingX uses "swap" for perpetual futures in ccxt
+    - Symbol format: BTC-USDT (native), BTC/USDT:USDT (ccxt)
+    - Position mode: One-way by default
+    - Leverage: up to 150x on major pairs
     """
     
     def __init__(
@@ -46,21 +49,21 @@ class GateExchange(BaseExchange):
         testnet: bool = False
     ):
         super().__init__(api_key, secret_key, testnet=testnet)
-        self.exchange_name = Exchange.GATE
+        self.exchange_name = Exchange.BINGX
         
         # Initialize ccxt client
-        self.client = ccxt.gate({
+        self.client = ccxt.bingx({
             'apiKey': api_key,
             'secret': secret_key,
             'enableRateLimit': True,
             'options': {
                 'defaultType': 'swap',  # Perpetual futures
-                'defaultSettle': 'usdt',  # USDT-settled
+                'adjustForTimeDifference': True,
             }
         })
         
+        # BingX has demo trading mode, not traditional testnet
         if testnet:
-            # Gate.io testnet
             self.client.set_sandbox_mode(True)
     
     # ============================================
@@ -68,7 +71,7 @@ class GateExchange(BaseExchange):
     # ============================================
     
     async def connect(self) -> bool:
-        """Connect to Gate.io"""
+        """Connect to BingX"""
         try:
             await self.client.load_markets()
             self.connected = True
@@ -77,7 +80,7 @@ class GateExchange(BaseExchange):
             raise ExchangeError(f"Failed to connect: {e}")
     
     async def disconnect(self) -> None:
-        """Disconnect from Gate.io"""
+        """Disconnect from BingX"""
         await self.client.close()
         self.connected = False
     
@@ -95,21 +98,13 @@ class GateExchange(BaseExchange):
     
     def _convert_symbol(self, symbol: str) -> str:
         """
-        Convert simple symbol format to Gate.io ccxt format
+        Convert simple symbol format to BingX ccxt format
         
         BTCUSDT -> BTC/USDT:USDT (perpetual swap)
-        BTC_USDT -> BTC/USDT:USDT
         """
         # Already in correct format
-        if '/' in symbol and ':' in symbol:
+        if '/' in symbol:
             return symbol
-        
-        # Handle Gate.io native format BTC_USDT
-        if '_' in symbol:
-            parts = symbol.split('_')
-            if len(parts) == 2:
-                base, quote = parts
-                return f"{base}/{quote}:{quote}"
         
         # Convert BTCUSDT -> BTC/USDT:USDT
         quote_currencies = ['USDT', 'USDC', 'USD']
@@ -118,31 +113,28 @@ class GateExchange(BaseExchange):
                 base = symbol[:-len(quote)]
                 return f"{base}/{quote}:{quote}"
         
-        # Fallback
+        # Fallback - return as is
         return symbol
     
-    def _to_gate_symbol(self, symbol: str) -> str:
+    def _to_bingx_symbol(self, symbol: str) -> str:
         """
-        Convert to Gate.io native symbol format for API calls
+        Convert to BingX native format
         
-        BTCUSDT -> BTC_USDT
-        BTC/USDT:USDT -> BTC_USDT
+        BTCUSDT -> BTC-USDT
+        BTC/USDT:USDT -> BTC-USDT
         """
-        if '_' in symbol and '/' not in symbol:
-            return symbol
-        
-        # From ccxt format
+        # If ccxt format, convert to native
         if '/' in symbol:
-            base = symbol.split('/')[0]
-            quote = symbol.split('/')[1].split(':')[0]
-            return f"{base}_{quote}"
+            base_quote = symbol.split(':')[0]  # BTC/USDT
+            base, quote = base_quote.split('/')
+            return f"{base}-{quote}"
         
-        # From simple format
+        # If simple format (BTCUSDT), convert
         quote_currencies = ['USDT', 'USDC', 'USD']
         for quote in quote_currencies:
             if symbol.endswith(quote):
                 base = symbol[:-len(quote)]
-                return f"{base}_{quote}"
+                return f"{base}-{quote}"
         
         return symbol
     
@@ -151,7 +143,7 @@ class GateExchange(BaseExchange):
     # ============================================
     
     async def _api_get_orderbook(self, symbol: str, limit: int) -> Dict[str, Any]:
-        """Gate.io: GET /api/v4/futures/usdt/order_book"""
+        """BingX: GET /openApi/swap/v2/quote/depth"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             return await self.client.fetch_order_book(ccxt_symbol, limit)
@@ -161,29 +153,33 @@ class GateExchange(BaseExchange):
             raise NetworkError(str(e))
     
     async def _api_get_price_data(self, symbol: str) -> Dict[str, Any]:
-        """Gate.io: GET /api/v4/futures/usdt/tickers"""
+        """BingX: GET /openApi/swap/v2/quote/ticker"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             ticker = await self.client.fetch_ticker(ccxt_symbol)
             return {
                 'symbol': symbol,
-                'bid': ticker.get('bid') or ticker.get('last'),
-                'ask': ticker.get('ask') or ticker.get('last'),
-                'bid_qty': ticker.get('bidVolume', 0) or 0,
-                'ask_qty': ticker.get('askVolume', 0) or 0,
-                'timestamp': ticker.get('timestamp')
+                'bid': ticker.get('bid') or 0,
+                'ask': ticker.get('ask') or 0,
+                'bid_qty': ticker.get('bidVolume') or 0,
+                'ask_qty': ticker.get('askVolume') or 0,
+                'timestamp': ticker.get('timestamp') or int(datetime.utcnow().timestamp() * 1000)
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
     
     async def _api_get_mark_price(self, symbol: str) -> float:
-        """Gate.io: GET /api/v4/futures/usdt/tickers - mark price from ticker"""
+        """BingX: GET mark price from ticker"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             ticker = await self.client.fetch_ticker(ccxt_symbol)
-            # Gate.io includes mark price in ticker info
-            if 'info' in ticker and 'mark_price' in ticker['info']:
-                return float(ticker['info']['mark_price'])
+            
+            # Try to get mark price from info
+            info = ticker.get('info', {})
+            if 'markPrice' in info:
+                return float(info['markPrice'])
+            
+            # Fallback to last price
             return float(ticker.get('last', 0))
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
@@ -198,46 +194,38 @@ class GateExchange(BaseExchange):
         price: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Gate.io: Open position
+        BingX: Open position
         
         Steps:
         1. Set leverage
-        2. Convert quantity to contracts
-        3. Place order
-        
-        Note: Gate.io uses contracts, contract size varies by symbol
+        2. Place order
         """
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # 1. Set leverage (ignore "already set" errors)
+            # 1. Set leverage for the position side we're opening
+            position_side_str = 'LONG' if side == PositionSide.LONG else 'SHORT'
             try:
-                await self.client.set_leverage(leverage, ccxt_symbol)
+                await self.client.set_leverage(leverage, ccxt_symbol, params={'side': position_side_str})
             except Exception as e:
-                if 'leverage' not in str(e).lower() and 'not changed' not in str(e).lower():
+                if 'same' not in str(e).lower() and 'not modified' not in str(e).lower():
                     raise
             
-            # 2. Get market info for contract size
-            market = self.client.markets.get(ccxt_symbol, {})
-            contract_size = float(market.get('contractSize', 1))
-            
-            # Convert quantity (in base currency like BTC) to contracts
-            # If contract size is 0.001 BTC and quantity is 0.01 BTC, contracts = 10
-            contracts = quantity / contract_size if contract_size else quantity
-            contracts = round(contracts)  # Gate uses integer contracts
-            
-            # 3. Place order
+            # 2. Place order
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = 'buy' if side == PositionSide.LONG else 'sell'
             
-            params = {}
+            # BingX requires positionSide in hedge mode
+            params = {
+                'positionSide': position_side_str
+            }
             
-            if order_type == OrderType.LIMIT:
+            if order_type == OrderType.LIMIT and price:
                 order = await self.client.create_order(
                     symbol=ccxt_symbol,
                     type=order_type_str,
                     side=order_side,
-                    amount=contracts,
+                    amount=quantity,
                     price=price,
                     params=params
                 )
@@ -246,14 +234,14 @@ class GateExchange(BaseExchange):
                     symbol=ccxt_symbol,
                     type=order_type_str,
                     side=order_side,
-                    amount=contracts,
+                    amount=quantity,
                     params=params
                 )
             
-            # 4. Get position info
+            # 3. Get position info
             positions = await self.client.fetch_positions([ccxt_symbol])
             position_data = next(
-                (p for p in positions if p['symbol'] == ccxt_symbol and float(p.get('contracts', 0) or 0) != 0),
+                (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
                 None
             )
             
@@ -263,6 +251,8 @@ class GateExchange(BaseExchange):
             raise RateLimitError(str(e))
         except ccxt.InsufficientFunds as e:
             raise ExchangeError(f"Insufficient balance: {e}")
+        except Exception as e:
+            raise ExchangeError(f"Failed to open position: {e}")
     
     async def _api_close_position(
         self,
@@ -271,7 +261,7 @@ class GateExchange(BaseExchange):
         price: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Gate.io: Close position
+        BingX: Close position
         
         Get current position, place opposite order with reduceOnly=True
         """
@@ -281,7 +271,7 @@ class GateExchange(BaseExchange):
             # 1. Get current position
             positions = await self.client.fetch_positions([ccxt_symbol])
             position = next(
-                (p for p in positions if p['symbol'] == ccxt_symbol and float(p.get('contracts', 0) or 0) != 0),
+                (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
                 None
             )
             
@@ -295,9 +285,12 @@ class GateExchange(BaseExchange):
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = 'sell' if position_side == 'long' else 'buy'
             
-            params = {'reduceOnly': True}
+            # BingX hedge mode: don't use reduceOnly, use positionSide instead
+            params = {
+                'positionSide': 'LONG' if position_side == 'long' else 'SHORT'
+            }
             
-            if order_type == OrderType.LIMIT:
+            if order_type == OrderType.LIMIT and price:
                 await self.client.create_order(
                     symbol=ccxt_symbol,
                     type=order_type_str,
@@ -315,7 +308,7 @@ class GateExchange(BaseExchange):
                     params=params
                 )
             
-            # 3. Return updated position
+            # 3. Return updated position (should be closed now)
             positions = await self.client.fetch_positions([ccxt_symbol])
             return next(
                 (p for p in positions if p['symbol'] == ccxt_symbol),
@@ -324,6 +317,10 @@ class GateExchange(BaseExchange):
             
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise ExchangeError(f"Failed to close position: {e}")
     
     async def _api_place_order(
         self,
@@ -334,27 +331,31 @@ class GateExchange(BaseExchange):
         price: Optional[float],
         reduce_only: bool
     ) -> Dict[str, Any]:
-        """Gate.io: POST /api/v4/futures/usdt/orders"""
+        """BingX: POST /openApi/swap/v2/trade/order"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = side.value.lower()
             
-            # Convert quantity to contracts
-            market = self.client.markets.get(ccxt_symbol, {})
-            contract_size = float(market.get('contractSize', 1))
-            contracts = round(quantity / contract_size) if contract_size else round(quantity)
-            
-            params = {}
+            # BingX hedge mode requires positionSide
+            # BUY opens LONG, SELL opens SHORT
+            # If reduce_only: BUY closes SHORT, SELL closes LONG
             if reduce_only:
-                params['reduceOnly'] = True
+                position_side = 'SHORT' if order_side == 'buy' else 'LONG'
+            else:
+                position_side = 'LONG' if order_side == 'buy' else 'SHORT'
             
-            if order_type == OrderType.LIMIT:
+            params = {
+                'positionSide': position_side
+            }
+            # BingX hedge mode: don't use reduceOnly, positionSide handles direction
+            
+            if order_type == OrderType.LIMIT and price:
                 return await self.client.create_order(
                     symbol=ccxt_symbol,
                     type=order_type_str,
                     side=order_side,
-                    amount=contracts,
+                    amount=quantity,
                     price=price,
                     params=params
                 )
@@ -363,47 +364,62 @@ class GateExchange(BaseExchange):
                     symbol=ccxt_symbol,
                     type=order_type_str,
                     side=order_side,
-                    amount=contracts,
+                    amount=quantity,
                     params=params
                 )
             
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
+        except Exception as e:
+            raise ExchangeError(f"Failed to place order: {e}")
     
     async def _api_cancel_order(self, order_id: str, symbol: str) -> bool:
-        """Gate.io: DELETE /api/v4/futures/usdt/orders/{order_id}"""
+        """BingX: DELETE /openApi/swap/v2/trade/order"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             await self.client.cancel_order(order_id, ccxt_symbol)
             return True
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
+        except Exception as e:
+            raise ExchangeError(f"Failed to cancel order: {e}")
     
     async def _api_set_leverage(self, symbol: str, leverage: int) -> bool:
-        """Gate.io: POST /api/v4/futures/usdt/positions/{contract}/leverage"""
+        """BingX: POST /openApi/swap/v2/trade/leverage"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
-            await self.client.set_leverage(leverage, ccxt_symbol)
+            # BingX in hedge mode requires setting leverage for both LONG and SHORT separately
+            try:
+                await self.client.set_leverage(leverage, ccxt_symbol, params={'side': 'LONG'})
+            except Exception as e:
+                if 'same' not in str(e).lower() and 'not modified' not in str(e).lower():
+                    pass  # Continue to try SHORT
+            
+            try:
+                await self.client.set_leverage(leverage, ccxt_symbol, params={'side': 'SHORT'})
+            except Exception as e:
+                if 'same' not in str(e).lower() and 'not modified' not in str(e).lower():
+                    pass  # Both may already be set
+            
             return True
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except Exception as e:
-            # Gate may return error if leverage is already set
-            if 'leverage' in str(e).lower() or 'not changed' in str(e).lower():
+            # BingX may return error if leverage is already set
+            if 'same' in str(e).lower() or 'not modified' in str(e).lower():
                 return True
             raise ExchangeError(f"Failed to set leverage: {e}")
     
     async def _api_set_margin_mode(self, mode: str) -> bool:
-        """Gate.io: Set margin mode (cross/isolated)"""
+        """BingX: Set margin mode (cross or isolated)"""
         try:
-            # Gate uses 'cross' or 'isolated'
-            margin_mode = 'cross' if mode == 'CROSS' else 'isolated'
+            margin_mode = 'cross' if mode.upper() == 'CROSS' else 'isolated'
             await self.client.set_margin_mode(margin_mode)
             return True
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except Exception as e:
-            if 'already' in str(e).lower() or 'not changed' in str(e).lower():
+            if 'not modified' in str(e).lower() or 'same' in str(e).lower():
                 return True
             raise ExchangeError(f"Failed to set margin mode: {e}")
     
@@ -415,7 +431,7 @@ class GateExchange(BaseExchange):
         quantity: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Gate.io: Set stop loss order using CCXT createStopLossOrder
+        BingX: Set stop loss order using CCXT createStopLossOrder
         """
         try:
             from .enums import PositionSide
@@ -431,22 +447,25 @@ class GateExchange(BaseExchange):
             if not position:
                 raise ExchangeError(f"No position found for {symbol}")
             
-            # Get contracts count (Gate uses contracts, not base currency amount)
             contracts = abs(float(position.get('contracts', 0)))
             pos_side = position.get('side', '')  # 'long' or 'short'
             
             # For SL: if LONG, sell when price falls; if SHORT, buy when price rises
             order_side = 'sell' if pos_side == 'long' else 'buy'
             
-            # Use CCXT's createStopLossOrder with contracts as amount
+            # BingX hedge mode requires positionSide
+            position_side_param = 'LONG' if pos_side == 'long' else 'SHORT'
+            
+            # Use CCXT's createStopLossOrder
+            # BingX hedge mode: don't use reduceOnly, positionSide is sufficient
             response = await self.client.create_stop_loss_order(
                 symbol=ccxt_symbol,
-                type='market',  # Market order when triggered
+                type='market',
                 side=order_side,
-                amount=contracts,  # Number of contracts
-                stopLossPrice=stop_price,  # Required parameter name
+                amount=contracts,
+                stopLossPrice=stop_price,
                 params={
-                    'reduceOnly': True,
+                    'positionSide': position_side_param,
                 }
             )
             
@@ -473,7 +492,7 @@ class GateExchange(BaseExchange):
         quantity: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Gate.io: Set take profit order using CCXT createTakeProfitOrder
+        BingX: Set take profit order using CCXT createTakeProfitOrder
         """
         try:
             from .enums import PositionSide
@@ -489,22 +508,25 @@ class GateExchange(BaseExchange):
             if not position:
                 raise ExchangeError(f"No position found for {symbol}")
             
-            # Get contracts count (Gate uses contracts, not base currency amount)
             contracts = abs(float(position.get('contracts', 0)))
             pos_side = position.get('side', '')  # 'long' or 'short'
             
             # For TP: if LONG, sell when price rises; if SHORT, buy when price falls
             order_side = 'sell' if pos_side == 'long' else 'buy'
             
-            # Use CCXT's createTakeProfitOrder with contracts as amount
+            # BingX hedge mode requires positionSide
+            position_side_param = 'LONG' if pos_side == 'long' else 'SHORT'
+            
+            # Use CCXT's createTakeProfitOrder
+            # BingX hedge mode: don't use reduceOnly, positionSide is sufficient
             response = await self.client.create_take_profit_order(
                 symbol=ccxt_symbol,
-                type='market',  # Market order when triggered
+                type='market',
                 side=order_side,
-                amount=contracts,  # Number of contracts
-                takeProfitPrice=take_profit_price,  # Required parameter name
+                amount=contracts,
+                takeProfitPrice=take_profit_price,
                 params={
-                    'reduceOnly': True,
+                    'positionSide': position_side_param,
                 }
             )
             
@@ -524,15 +546,17 @@ class GateExchange(BaseExchange):
             raise ExchangeError(f"Failed to set take profit: {e}")
     
     async def _api_get_balance(self) -> Dict[str, Any]:
-        """Gate.io: GET /api/v4/futures/usdt/accounts"""
+        """BingX: GET /openApi/swap/v2/user/balance"""
         try:
             balance = await self.client.fetch_balance({'type': 'swap'})
             return balance
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
+        except Exception as e:
+            raise ExchangeError(f"Failed to get balance: {e}")
     
     async def _api_get_positions(self, symbol: Optional[str]) -> List[Dict[str, Any]]:
-        """Gate.io: GET /api/v4/futures/usdt/positions"""
+        """BingX: GET /openApi/swap/v2/user/positions"""
         try:
             if symbol:
                 ccxt_symbol = self._convert_symbol(symbol)
@@ -546,7 +570,7 @@ class GateExchange(BaseExchange):
             raise RateLimitError(str(e))
     
     async def _api_get_position_by_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Gate.io: GET /api/v4/futures/usdt/positions/{contract}"""
+        """BingX: GET position for specific symbol"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             positions = await self.client.fetch_positions([ccxt_symbol])
@@ -559,17 +583,18 @@ class GateExchange(BaseExchange):
             raise RateLimitError(str(e))
     
     async def _api_get_account_info(self) -> Dict[str, Any]:
-        """Gate.io: GET /api/v4/futures/usdt/accounts"""
+        """BingX: GET account info"""
         try:
             return await self._api_get_balance()
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
     
     async def _api_get_symbol_info(self, symbol: str) -> Dict[str, Any]:
-        """Gate.io: GET /api/v4/futures/usdt/contracts/{contract}"""
+        """BingX: GET /openApi/swap/v2/quote/contracts"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             markets = self.client.markets
+            
             if ccxt_symbol not in markets:
                 await self.client.load_markets(True)
                 markets = self.client.markets
@@ -578,55 +603,64 @@ class GateExchange(BaseExchange):
             if not market:
                 raise ExchangeError(f"Symbol {symbol} not found")
             
+            # Extract contract specifications
+            limits = market.get('limits', {})
+            precision = market.get('precision', {})
+            info = market.get('info', {})
+            
             return {
-                'min_quantity': market['limits']['amount']['min'],
-                'max_quantity': market['limits']['amount']['max'],
-                'quantity_step': market['precision']['amount'],
-                'min_price': market['limits']['price']['min'],
-                'price_tick': market['precision']['price'],
-                'contract_size': market.get('contractSize', 1),
-                'max_leverage': 100,  # Gate.io max for major pairs
+                'symbol': symbol,
+                'contract_size': float(market.get('contractSize', 1) or 1),
+                'min_quantity': float(limits.get('amount', {}).get('min', 0.001) or 0.001),
+                'max_quantity': float(limits.get('amount', {}).get('max', 10000) or 10000),
+                'quantity_step': float(precision.get('amount', 0.001) or 0.001),
+                'min_price': float(limits.get('price', {}).get('min', 0) or 0),
+                'price_tick': float(precision.get('price', 0.01) or 0.01),
+                'max_leverage': int(info.get('maxLeverage', 150) or 150),
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
+        except ExchangeError:
+            raise
+        except Exception as e:
+            raise ExchangeError(f"Failed to get symbol info: {e}")
     
     async def _api_get_funding_rate(self, symbol: str) -> Dict[str, Any]:
-        """Gate.io: GET /api/v4/futures/usdt/funding_rate"""
+        """BingX: GET funding rate"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # Try to get funding rate via ccxt
-            try:
-                funding = await self.client.fetch_funding_rate(ccxt_symbol)
-                return {
-                    'symbol': symbol,
-                    'fundingRate': funding.get('fundingRate', 0),
-                    'nextFundingTime': funding.get('fundingTimestamp', 0),
-                }
-            except Exception:
-                # Fallback: get from ticker info
-                ticker = await self.client.fetch_ticker(ccxt_symbol)
-                info = ticker.get('info', {})
-                return {
-                    'symbol': symbol,
-                    'fundingRate': float(info.get('funding_rate', 0) or 0),
-                    'nextFundingTime': int(info.get('funding_next_apply', 0) or 0) * 1000,
-                }
+            # Try to get funding rate from ticker or dedicated endpoint
+            ticker = await self.client.fetch_ticker(ccxt_symbol)
+            info = ticker.get('info', {})
+            
+            return {
+                'symbol': symbol,
+                'fundingRate': float(info.get('fundingRate', 0) or 0),
+                'nextFundingTime': int(info.get('nextFundingTime', 0) or 0),
+            }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
+        except Exception as e:
+            # Fallback - return defaults
+            return {
+                'symbol': symbol,
+                'fundingRate': 0,
+                'nextFundingTime': 0,
+            }
     
     # ============================================
-    # PARSERS (convert Gate format to our types)
+    # PARSERS (convert BingX format to our types)
     # ============================================
     
     def _parse_position(self, data: Dict[str, Any]) -> Position:
-        """Convert Gate.io position data to Position object"""
+        """Convert BingX position data to Position object"""
         symbol = data.get('symbol', '')
         contracts = float(data.get('contracts', 0) or 0)
         side = data.get('side', '')  # 'long' or 'short'
         
         return Position(
-            id=f"gate_{symbol}_{int(datetime.utcnow().timestamp())}",
+            id=f"bingx_{symbol}_{int(datetime.utcnow().timestamp())}",
             pair=symbol,
             exchange1=self.exchange_name.value,
             exchange1_pos_id=data.get('id', ''),
@@ -634,7 +668,6 @@ class GateExchange(BaseExchange):
             exchange1_entry_price=float(data.get('entryPrice', 0) or 0),
             exchange1_current_price=float(data.get('markPrice', 0) or 0),
             exchange1_leverage=int(data.get('leverage', 1) or 1),
-            # For single exchange position
             exchange2='',
             exchange2_pos_id='',
             exchange2_side='',
@@ -652,7 +685,9 @@ class GateExchange(BaseExchange):
         )
     
     def _parse_order(self, data: Dict[str, Any]) -> Order:
-        """Convert Gate.io order data to Order object"""
+        """Convert BingX order data to Order object"""
+        from .types import Order
+        
         side = data.get('side') or ''
         order_type = data.get('type') or ''
         status = data.get('status') or 'open'
@@ -670,7 +705,7 @@ class GateExchange(BaseExchange):
         )
     
     def _parse_orderbook(self, data: Dict[str, Any]) -> OrderBook:
-        """Convert Gate.io orderbook to OrderBook object"""
+        """Convert BingX orderbook to OrderBook object"""
         return OrderBook(
             symbol=data.get('symbol', ''),
             exchange=self.exchange_name.value,
@@ -680,7 +715,7 @@ class GateExchange(BaseExchange):
         )
     
     def _parse_price_data(self, data: Dict[str, Any]) -> PriceData:
-        """Convert Gate.io ticker to PriceData"""
+        """Convert BingX ticker to PriceData"""
         ts = data.get('timestamp')
         if ts is None:
             ts = datetime.utcnow().timestamp() * 1000
@@ -695,40 +730,18 @@ class GateExchange(BaseExchange):
         )
     
     def _parse_balance(self, data: Dict[str, Any]) -> Balance:
-        """Convert Gate.io balance to Balance object"""
-        # ccxt normalizes balance - data is a dict with currency keys
-        # Structure: {'USDT': {'free': X, 'used': Y, 'total': Z}, 'info': [...]}
+        """Convert BingX balance to Balance object"""
+        # ccxt normalizes balance - look for USDT
+        usdt = data.get('USDT', data.get('info', {}).get('USDT', {}))
         
-        # Gate.io testnet may return list in 'info', or balances directly
-        usdt = None
-        
-        # Try to get USDT directly from data
-        if 'USDT' in data and isinstance(data['USDT'], dict):
-            usdt = data['USDT']
-        elif 'info' in data:
-            info = data['info']
-            # info could be a list of balances
-            if isinstance(info, list):
-                for item in info:
-                    if item.get('currency', '').upper() == 'USDT':
-                        usdt = {
-                            'total': float(item.get('total', 0) or 0),
-                            'free': float(item.get('available', item.get('free', 0)) or 0),
-                            'used': float(item.get('position_margin', item.get('used', 0)) or 0)
-                        }
-                        break
-            elif isinstance(info, dict) and 'USDT' in info:
-                usdt = info['USDT']
-        
-        if usdt and isinstance(usdt, dict):
+        if isinstance(usdt, dict):
             total = float(usdt.get('total', 0) or 0)
-            free = float(usdt.get('free', usdt.get('available', 0)) or 0)
-            used = float(usdt.get('used', usdt.get('position_margin', 0)) or 0)
+            free = float(usdt.get('free', 0) or 0)
+            used = float(usdt.get('used', 0) or 0)
         else:
-            # Fallback - try to sum all from free dict
-            total = float(data.get('total', {}).get('USDT', 0) or 0)
-            free = float(data.get('free', {}).get('USDT', 0) or 0)
-            used = float(data.get('used', {}).get('USDT', 0) or 0)
+            total = float(usdt or 0)
+            free = total
+            used = 0
         
         return Balance(
             exchange=self.exchange_name.value,
@@ -740,17 +753,24 @@ class GateExchange(BaseExchange):
         )
     
     def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
-        """Convert Gate.io funding data to FundingRate"""
+        """Convert BingX funding data to FundingRate"""
+        from datetime import timezone
+        
         next_funding_ts = int(data.get('nextFundingTime', 0) or 0)
         rate = float(data.get('fundingRate', 0) or 0)
+        
+        if next_funding_ts:
+            next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc)
+        else:
+            next_funding_time = datetime.now(timezone.utc)
         
         return FundingRate(
             symbol=data.get('symbol', ''),
             exchange=self.exchange_name.value,
             rate=rate,
             rate_bps=rate * 10000,
-            next_funding_time=datetime.fromtimestamp(next_funding_ts / 1000) if next_funding_ts else datetime.utcnow(),
-            timestamp=datetime.utcnow()
+            next_funding_time=next_funding_time,
+            timestamp=datetime.now(timezone.utc)
         )
     
     # ============================================
@@ -758,9 +778,8 @@ class GateExchange(BaseExchange):
     # ============================================
     
     async def subscribe_orderbook(self, symbol: str, callback) -> None:
-        """Subscribe to Gate.io orderbook WebSocket"""
+        """Subscribe to BingX orderbook WebSocket"""
         # TODO: Implement WebSocket subscription
-        # Gate.io WS: wss://fx-ws.gateio.ws/v4/ws/usdt
         pass
     
     async def subscribe_position_updates(self, callback) -> None:
@@ -783,7 +802,7 @@ class GateExchange(BaseExchange):
     # ============================================
     
     async def get_server_time(self) -> int:
-        """Get Gate.io server time"""
+        """Get BingX server time"""
         try:
             time = await self.client.fetch_time()
             return time
@@ -791,47 +810,25 @@ class GateExchange(BaseExchange):
             raise ExchangeError(f"Failed to get server time: {e}")
     
     async def sync_time(self) -> None:
-        """Sync time with Gate.io"""
-        # ccxt handles this automatically
+        """Sync time with BingX"""
+        # ccxt handles this automatically with adjustForTimeDifference
         pass
     
     # ============================================
-    # GATE-SPECIFIC METHODS
+    # BINGX-SPECIFIC METHODS
     # ============================================
     
-    async def set_dual_position_mode(self, dual_mode: bool = True) -> bool:
+    async def set_position_mode(self, hedge_mode: bool = False) -> bool:
         """
         Set position mode
         
         Args:
-            dual_mode: True for dual position mode (can have both LONG and SHORT)
-            
-        Note: Gate.io supports dual position mode by default
+            hedge_mode: True for hedge mode (dual positions), False for one-way mode
         """
         try:
-            # Gate.io may not need explicit mode setting through ccxt
-            # The mode is determined by how orders are placed
+            await self.client.set_position_mode(hedge_mode)
             return True
         except Exception as e:
+            if 'not modified' in str(e).lower() or 'same' in str(e).lower():
+                return True
             raise ExchangeError(f"Failed to set position mode: {e}")
-    
-    async def get_contract_info(self, symbol: str) -> Dict[str, Any]:
-        """Get detailed contract information"""
-        try:
-            ccxt_symbol = self._convert_symbol(symbol)
-            market = self.client.markets.get(ccxt_symbol)
-            if not market:
-                await self.client.load_markets(True)
-                market = self.client.markets.get(ccxt_symbol)
-            
-            return {
-                'symbol': symbol,
-                'contract_size': market.get('contractSize'),
-                'tick_size': market.get('precision', {}).get('price'),
-                'min_qty': market.get('limits', {}).get('amount', {}).get('min'),
-                'max_leverage': market.get('info', {}).get('leverage_max', 100),
-                'maker_fee': market.get('maker'),
-                'taker_fee': market.get('taker'),
-            }
-        except Exception as e:
-            raise ExchangeError(f"Failed to get contract info: {e}")

@@ -627,6 +627,7 @@ Funding-Bot/
 │   │   ├── kucoin.py       # KuCoin адаптер ✅
 │   │   ├── okx.py          # OKX адаптер ✅
 │   │   ├── gate.py         # Gate.io адаптер ✅ (добавлен 11 янв 2026)
+│   │   ├── bingx.py        # BingX адаптер ✅ (добавлен 13 янв 2026)
 │   │   ├── types.py        # 9 dataclasses (Position, Balance, OrderBook...)
 │   │   └── enums.py        # Exchange enum, комиссии в bps
 │   ├── core/               # Бизнес-логика
@@ -1100,7 +1101,7 @@ async def funding_monitoring_loop():
 - [x] Unit tests (12/12 passing: calculations + emergency_monitor)
 - [x] Venv setup and validation
 
-### Phase 2 ✅ - Exchange Adapters (Completed - 11 Jan 2026)
+### Phase 2 ✅ - Exchange Adapters (Completed - 14 Jan 2026)
 - [x] Binance adapter (basic REST API)
 - [x] Bybit adapter (basic REST API)
 - [x] OKX adapter (basic REST API)
@@ -1111,8 +1112,25 @@ async def funding_monitoring_loop():
   - [x] Position management
   - [x] Leverage control
   - [x] Balance queries
+- [x] BingX adapter (full CCXT integration - 13 Jan 2026)
+  - [x] Market/Limit orders (tested on demo)
+  - [x] Stop Loss / Take Profit (tested on demo)
+  - [x] Position management
+  - [x] Leverage control (Hedge mode support)
+  - [x] Balance queries
+  - [x] Demo mode with VST (Virtual Standard Token)
+- [x] Bitget adapter (full CCXT integration - 14 Jan 2026)
+  - [x] Market/Limit orders (tested on demo)
+  - [x] Stop Loss / Take Profit (tested on demo - fixed with tradeSide='close')
+  - [x] Position management (one-way mode)
+  - [x] Leverage control
+  - [x] Balance queries
+  - [x] Demo mode (sandbox=True, 10,000 USDT)
+  - [x] Critical fix: SL/TP requires tradeSide='close' for one-way position mode
 - [x] Unit testing validation
 - [x] Gate.io testnet testing (all order types verified)
+- [x] BingX demo testing (all order types verified)
+- [x] Bitget demo testing (all order types verified)
 - [ ] WebSocket price monitoring (skeleton ready, low priority)
 - [ ] Testing other exchanges on testnets
 
@@ -1187,6 +1205,23 @@ async def funding_monitoring_loop():
   - Market/Limit orders
   - Stop Loss / Take Profit
   - Протестировано на testnet
+- **BingX** - полная CCXT интеграция (13 Jan 2026)
+  - Market/Limit orders
+  - Stop Loss / Take Profit
+  - Hedge mode (positionSide: LONG/SHORT)
+  - Leverage control (per-side в hedge mode)
+  - Funding rate queries
+  - Demo mode (VST - Virtual Standard Token)
+  - Протестировано на demo (100k VST)
+- **Bitget** - полная CCXT интеграция (14 Jan 2026)
+  - Market/Limit orders (oneWayMode: True)
+  - Stop Loss / Take Profit (tradeSide: 'close' for one-way mode)
+  - Position management (one-way position mode)
+  - Leverage control
+  - Funding rate queries
+  - Demo mode (sandbox=True, 10,000 USDT)
+  - Протестировано на demo
+  - **Критическое исправление:** SL/TP требует `tradeSide='close'` для one-way mode
 
 ### Базовая реализация (требует тестирования)
 - **Binance** - REST API адаптер через CCXT
@@ -1195,17 +1230,30 @@ async def funding_monitoring_loop():
 ### Планируется
 - Hyperliquid
 - MEXC
-- Bitget
-- BingX
 - Aster
 - Lighter
 
 ---
 
-**Дата обновления:** 12 января 2026  
+**Дата обновления:** 14 января 2026  
 **Статус:** Phase 1-4 завершены ✅ | Production ready 🚀
 
 **Последние обновления:**
+- ✅ **Bitget адаптер добавлен** (14 Jan 2026)
+  - Полная CCXT интеграция с one-way position mode
+  - oneWayMode: True для открытия позиций
+  - tradeSide: 'close' для закрытия позиций и SL/TP
+  - Leverage control
+  - Demo mode с 10,000 USDT
+  - Все типы ордеров протестированы на demo
+  - **Критическое исправление SL/TP:** Требуется параметр `tradeSide='close'` для one-way mode, иначе ошибка "delegateType is error"
+- ✅ **BingX адаптер добавлен** (13 Jan 2026)
+  - Полная CCXT интеграция с hedge mode support
+  - positionSide параметр для всех ордеров
+  - Leverage per-side (LONG/SHORT отдельно)
+  - Demo mode с VST (100,000 виртуальных токенов)
+  - Все типы ордеров протестированы на demo
+- ✅ Gate.io адаптер добавлен и протестирован на testnet (11 Jan 2026)
 - ✅ CLI полностью реализован и протестирован (12 Jan 2026)
 - ✅ Position persistence система с JSON storage (12 Jan 2026)
 - ✅ Orphan position detection и обработка (12 Jan 2026)
@@ -1217,7 +1265,11 @@ async def funding_monitoring_loop():
   - ✅ Smart PnL Close argument order fix
   - ✅ PnL calculation in position view
   - ✅ OKX account mode handling (51010 error fix)
+  - ✅ Bitget SL/TP fix (tradeSide='close' requirement)
 - ✅ 52/52 tests passing
 - ✅ Bybit + OKX полностью протестированы на production
+- ✅ Gate.io протестирован на testnet
+- ✅ BingX протестирован на demo (VST)
+- ✅ Bitget протестирован на demo (10,000 USDT)
 - ✅ Data directory excluded from Git (.gitignore)
-- 🚀 Ready for production use
+- 🚀 Ready for production use (7 бирж поддерживается)
