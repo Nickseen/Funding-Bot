@@ -10,7 +10,7 @@ NOTE: Flash Funding режим УДАЛЁН - заменён на Stable Spread 
 
 import asyncio
 import time
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, List
 from datetime import datetime
 
 from ..exchanges.base import BaseExchange
@@ -117,6 +117,81 @@ class ExecutionEngine:
             f"{exchange_name}: ❌ Position NOT FOUND after {max_retries} attempts"
         )
         return None
+
+    def _calculate_aggressive_fill_price(
+        self,
+        orderbook_side: List[Tuple[float, float]],
+        quantity: float,
+        side: str,
+        price_buffer_pct: float = 0.1
+    ) -> Tuple[float, float]:
+        """
+        Calculate aggressive price to guarantee instant full fill.
+        
+        Walks through orderbook levels to find the price that fills
+        the entire quantity, then adds a buffer for safety.
+        
+        Args:
+            orderbook_side: List of (price, quantity) tuples
+                           - For BUY: pass asks (ascending price)
+                           - For SELL: pass bids (descending price)
+            quantity: Amount we need to fill
+            side: "BUY" or "SELL"
+            price_buffer_pct: Additional price buffer (default 0.1%)
+        
+        Returns:
+            Tuple[aggressive_price, average_execution_price]
+            
+        Raises:
+            Exception: If insufficient liquidity in orderbook
+        """
+        if not orderbook_side:
+            raise Exception("Orderbook is empty - cannot calculate aggressive price")
+        
+        cumulative_qty = 0.0
+        total_cost = 0.0
+        last_price = orderbook_side[0][0]
+        
+        for price, qty in orderbook_side:
+            remaining = quantity - cumulative_qty
+            
+            if remaining <= 0:
+                break
+            
+            # Take what we need from this level
+            fill_qty = min(qty, remaining)
+            cumulative_qty += fill_qty
+            total_cost += price * fill_qty
+            last_price = price
+            
+            if cumulative_qty >= quantity:
+                break
+        
+        # Check if we have enough liquidity
+        if cumulative_qty < quantity * 0.95:  # Allow 5% shortfall
+            raise Exception(
+                f"Insufficient liquidity: need {quantity:.4f}, "
+                f"available {cumulative_qty:.4f} ({cumulative_qty/quantity*100:.1f}%)"
+            )
+        
+        # Calculate average execution price
+        avg_price = total_cost / cumulative_qty if cumulative_qty > 0 else last_price
+        
+        # Add buffer to the worst price (last level we touched)
+        if side == "BUY":
+            # For buying, aggressive price is HIGHER than orderbook
+            aggressive_price = last_price * (1 + price_buffer_pct / 100)
+        else:
+            # For selling, aggressive price is LOWER than orderbook
+            aggressive_price = last_price * (1 - price_buffer_pct / 100)
+        
+        log.debug(
+            f"Aggressive fill: side={side}, qty={quantity:.4f}, "
+            f"avg_price={avg_price:.6f}, aggressive_price={aggressive_price:.6f}, "
+            f"levels_consumed={sum(1 for _ in orderbook_side if cumulative_qty > 0)}"
+        )
+        
+        return (aggressive_price, avg_price)
 
     async def hit_the_bid(
         self,
@@ -703,26 +778,39 @@ Open position anyway? [Y/n]: """
         ob1 = await self.exchange1.get_orderbook(symbol)
         ob2 = await self.exchange2.get_orderbook(symbol)
         
-        # 2. Определить execution prices (LIMIT orders по best bid/ask)
-        if side1 == PositionSide.LONG:
-            # Ex1: BUY (take ask), Ex2: SELL (take bid)
-            exec_price1 = ob1.best_ask
-            exec_price2 = ob2.best_bid
-        else:
-            # Ex1: SELL (take bid), Ex2: BUY (take ask)
-            exec_price1 = ob1.best_bid
-            exec_price2 = ob2.best_ask
+        # 2. Calculate AGGRESSIVE execution prices (eat through orderbook levels)
+        # This ensures instant fill even with low liquidity at best price
+        try:
+            if side1 == PositionSide.LONG:
+                # Ex1: BUY (eat asks), Ex2: SELL (eat bids)
+                exec_price1, avg_price1 = self._calculate_aggressive_fill_price(
+                    ob1.asks, quantity, "BUY"
+                )
+                exec_price2, avg_price2 = self._calculate_aggressive_fill_price(
+                    ob2.bids, quantity, "SELL"
+                )
+            else:
+                # Ex1: SELL (eat bids), Ex2: BUY (eat asks)
+                exec_price1, avg_price1 = self._calculate_aggressive_fill_price(
+                    ob1.bids, quantity, "SELL"
+                )
+                exec_price2, avg_price2 = self._calculate_aggressive_fill_price(
+                    ob2.asks, quantity, "BUY"
+                )
+        except Exception as e:
+            log.error(f"Failed to calculate aggressive fill price: {e}")
+            raise Exception(f"Insufficient orderbook liquidity: {e}")
         
-        # 3. Вычислить спред (СОХРАНИМ В ПАМЯТИ)
-        entry_spread_abs = abs(exec_price2 - exec_price1)
-        entry_spread_bps = (entry_spread_abs / min(exec_price1, exec_price2)) * 10000
+        # 3. Вычислить спред (используем average prices для точного расчета)
+        entry_spread_abs = abs(avg_price2 - avg_price1)
+        entry_spread_bps = (entry_spread_abs / min(avg_price1, avg_price2)) * 10000
         
-        # 4. Рассчитать комиссии (maker, так как limit orders по best bid/ask)
+        # 4. Рассчитать комиссии (taker, так как aggressive limit orders)
         from ..exchanges.enums import get_total_fees_bps, Exchange
         total_fees_bps = get_total_fees_bps(
             Exchange(self.exchange1.get_name()),
             Exchange(self.exchange2.get_name()),
-            use_maker=True  # Limit orders = maker fees
+            use_maker=False  # Aggressive limit orders = taker fees
         )
         
         # 5. Показать анализ
@@ -731,20 +819,24 @@ Open position anyway? [Y/n]: """
 ║ STABLE SPREAD MODE - Entry Analysis
 ╠══════════════════════════════════════════════════════════
 ║ Symbol: {symbol}
-║ Mode: Stable Spread (сохранение спреда между биржами)
+║ Mode: Stable Spread (aggressive LIMIT for instant fill)
 ╠══════════════════════════════════════════════════════════
-║ Entry Prices:
+║ Aggressive Limit Prices (eat orderbook depth):
 ║   {self.exchange1.get_name()} ({side1.value}): {exec_price1:.6f}
 ║   {self.exchange2.get_name()} ({side2.value}): {exec_price2:.6f}
 ║ 
-║ Entry Spread:
+║ Expected Avg Fill Prices:
+║   {self.exchange1.get_name()}: {avg_price1:.6f}
+║   {self.exchange2.get_name()}: {avg_price2:.6f}
+║ 
+║ Entry Spread (based on avg prices):
 ║   Absolute: {entry_spread_abs:.6f}
 ║   Basis Points: {entry_spread_bps:.2f} bps
 ╠══════════════════════════════════════════════════════════
 ║ Cost Analysis:
-║   Entry fees (maker): {total_fees_bps:.2f} bps
+║   Entry fees (taker): {total_fees_bps:.2f} bps
 ║   Funding rate: {funding_rate_bps:.2f} bps/hour
-║   Order type: LIMIT (best bid/ask)
+║   Order type: AGGRESSIVE LIMIT (instant fill)
 ║   
 ║ ⚠️  Spread loss on entry: -{entry_spread_bps:.2f} bps
 ║ ✅ Spread gain on exit: +{entry_spread_bps:.2f} bps (if stable)
@@ -766,9 +858,9 @@ Open position? [Y/n]: """
         # 6. Открыть позиции на обеих биржах (SEQUENTIALLY for atomic rollback)
         from ..exchanges.enums import OrderType
         
-        log.info(f"Opening stable spread position...")
-        log.info(f"  {self.exchange1.get_name()}: {side1.value} {quantity} @ {exec_price1}")
-        log.info(f"  {self.exchange2.get_name()}: {side2.value} {quantity} @ {exec_price2}")
+        log.info(f"Opening stable spread position (aggressive LIMIT)...")
+        log.info(f"  {self.exchange1.get_name()}: {side1.value} {quantity} @ {exec_price1:.6f} (aggressive)")
+        log.info(f"  {self.exchange2.get_name()}: {side2.value} {quantity} @ {exec_price2:.6f} (aggressive)")
         
         pos1 = None
         pos2 = None
@@ -854,21 +946,21 @@ Open position? [Y/n]: """
         
         log.success(f"Positions opened AND VERIFIED on both exchanges")
         
-        # 7. Рассчитать liquidation prices
-        liq_price1 = calculate_liquidation_price(exec_price1, leverage, side1)
-        liq_price2 = calculate_liquidation_price(exec_price2, leverage, side2)
+        # 7. Рассчитать liquidation prices (используем avg_price для точности)
+        liq_price1 = calculate_liquidation_price(avg_price1, leverage, side1)
+        liq_price2 = calculate_liquidation_price(avg_price2, leverage, side2)
         
         log.info(f"Liquidation prices: {self.exchange1.get_name()}={liq_price1:.4f}, {self.exchange2.get_name()}={liq_price2:.4f}")
         
         # 8. Рассчитать SL/TP (80% до ликвидации)
         sl1, tp1 = calculate_stop_loss_take_profit(
-            entry_price=exec_price1,
+            entry_price=avg_price1,
             liquidation_price=liq_price1,
             side=side1,
             distance_percent=20.0
         )
         sl2, tp2 = calculate_stop_loss_take_profit(
-            entry_price=exec_price2,
+            entry_price=avg_price2,
             liquidation_price=liq_price2,
             side=side2,
             distance_percent=20.0
@@ -913,21 +1005,21 @@ Open position? [Y/n]: """
             log.warning(f"Failed to set SL/TP orders: {e}")
             # Продолжаем даже если SL/TP не установились
         
-        # 10. Создать позицию с сохраненным спредом
+        # 10. Создать позицию с сохраненным спредом (используем avg_price как entry_price)
         position = Position(
             id=f"pos_stable_{symbol}_{int(asyncio.get_event_loop().time())}",
             pair=symbol,
             exchange1=self.exchange1.get_name(),
             exchange1_pos_id=getattr(pos1, 'id', 'unknown'),
             exchange1_side=side1.value,
-            exchange1_entry_price=exec_price1,
-            exchange1_current_price=exec_price1,
+            exchange1_entry_price=avg_price1,  # Use avg price as actual entry
+            exchange1_current_price=avg_price1,
             exchange1_leverage=leverage,
             exchange2=self.exchange2.get_name(),
             exchange2_pos_id=getattr(pos2, 'id', 'unknown'),
             exchange2_side=side2.value,
-            exchange2_entry_price=exec_price2,
-            exchange2_current_price=exec_price2,
+            exchange2_entry_price=avg_price2,  # Use avg price as actual entry
+            exchange2_current_price=avg_price2,
             exchange2_leverage=leverage,
             quantity=quantity,
             entry_time=time.time(),
