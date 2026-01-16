@@ -22,6 +22,7 @@ from ..utils.calculations import (
     is_profitable_spread,
     calculate_liquidation_price,
     calculate_stop_loss_take_profit,
+    calculate_aggressive_fill_price,
 )
 from ..utils.logger import log
 
@@ -117,81 +118,6 @@ class ExecutionEngine:
             f"{exchange_name}: ❌ Position NOT FOUND after {max_retries} attempts"
         )
         return None
-
-    def _calculate_aggressive_fill_price(
-        self,
-        orderbook_side: List[Tuple[float, float]],
-        quantity: float,
-        side: str,
-        price_buffer_pct: float = 0.1
-    ) -> Tuple[float, float]:
-        """
-        Calculate aggressive price to guarantee instant full fill.
-        
-        Walks through orderbook levels to find the price that fills
-        the entire quantity, then adds a buffer for safety.
-        
-        Args:
-            orderbook_side: List of (price, quantity) tuples
-                           - For BUY: pass asks (ascending price)
-                           - For SELL: pass bids (descending price)
-            quantity: Amount we need to fill
-            side: "BUY" or "SELL"
-            price_buffer_pct: Additional price buffer (default 0.1%)
-        
-        Returns:
-            Tuple[aggressive_price, average_execution_price]
-            
-        Raises:
-            Exception: If insufficient liquidity in orderbook
-        """
-        if not orderbook_side:
-            raise Exception("Orderbook is empty - cannot calculate aggressive price")
-        
-        cumulative_qty = 0.0
-        total_cost = 0.0
-        last_price = orderbook_side[0][0]
-        
-        for price, qty in orderbook_side:
-            remaining = quantity - cumulative_qty
-            
-            if remaining <= 0:
-                break
-            
-            # Take what we need from this level
-            fill_qty = min(qty, remaining)
-            cumulative_qty += fill_qty
-            total_cost += price * fill_qty
-            last_price = price
-            
-            if cumulative_qty >= quantity:
-                break
-        
-        # Check if we have enough liquidity
-        if cumulative_qty < quantity * 0.95:  # Allow 5% shortfall
-            raise Exception(
-                f"Insufficient liquidity: need {quantity:.4f}, "
-                f"available {cumulative_qty:.4f} ({cumulative_qty/quantity*100:.1f}%)"
-            )
-        
-        # Calculate average execution price
-        avg_price = total_cost / cumulative_qty if cumulative_qty > 0 else last_price
-        
-        # Add buffer to the worst price (last level we touched)
-        if side == "BUY":
-            # For buying, aggressive price is HIGHER than orderbook
-            aggressive_price = last_price * (1 + price_buffer_pct / 100)
-        else:
-            # For selling, aggressive price is LOWER than orderbook
-            aggressive_price = last_price * (1 - price_buffer_pct / 100)
-        
-        log.debug(
-            f"Aggressive fill: side={side}, qty={quantity:.4f}, "
-            f"avg_price={avg_price:.6f}, aggressive_price={aggressive_price:.6f}, "
-            f"levels_consumed={sum(1 for _ in orderbook_side if cumulative_qty > 0)}"
-        )
-        
-        return (aggressive_price, avg_price)
 
     async def hit_the_bid(
         self,
@@ -783,18 +709,18 @@ Open position anyway? [Y/n]: """
         try:
             if side1 == PositionSide.LONG:
                 # Ex1: BUY (eat asks), Ex2: SELL (eat bids)
-                exec_price1, avg_price1 = self._calculate_aggressive_fill_price(
+                exec_price1, avg_price1 = calculate_aggressive_fill_price(
                     ob1.asks, quantity, "BUY"
                 )
-                exec_price2, avg_price2 = self._calculate_aggressive_fill_price(
+                exec_price2, avg_price2 = calculate_aggressive_fill_price(
                     ob2.bids, quantity, "SELL"
                 )
             else:
                 # Ex1: SELL (eat bids), Ex2: BUY (eat asks)
-                exec_price1, avg_price1 = self._calculate_aggressive_fill_price(
+                exec_price1, avg_price1 = calculate_aggressive_fill_price(
                     ob1.bids, quantity, "SELL"
                 )
-                exec_price2, avg_price2 = self._calculate_aggressive_fill_price(
+                exec_price2, avg_price2 = calculate_aggressive_fill_price(
                     ob2.asks, quantity, "BUY"
                 )
         except Exception as e:
