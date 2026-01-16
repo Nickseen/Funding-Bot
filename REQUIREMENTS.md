@@ -1235,10 +1235,31 @@ async def funding_monitoring_loop():
 
 ---
 
-**Дата обновления:** 14 января 2026  
+**Дата обновления:** 16 января 2026  
 **Статус:** Phase 1-4 завершены ✅ | Production ready 🚀
 
-**Последние обновления:**
+**Последние обновления (16 Jan 2026):**
+- ✅ **Aggressive Fill Pricing реализован**
+  - Функция `calculate_aggressive_fill_price()` в `utils/calculations.py`
+  - Проход по уровням стакана для гарантии мгновенного заполнения
+  - Буфер 0.1% для защиты от движения цены
+  - Используется при открытии (Stable Spread) и закрытии (Smart PNL Close)
+- ✅ **Position Verification система**
+  - Метод `_verify_position_exists()` в ExecutionEngine
+  - Retry механизм (3 попытки, 1с задержка)
+  - Атомарный откат: если 2-я позиция не открылась → закрываем 1-ю
+- ✅ **Timezone fixes для всех адаптеров**
+  - Все datetime теперь используют `timezone.utc`
+  - Funding time отображается корректно (fundingTimestamp)
+  - Исправлены: Bybit, OKX, Binance, KuCoin, Gate.io
+- ✅ **Улучшения CLI**
+  - Net funding calculation fix (вычитание вместо сложения для delta-neutral)
+  - Показ обоих funding times если разные между биржами
+  - Новый UI: выбор side → затем выбор биржи
+  - Улучшенная обработка Ctrl+C в async_input
+- ✅ **52/52 tests passing**
+
+**Предыдущие обновления:**
 - ✅ **Bitget адаптер добавлен** (14 Jan 2026)
   - Полная CCXT интеграция с one-way position mode
   - oneWayMode: True для открытия позиций

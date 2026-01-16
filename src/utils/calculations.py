@@ -3,8 +3,83 @@ Pure calculation functions for Delta Neutral Bot.
 All functions are stateless and side-effect free.
 """
 
-from typing import Tuple
+from typing import Tuple, List
 from ..exchanges.enums import PositionSide, bps_to_percent, percent_to_bps
+
+
+def calculate_aggressive_fill_price(
+    orderbook_side: List[Tuple[float, float]],
+    quantity: float,
+    side: str,
+    price_buffer_pct: float = 0.1
+) -> Tuple[float, float]:
+    """
+    Calculate aggressive price to guarantee instant full fill.
+    
+    Walks through orderbook levels to find the price that fills
+    the entire quantity, then adds a buffer for safety.
+    
+    Args:
+        orderbook_side: List of (price, quantity) tuples
+                       - For BUY: pass asks (ascending price)
+                       - For SELL: pass bids (descending price)
+        quantity: Amount we need to fill
+        side: "BUY" or "SELL"
+        price_buffer_pct: Additional price buffer (default 0.1%)
+    
+    Returns:
+        Tuple[aggressive_price, average_execution_price]
+        
+    Raises:
+        Exception: If insufficient liquidity in orderbook
+        
+    Example:
+        >>> asks = [(100.40, 2), (100.45, 3), (100.50, 10)]
+        >>> aggressive_price, avg_price = calculate_aggressive_fill_price(asks, 15, "BUY")
+        >>> # aggressive_price = 100.60 (with 0.1% buffer)
+        >>> # avg_price = ~100.47 (weighted average)
+    """
+    if not orderbook_side:
+        raise Exception("Orderbook is empty - cannot calculate aggressive price")
+    
+    cumulative_qty = 0.0
+    total_cost = 0.0
+    last_price = orderbook_side[0][0]
+    
+    for price, qty in orderbook_side:
+        remaining = quantity - cumulative_qty
+        
+        if remaining <= 0:
+            break
+        
+        # Take what we need from this level
+        fill_qty = min(qty, remaining)
+        cumulative_qty += fill_qty
+        total_cost += price * fill_qty
+        last_price = price
+        
+        if cumulative_qty >= quantity:
+            break
+    
+    # Check if we have enough liquidity
+    if cumulative_qty < quantity * 0.95:  # Allow 5% shortfall
+        raise Exception(
+            f"Insufficient liquidity: need {quantity:.4f}, "
+            f"available {cumulative_qty:.4f} ({cumulative_qty/quantity*100:.1f}%)"
+        )
+    
+    # Calculate average execution price
+    avg_price = total_cost / cumulative_qty if cumulative_qty > 0 else last_price
+    
+    # Add buffer to the worst price (last level we touched)
+    if side == "BUY":
+        # For buying, aggressive price is HIGHER than orderbook
+        aggressive_price = last_price * (1 + price_buffer_pct / 100)
+    else:
+        # For selling, aggressive price is LOWER than orderbook
+        aggressive_price = last_price * (1 - price_buffer_pct / 100)
+    
+    return (aggressive_price, avg_price)
 
 
 def calculate_liquidation_price(

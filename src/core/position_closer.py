@@ -23,6 +23,7 @@ from ..utils.calculations import (
     calculate_unrealized_pnl_from_orderbooks,
     can_instant_fill,
     get_close_prices_and_sides,
+    calculate_aggressive_fill_price,
 )
 from .state import AppState
 
@@ -609,27 +610,56 @@ Select [1-3]: """, end='')
         ob2: OrderBook
     ) -> None:
         """
-        Закрыть позицию limit ордерами по best bid/ask
+        Закрыть позицию aggressive limit ордерами для гарантии заполнения
         
         Args:
             position: Позиция для закрытия
             ob1: OrderBook с первой биржи
             ob2: OrderBook со второй биржи
         """
-        # Определить цены закрытия
+        # Determine close sides and orderbook sides
         if position.exchange1_side == "LONG":
-            # Close LONG: SELL по bid, Close SHORT: BUY по ask
-            close_price1 = ob1.best_bid
-            close_price2 = ob2.best_ask
+            # Close LONG: SELL (takes bids), Close SHORT: BUY (takes asks)
+            side1 = "SELL"
+            side2 = "BUY"
+            orderbook_side1 = ob1.bids
+            orderbook_side2 = ob2.asks
         else:
-            # Close SHORT: BUY по ask, Close LONG: SELL по bid
-            close_price1 = ob1.best_ask
-            close_price2 = ob2.best_bid
+            # Close SHORT: BUY (takes asks), Close LONG: SELL (takes bids)
+            side1 = "BUY"
+            side2 = "SELL"
+            orderbook_side1 = ob1.asks
+            orderbook_side2 = ob2.bids
+        
+        # Calculate AGGRESSIVE fill prices for guaranteed instant fill
+        try:
+            close_price1, avg_price1 = calculate_aggressive_fill_price(
+                orderbook_side1, position.quantity, side1
+            )
+            close_price2, avg_price2 = calculate_aggressive_fill_price(
+                orderbook_side2, position.quantity, side2
+            )
+            
+            log.info(
+                f"Aggressive close prices: "
+                f"{position.exchange1}: {close_price1:.6f} (avg: {avg_price1:.6f}), "
+                f"{position.exchange2}: {close_price2:.6f} (avg: {avg_price2:.6f})"
+            )
+        except Exception as e:
+            log.warning(f"Failed to calculate aggressive close price: {e}")
+            # Fallback to best bid/ask
+            if position.exchange1_side == "LONG":
+                close_price1 = ob1.best_bid
+                close_price2 = ob2.best_ask
+            else:
+                close_price1 = ob1.best_ask
+                close_price2 = ob2.best_bid
+            log.warning(f"Using fallback prices: {close_price1:.6f}, {close_price2:.6f}")
         
         log.info(
             f"Closing {position.id}: "
-            f"{position.exchange1} @ {close_price1}, "
-            f"{position.exchange2} @ {close_price2}"
+            f"{position.exchange1} @ {close_price1:.6f}, "
+            f"{position.exchange2} @ {close_price2:.6f}"
         )
         
         # Закрываем обе позиции одновременно
