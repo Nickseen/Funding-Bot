@@ -7,12 +7,26 @@ NO business logic, only input/output operations.
 
 import asyncio
 import sys
+import signal
 from typing import Optional, List, Tuple, Any
 from concurrent.futures import ThreadPoolExecutor
 
 
 # Thread pool for blocking input operations
 _executor = ThreadPoolExecutor(max_workers=1)
+
+# Flag to indicate shutdown was requested
+_shutdown_requested = False
+
+
+def _blocking_input() -> str:
+    """Blocking input that can be interrupted."""
+    global _shutdown_requested
+    try:
+        return sys.stdin.readline()
+    except (EOFError, KeyboardInterrupt):
+        _shutdown_requested = True
+        return ""
 
 
 async def async_input(prompt: str = "") -> str:
@@ -27,7 +41,12 @@ async def async_input(prompt: str = "") -> str:
     
     Returns:
         User input string (stripped)
+    
+    Raises:
+        KeyboardInterrupt: If Ctrl+C was pressed
     """
+    global _shutdown_requested
+    
     loop = asyncio.get_event_loop()
     
     # Print prompt without newline
@@ -35,8 +54,14 @@ async def async_input(prompt: str = "") -> str:
         print(prompt, end="", flush=True)
     
     # Run blocking input in thread pool
-    result = await loop.run_in_executor(_executor, sys.stdin.readline)
-    return result.strip()
+    try:
+        result = await loop.run_in_executor(_executor, _blocking_input)
+        if _shutdown_requested:
+            _shutdown_requested = False
+            raise KeyboardInterrupt()
+        return result.strip()
+    except asyncio.CancelledError:
+        raise KeyboardInterrupt()
 
 
 async def get_menu_choice(

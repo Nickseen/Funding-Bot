@@ -491,7 +491,7 @@ class BinanceExchange(BaseExchange):
     
     def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
         """Convert Binance funding data to FundingRate"""
-        from datetime import datetime
+        from datetime import datetime, timezone
         rate = float(data.get('lastFundingRate', 0) or 0)
         next_funding_ts = int(data.get('nextFundingTime', 0) or 0)
         
@@ -500,8 +500,8 @@ class BinanceExchange(BaseExchange):
             exchange=self.exchange_name,
             rate=rate,
             rate_bps=rate * 10000,
-            next_funding_time=datetime.fromtimestamp(next_funding_ts / 1000) if next_funding_ts else datetime.utcnow(),
-            timestamp=datetime.utcnow()
+            next_funding_time=datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc) if next_funding_ts else datetime.now(timezone.utc),
+            timestamp=datetime.now(timezone.utc)
         )
     
     # ============================================

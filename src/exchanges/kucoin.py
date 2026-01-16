@@ -615,17 +615,19 @@ class KuCoinExchange(BaseExchange):
     
     def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
         """Convert KuCoin funding rate to FundingRate object"""
+        from datetime import timezone
+        
         symbol = data.get('symbol', '')
         
         # Current funding rate
         funding_rate = float(data.get('fundingRate', 0) or 0)
         
-        # Next funding time
-        next_funding_time = data.get('fundingTimestamp')
-        if next_funding_time:
-            next_funding_time = float(next_funding_time) / 1000
+        # Next funding time - convert to timezone-aware datetime
+        next_funding_ts = data.get('fundingTimestamp')
+        if next_funding_ts:
+            next_funding_time = datetime.fromtimestamp(float(next_funding_ts) / 1000, tz=timezone.utc)
         else:
-            next_funding_time = datetime.utcnow().timestamp()
+            next_funding_time = datetime.now(timezone.utc)
         
         # Predicted rate (if available)
         predicted_rate = float(data.get('nextFundingRate', funding_rate) or funding_rate)

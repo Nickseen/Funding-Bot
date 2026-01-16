@@ -102,6 +102,9 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# In one command
+cd /home/fuckedupupd/Funding-Bot && source venv/bin/activate && python -m src.main
 ```
 
 ### 3. Configuration

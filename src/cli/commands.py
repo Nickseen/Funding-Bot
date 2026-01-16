@@ -25,6 +25,8 @@ from ..utils.calculations import calculate_spread_bps
 
 from .display import (
     render_exchange_selection_menu,
+    render_side_selection_menu,
+    render_exchange_selection_for_side,
     render_execution_mode_menu,
     render_pair_info,
     render_position_size_info,
@@ -94,33 +96,56 @@ class OpenPositionCommand:
         """
         clear_screen()
         
-        # Step 1: Select exchanges
+        # Step 1: Select side and exchanges
         exchange_list = self._get_exchange_list()
-        print(render_exchange_selection_menu(exchange_list))
         
-        # Select LONG exchange
-        long_idx = await get_exchange_selection(
-            [ex['name'] for ex in exchange_list],
-            "Select LONG exchange [1-N]: "
+        # First select side for first exchange
+        print(render_side_selection_menu())
+        side_choice = await get_menu_choice(
+            "Select side for first position [1-2]: ",
+            ["1", "2", "q"]
         )
-        if long_idx is None:
+        if side_choice is None or side_choice == "q":
             return False
         
-        # Select SHORT exchange
-        short_idx = await get_exchange_selection(
+        first_side = "LONG" if side_choice == "1" else "SHORT"
+        second_side = "SHORT" if first_side == "LONG" else "LONG"
+        
+        # Now select exchange for chosen side
+        print(render_exchange_selection_for_side(exchange_list, first_side))
+        first_idx = await get_exchange_selection(
             [ex['name'] for ex in exchange_list],
-            "Select SHORT exchange [1-N]: "
+            f"Select exchange for {first_side} [1-N]: "
         )
-        if short_idx is None:
+        if first_idx is None:
             return False
         
-        if long_idx == short_idx:
-            print(render_error("LONG and SHORT exchanges must be different"))
+        # Select exchange for opposite side (exclude already selected)
+        remaining_exchanges = [ex for i, ex in enumerate(exchange_list) if i != first_idx]
+        if not remaining_exchanges:
+            print(render_error("Need at least 2 exchanges"))
             await wait_for_keypress()
             return False
         
-        long_exchange_name = exchange_list[long_idx]['name']
-        short_exchange_name = exchange_list[short_idx]['name']
+        print(render_exchange_selection_for_side(remaining_exchanges, second_side))
+        second_idx = await get_exchange_selection(
+            [ex['name'] for ex in remaining_exchanges],
+            f"Select exchange for {second_side} [1-N]: "
+        )
+        if second_idx is None:
+            return False
+        
+        # Map back to original exchange names
+        first_exchange_name = exchange_list[first_idx]['name']
+        second_exchange_name = remaining_exchanges[second_idx]['name']
+        
+        # Assign based on sides
+        if first_side == "LONG":
+            long_exchange_name = first_exchange_name
+            short_exchange_name = second_exchange_name
+        else:
+            long_exchange_name = second_exchange_name
+            short_exchange_name = first_exchange_name
         
         long_exchange = self.exchanges.get(long_exchange_name.lower())
         short_exchange = self.exchanges.get(short_exchange_name.lower())

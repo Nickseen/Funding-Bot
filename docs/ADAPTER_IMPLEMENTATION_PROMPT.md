@@ -170,7 +170,15 @@ def _parse_balance(self, data: Dict[str, Any]) -> Balance:
     """Конвертировать response в Balance dataclass"""
     
 def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
-    """Конвертировать response в FundingRate dataclass"""
+    """
+    Конвертировать response в FundingRate dataclass
+    
+    ВАЖНО: ОБЯЗАТЕЛЬНО использовать timezone-aware datetime!
+    ✅ datetime.now(timezone.utc)
+    ✅ datetime.fromtimestamp(ts/1000, tz=timezone.utc)
+    ❌ datetime.utcnow() — deprecated!
+    ❌ datetime.fromtimestamp(ts/1000) — без timezone!
+    """
 ```
 
 ### 7. WEBSOCKET STUBS (4 метода) — заглушки для будущего
@@ -346,7 +354,49 @@ async def _api_xxx(self, ...) -> ...:
 
 ---
 
-## 📦 ПОСЛЕ СОЗДАНИЯ АДАПТЕРА:
+## � TIMEZONE-AWARE DATETIME — ОБЯЗАТЕЛЬНО!
+
+**КРИТИЧЕСКИ ВАЖНО:** Все datetime объекты ДОЛЖНЫ быть timezone-aware!
+
+```python
+from datetime import timezone
+
+# ✅ ПРАВИЛЬНО:
+def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
+    """Convert funding data to FundingRate"""
+    from datetime import timezone
+    
+    next_funding_ts = int(data.get('nextFundingTime', 0) or 0)
+    rate = float(data.get('fundingRate', 0) or 0)
+    
+    # Конвертируем timestamp в timezone-aware datetime
+    if next_funding_ts:
+        next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc)
+    else:
+        next_funding_time = datetime.now(timezone.utc)
+    
+    return FundingRate(
+        symbol=data.get('symbol', ''),
+        exchange=self.exchange_name.value,
+        rate=rate,
+        rate_bps=rate * 10000,
+        next_funding_time=next_funding_time,
+        timestamp=datetime.now(timezone.utc)  # не utcnow()!
+    )
+
+# ❌ НЕПРАВИЛЬНО (deprecated):
+next_funding_time = datetime.fromtimestamp(ts / 1000)  # без tz
+timestamp = datetime.utcnow()  # deprecated в Python 3.12+
+```
+
+**Почему важно:**
+- `datetime.utcnow()` deprecated и будет удален в Python 3.14
+- Naive datetime (без timezone) может привести к ошибкам при расчете времени
+- Все расчеты времени в боте делаются в UTC
+
+---
+
+## �📦 ПОСЛЕ СОЗДАНИЯ АДАПТЕРА:
 
 ### 1. Добавь в `src/exchanges/__init__.py`:
 ```python
@@ -391,6 +441,9 @@ MAKER_COMMISSION_BPS = {
 
 - [ ] Все 20 `_api_*` методов реализованы (включая set_stop_loss, set_take_profit)
 - [ ] Все 6 `_parse_*` методов реализованы
+- [ ] **Все datetime объекты timezone-aware (tz=timezone.utc)**
+- [ ] **Используется `datetime.now(timezone.utc)` вместо `utcnow()`**
+- [ ] **Используется `fromtimestamp(ts/1000, tz=timezone.utc)` с timezone**
 - [ ] `_convert_symbol()` корректно конвертирует формат
 - [ ] Все исключения обёрнуты в RateLimitError/NetworkError/ExchangeError
 - [ ] Добавлен в `__init__.py`

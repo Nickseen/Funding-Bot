@@ -103,6 +103,55 @@ def render_main_menu(
 # OPEN POSITION MENUS
 # ============================================
 
+def render_side_selection_menu() -> str:
+    """Render side selection menu (LONG or SHORT first)"""
+    lines = [
+        _create_header(),
+        _create_line("SELECT POSITION SIDE"),
+        _create_separator(),
+        _create_line("1. 🟢 LONG  (Buy position)"),
+        _create_line("2. 🔴 SHORT (Sell position)"),
+        _create_line(""),
+        _create_line("q. Cancel"),
+        _create_footer(),
+    ]
+    
+    return "\n".join(lines)
+
+
+def render_exchange_selection_for_side(
+    exchanges: List[Dict[str, Any]],
+    side: str
+) -> str:
+    """
+    Render exchange selection menu for a specific side
+    
+    Args:
+        exchanges: List of dicts with 'name', 'connected', 'configured' keys
+        side: "LONG" or "SHORT"
+    """
+    side_emoji = "🟢" if side == "LONG" else "🔴"
+    
+    lines = [
+        _create_header(),
+        _create_line(f"SELECT EXCHANGE FOR {side_emoji} {side}"),
+        _create_separator(),
+        _create_line("Available Exchanges:"),
+    ]
+    
+    for i, ex in enumerate(exchanges, 1):
+        status = "[✓]" if ex.get('connected') else "[ ]"
+        state = "Connected" if ex.get('connected') else "Not configured"
+        lines.append(_create_line(f"{i}. {status} {ex['name']:<20} - {state}"))
+    
+    lines.extend([
+        _create_line(""),
+        _create_footer(),
+    ])
+    
+    return "\n".join(lines)
+
+
 def render_exchange_selection_menu(
     exchanges: List[Dict[str, Any]]
 ) -> str:
@@ -162,6 +211,11 @@ def render_pair_info(
     """
     Render trading pair information with funding rates
     
+    For delta-neutral position:
+    - If we go LONG on ex1, SHORT on ex2: net = -ex1_rate + ex2_rate
+    - If we go SHORT on ex1, LONG on ex2: net = ex1_rate - ex2_rate
+    - We choose the direction that gives positive net funding
+    
     Args:
         symbol: Trading pair
         funding_ex1: FundingRate from first exchange
@@ -169,22 +223,48 @@ def render_pair_info(
         ex1_name: Name of first exchange
         ex2_name: Name of second exchange
     """
-    # Calculate net funding
-    net_funding_bps = abs(funding_ex1.rate_bps) + abs(funding_ex2.rate_bps)
+    # Calculate net funding for both possible position configurations
+    # Config 1: LONG on ex1, SHORT on ex2
+    net_config1 = -funding_ex1.rate_bps + funding_ex2.rate_bps
+    # Config 2: SHORT on ex1, LONG on ex2
+    net_config2 = funding_ex1.rate_bps - funding_ex2.rate_bps
+    
+    # Choose the profitable direction
+    if net_config1 > net_config2:
+        net_funding_bps = net_config1
+        recommended_ex1_side = "LONG"
+        recommended_ex2_side = "SHORT"
+    else:
+        net_funding_bps = net_config2
+        recommended_ex1_side = "SHORT"
+        recommended_ex2_side = "LONG"
+    
     daily_yield = net_funding_bps * 3  # 3 funding periods per day (8h)
-    daily_yield_usd = (daily_yield / 100) * 100  # Per $10k
+    daily_yield_usd = (daily_yield / 10000) * 10000  # Per $10k
     
     # Determine who pays whom
     ex1_direction = "LONG pays SHORT" if funding_ex1.rate > 0 else "SHORT pays LONG"
     ex2_direction = "LONG pays SHORT" if funding_ex2.rate > 0 else "SHORT pays LONG"
     
-    # Time to next funding
-    time_to_funding = ""
+    # Time to next funding - show BOTH if different
+    ex1_time = ""
+    ex2_time = ""
+    
     if funding_ex1.next_funding_time:
         minutes = funding_ex1.time_to_funding_minutes
         hours = int(minutes // 60)
         mins = int(minutes % 60)
-        time_to_funding = f"{hours}h {mins}m"
+        ex1_time = f"{hours}h {mins}m"
+    
+    if funding_ex2.next_funding_time:
+        minutes = funding_ex2.time_to_funding_minutes
+        hours = int(minutes // 60)
+        mins = int(minutes % 60)
+        ex2_time = f"{hours}h {mins}m"
+    
+    # Check if funding times are different (>5 min difference)
+    time_diff = abs(funding_ex1.time_to_funding_minutes - funding_ex2.time_to_funding_minutes)
+    show_both_times = time_diff > 5
     
     lines = [
         "┌─────────────────────────────────────────────────────────┐",
@@ -192,10 +272,22 @@ def render_pair_info(
         f"│ {ex1_name} Funding:     {funding_ex1.rate_bps:+.4f} bps ({ex1_direction}){' '*(15-len(ex1_direction))}│",
         f"│ {ex2_name} Funding:       {funding_ex2.rate_bps:+.4f} bps ({ex2_direction}){' '*(15-len(ex2_direction))}│",
         f"│ Net Funding/8h:      {net_funding_bps:+.4f} bps{' '*29}│",
-        f"│ Next Payment:        {time_to_funding:<35}│",
+        f"│ Recommended:         {ex1_name}={recommended_ex1_side}, {ex2_name}={recommended_ex2_side}{' '*(35-len(ex1_name)-len(ex2_name)-len(recommended_ex1_side)-len(recommended_ex2_side)-3)}│",
+    ]
+    
+    # Add funding time info
+    if show_both_times:
+        lines.extend([
+            f"│ Next Payment ({ex1_name}):  {ex1_time:<35}│",
+            f"│ Next Payment ({ex2_name}):    {ex2_time:<35}│",
+        ])
+    else:
+        lines.append(f"│ Next Payment:        {ex1_time or ex2_time:<35}│")
+    
+    lines.extend([
         f"│ Daily Yield:         {daily_yield:+.4f} bps (${daily_yield_usd:.2f} per $10k){' '*7}│",
         "└─────────────────────────────────────────────────────────┘",
-    ]
+    ])
     
     return "\n".join(lines)
 
