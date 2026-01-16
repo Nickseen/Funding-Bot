@@ -506,13 +506,16 @@ class BybitExchange(BaseExchange):
         """Bybit: GET /v5/market/tickers - funding info"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
-            ticker = await self.client.fetch_ticker(ccxt_symbol)
-            info = ticker.get('info', {})
+            # Use fetch_funding_rate for accurate funding time
+            funding = await self.client.fetch_funding_rate(ccxt_symbol)
+            
+            # Bybit uses 'fundingTimestamp' not 'nextFundingTimestamp'
+            next_funding_ts = funding.get('fundingTimestamp') or funding.get('nextFundingTimestamp', 0)
             
             return {
                 'symbol': symbol,
-                'fundingRate': info.get('fundingRate', 0),
-                'nextFundingTime': info.get('nextFundingTime', 0),
+                'fundingRate': funding.get('fundingRate', 0),
+                'nextFundingTime': next_funding_ts,
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))

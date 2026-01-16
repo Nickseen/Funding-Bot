@@ -635,10 +635,14 @@ class OKXExchange(BaseExchange):
             # OKX doesn't include funding rate in ticker, use dedicated API
             funding = await self.client.fetch_funding_rate(ccxt_symbol)
             
+            # OKX: fundingTimestamp = next funding time
+            # nextFundingTimestamp = funding AFTER next (we don't want this)
+            next_funding_ts = funding.get('fundingTimestamp') or funding.get('nextFundingTimestamp', 0)
+            
             return {
                 'symbol': symbol,
                 'fundingRate': funding.get('fundingRate', 0),
-                'nextFundingTime': funding.get('nextFundingTimestamp', 0),
+                'nextFundingTime': next_funding_ts,
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
