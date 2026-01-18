@@ -51,6 +51,12 @@ class Config:
     BITGET_SECRET_KEY: str = os.getenv("BITGET_SECRET_KEY", "")
     BITGET_PASSPHRASE: str = os.getenv("BITGET_PASSPHRASE", "")
     
+    # Lighter (zkLighter DEX)
+    LIGHTER_API_KEY: str = os.getenv("LIGHTER_API_KEY", "")  # API public key (hex)
+    LIGHTER_SECRET_KEY: str = os.getenv("LIGHTER_SECRET_KEY", "")  # API private key (hex)
+    LIGHTER_ACCOUNT_INDEX: int = int(os.getenv("LIGHTER_ACCOUNT_INDEX", "0"))
+    LIGHTER_API_KEY_INDEX: int = int(os.getenv("LIGHTER_API_KEY_INDEX", "0"))
+    
     # Bot settings
     MAX_POSITIONS: int = int(os.getenv("MAX_POSITIONS", "100"))
     
