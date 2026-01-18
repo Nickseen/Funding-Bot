@@ -3,6 +3,10 @@ ccxt>=4.0.0
 python-dotenv>=1.0.0
 loguru>=0.7.0
 
+# Lighter exchange SDK (not in CCXT)
+# Install: pip install git+https://github.com/elliottech/lighter-python.git
+# lighter-python  # Uncomment after installing from GitHub
+
 # Async support
 aiohttp>=3.9.0
 asyncio>=3.4.3

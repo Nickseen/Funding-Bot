@@ -21,6 +21,7 @@ from .kucoin import KuCoinExchange
 from .gate import GateExchange
 from .bingx import BingXExchange
 from .bitget import BitgetExchange
+from .lighter import LighterExchange
 
 __all__ = [
     # Base class
@@ -33,6 +34,7 @@ __all__ = [
     "GateExchange",
     "BingXExchange",
     "BitgetExchange",
+    "LighterExchange",
     # Exceptions
     "ExchangeError",
     "InsufficientBalanceError",
