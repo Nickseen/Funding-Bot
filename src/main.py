@@ -32,6 +32,9 @@ from src.exchanges.binance import BinanceExchange
 from src.exchanges.bybit import BybitExchange
 from src.exchanges.kucoin import KuCoinExchange
 from src.exchanges.okx import OKXExchange
+from src.exchanges.gate import GateExchange
+from src.exchanges.bingx import BingXExchange
+from src.exchanges.bitget import BitgetExchange
 
 
 class Bot:
@@ -242,6 +245,37 @@ async def main_cli():
             )
         except Exception as e:
             log.warning(f"Error initializing OKX: {e}")
+    
+    if hasattr(config, 'GATE_API_KEY') and config.GATE_API_KEY:
+        try:
+            exchanges['gate'] = GateExchange(
+                api_key=config.GATE_API_KEY,
+                secret_key=config.GATE_SECRET_KEY,
+                testnet=config.is_testnet()
+            )
+        except Exception as e:
+            log.warning(f"Error initializing Gate.io: {e}")
+    
+    if hasattr(config, 'BINGX_API_KEY') and config.BINGX_API_KEY:
+        try:
+            exchanges['bingx'] = BingXExchange(
+                api_key=config.BINGX_API_KEY,
+                secret_key=config.BINGX_SECRET_KEY,
+                testnet=config.is_testnet()
+            )
+        except Exception as e:
+            log.warning(f"Error initializing BingX: {e}")
+    
+    if hasattr(config, 'BITGET_API_KEY') and config.BITGET_API_KEY:
+        try:
+            exchanges['bitget'] = BitgetExchange(
+                api_key=config.BITGET_API_KEY,
+                secret_key=config.BITGET_SECRET_KEY,
+                passphrase=config.BITGET_PASSPHRASE,
+                testnet=config.is_testnet()
+            )
+        except Exception as e:
+            log.warning(f"Error initializing Bitget: {e}")
     
     if not exchanges:
         log.warning("No exchanges configured. CLI will run in demo mode.")
