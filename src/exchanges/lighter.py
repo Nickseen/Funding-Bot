@@ -901,7 +901,7 @@ class LighterExchange(BaseExchange):
                             'unrealized_pnl': float(pos.unrealized_pnl) / USDC_SCALE if hasattr(pos, 'unrealized_pnl') else 0,
                             'realized_pnl': float(pos.realized_pnl) / USDC_SCALE if hasattr(pos, 'realized_pnl') else 0,
                             'leverage': 10,  # Default
-                            'margin_mode': 'cross',
+                            'margin_mode': 'isolated',  # Using isolated margin mode
                         })
             
             return positions
@@ -1028,7 +1028,7 @@ class LighterExchange(BaseExchange):
             unrealized_pnl=float(data.get('unrealized_pnl', 0)),
             realized_pnl=float(data.get('realized_pnl', 0)),
             leverage=int(data.get('leverage', 1)),
-            margin_mode=data.get('margin_mode', 'cross'),
+            margin_mode=data.get('margin_mode', 'isolated'),  # Default to isolated
             liquidation_price=float(data.get('liquidation_price', 0)),
             timestamp=datetime.now(),
         )

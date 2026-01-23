@@ -220,11 +220,16 @@ class OKXExchange(BaseExchange):
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # 1. Set leverage (ignore "already set" errors)
+            # 1. Set leverage for isolated margin mode
+            # OKX requires mgnMode parameter for isolated margin
             try:
-                await self.client.set_leverage(leverage, ccxt_symbol)
+                await self.client.set_leverage(
+                    leverage, 
+                    ccxt_symbol,
+                    params={'mgnMode': 'isolated'}
+                )
             except Exception as e:
-                if 'leverage' not in str(e).lower():
+                if 'leverage' not in str(e).lower() and 'same' not in str(e).lower():
                     raise
             
             # 2. Convert quantity to contracts
@@ -310,7 +315,7 @@ class OKXExchange(BaseExchange):
             
             params = {
                 'reduceOnly': True,
-                'tdMode': 'cross',
+                'tdMode': 'isolated',  # Use isolated margin mode for closing
             }
             
             if order_type == OrderType.LIMIT:
@@ -365,7 +370,7 @@ class OKXExchange(BaseExchange):
             contracts = round(quantity / contract_size)
             
             params = {
-                'tdMode': 'cross',
+                'tdMode': 'isolated',  # Use isolated margin mode
             }
             if reduce_only:
                 params['reduceOnly'] = True
@@ -466,7 +471,7 @@ class OKXExchange(BaseExchange):
             # Use OKX algo order API directly
             response = await self.client.private_post_trade_order_algo({
                 'instId': inst_id,
-                'tdMode': 'cross',
+                'tdMode': 'isolated',  # Use isolated margin mode
                 'side': order_side,
                 'ordType': 'conditional',  # Conditional order (SL/TP)
                 'sz': str(int(contracts)),
@@ -533,7 +538,7 @@ class OKXExchange(BaseExchange):
             # Use OKX algo order API directly
             response = await self.client.private_post_trade_order_algo({
                 'instId': inst_id,
-                'tdMode': 'cross',
+                'tdMode': 'isolated',  # Use isolated margin mode
                 'side': order_side,
                 'ordType': 'conditional',  # Conditional order (SL/TP)
                 'sz': str(int(contracts)),
