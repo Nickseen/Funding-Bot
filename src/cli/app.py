@@ -325,7 +325,7 @@ class CliApp:
         
         for name, exchange in self.exchanges.items():
             status = "✓ Connected" if exchange.connected else "✗ Disconnected"
-            print(f"║    • {name.capitalize():<15} {status:<20}          ║")
+            print(f"║    • {name.capitalize():<15} {status:<30}          ║")
         
         print("""╠══════════════════════════════════════════════════════════════╣
 ║  Tip: Use numbers to navigate menus, 'q' to go back          ║

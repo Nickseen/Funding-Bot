@@ -731,15 +731,20 @@ class BingXExchange(BaseExchange):
     
     def _parse_balance(self, data: Dict[str, Any]) -> Balance:
         """Convert BingX balance to Balance object"""
-        # ccxt normalizes balance - look for USDT
-        usdt = data.get('USDT', data.get('info', {}).get('USDT', {}))
+        # BingX uses different tokens for mainnet vs demo:
+        # - Mainnet: USDT
+        # - Demo: VST (Virtual Standard Token)
+        token = 'VST' if self.testnet else 'USDT'
         
-        if isinstance(usdt, dict):
-            total = float(usdt.get('total', 0) or 0)
-            free = float(usdt.get('free', 0) or 0)
-            used = float(usdt.get('used', 0) or 0)
+        # ccxt normalizes balance - look for the appropriate token
+        balance_data = data.get(token, data.get('info', {}).get(token, {}))
+        
+        if isinstance(balance_data, dict):
+            total = float(balance_data.get('total', 0) or 0)
+            free = float(balance_data.get('free', 0) or 0)
+            used = float(balance_data.get('used', 0) or 0)
         else:
-            total = float(usdt or 0)
+            total = float(balance_data or 0)
             free = total
             used = 0
         
