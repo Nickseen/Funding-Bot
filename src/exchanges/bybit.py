@@ -172,7 +172,15 @@ class BybitExchange(BaseExchange):
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # 1. Set leverage first (ignore "not modified" error)
+            # 1. Set isolated margin mode
+            try:
+                await self.client.set_margin_mode('isolated', ccxt_symbol)
+            except Exception as e:
+                # Ignore if already set or not supported
+                if 'not modified' not in str(e).lower() and 'same' not in str(e).lower():
+                    pass
+            
+            # 2. Set leverage (ignore "not modified" error)
             try:
                 await self.client.set_leverage(leverage, ccxt_symbol)
             except Exception as e:

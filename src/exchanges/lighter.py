@@ -666,9 +666,10 @@ class LighterExchange(BaseExchange):
             market_index = self._convert_symbol(symbol)
             
             # Lighter uses update_leverage with margin_mode
+            # Use ISOLATED_MARGIN_MODE for all positions
             _, response, err = await self.signer_client.update_leverage(
                 market_index=market_index,
-                margin_mode=self.CROSS_MARGIN_MODE,
+                margin_mode=self.ISOLATED_MARGIN_MODE,
                 leverage=leverage,
             )
             

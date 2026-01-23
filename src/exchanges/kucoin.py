@@ -221,8 +221,10 @@ class KuCoinExchange(BaseExchange):
         order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
         order_side = 'buy' if side == PositionSide.LONG else 'sell'
         
+        # Set isolated margin mode
         params = {
             'leverage': leverage,
+            'marginMode': 'ISOLATED',  # KuCoin uses ISOLATED (uppercase)
         }
         
         if order_type == OrderType.LIMIT and price:

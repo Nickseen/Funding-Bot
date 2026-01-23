@@ -242,7 +242,7 @@ class OKXExchange(BaseExchange):
             order_side = 'buy' if side == PositionSide.LONG else 'sell'
             
             params = {
-                'tdMode': 'cross',  # Cross margin mode
+                'tdMode': 'isolated',  # Isolated margin mode
             }
             
             if order_type == OrderType.LIMIT:

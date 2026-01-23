@@ -125,7 +125,18 @@ class BinanceExchange(BaseExchange):
         2. Place order
         """
         try:
-            # 1. Set leverage first
+            # 1. Set isolated margin mode
+            try:
+                await self.client.fapiPrivate_post_margintype({
+                    'symbol': symbol,
+                    'marginType': 'ISOLATED'
+                })
+            except Exception as e:
+                # Ignore if already set
+                if 'no need to change' not in str(e).lower():
+                    pass
+            
+            # 2. Set leverage
             await self.client.fapiPrivate_post_leverage({
                 'symbol': symbol,
                 'leverage': leverage

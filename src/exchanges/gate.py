@@ -210,7 +210,15 @@ class GateExchange(BaseExchange):
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # 1. Set leverage (ignore "already set" errors)
+            # 1. Set isolated margin mode
+            try:
+                await self.client.set_margin_mode('isolated', ccxt_symbol)
+            except Exception as e:
+                # Ignore if already set or not supported
+                if 'same' not in str(e).lower() and 'not changed' not in str(e).lower():
+                    pass
+            
+            # 2. Set leverage (ignore "already set" errors)
             try:
                 await self.client.set_leverage(leverage, ccxt_symbol)
             except Exception as e:

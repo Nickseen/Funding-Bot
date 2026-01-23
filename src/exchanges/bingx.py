@@ -203,7 +203,15 @@ class BingXExchange(BaseExchange):
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # 1. Set leverage for the position side we're opening
+            # 1. Set isolated margin mode
+            try:
+                await self.client.set_margin_mode('isolated', ccxt_symbol)
+            except Exception as e:
+                # Ignore if already set or not supported
+                if 'same' not in str(e).lower() and 'not modified' not in str(e).lower():
+                    pass
+            
+            # 2. Set leverage for the position side we're opening
             position_side_str = 'LONG' if side == PositionSide.LONG else 'SHORT'
             try:
                 await self.client.set_leverage(leverage, ccxt_symbol, params={'side': position_side_str})
