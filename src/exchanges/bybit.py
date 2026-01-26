@@ -53,6 +53,8 @@ class BybitExchange(BaseExchange):
             'options': {
                 'defaultType': 'linear',  # Linear perpetual (USDT-settled)
                 'adjustForTimeDifference': True,
+                'recvWindow': 20000,  # Increase receive window to 20 seconds
+                'timeDifference': 0,  # Will be auto-adjusted
             }
         })
         
@@ -66,6 +68,15 @@ class BybitExchange(BaseExchange):
     async def connect(self) -> bool:
         """Connect to Bybit"""
         try:
+            # First, sync time with server
+            server_time = await self.client.fetch_time()
+            local_time = self.client.milliseconds()
+            time_diff = server_time - local_time
+            
+            # Adjust client time difference
+            self.client.options['timeDifference'] = time_diff
+            
+            # Now load markets
             await self.client.load_markets()
             self.connected = True
             return True
@@ -647,8 +658,14 @@ class BybitExchange(BaseExchange):
         rate = float(data.get('fundingRate', 0) or 0)
         
         # Convert timestamp to timezone-aware UTC datetime
+        # Check if timestamp is in seconds or milliseconds
         if next_funding_ts:
-            next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc)
+            # If > year 2100 in seconds (4102444800), it's likely milliseconds
+            if next_funding_ts > 4102444800000:
+                next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc)
+            else:
+                # Already in seconds
+                next_funding_time = datetime.fromtimestamp(next_funding_ts, tz=timezone.utc)
         else:
             next_funding_time = datetime.now(timezone.utc)
         

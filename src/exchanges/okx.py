@@ -56,6 +56,9 @@ class OKXExchange(BaseExchange):
             'enableRateLimit': True,
             'options': {
                 'defaultType': 'swap',  # Perpetual swaps
+                'adjustForTimeDifference': True,
+                'recvWindow': 20000,  # 20 seconds receive window
+                'timeDifference': 0,
             }
         })
         
@@ -70,6 +73,12 @@ class OKXExchange(BaseExchange):
     async def connect(self) -> bool:
         """Connect to OKX"""
         try:
+            # Sync time with server first
+            server_time = await self.client.fetch_time()
+            local_time = self.client.milliseconds()
+            time_diff = server_time - local_time
+            self.client.options['timeDifference'] = time_diff
+            
             await self.client.load_markets()
             
             # Ensure account is in correct mode for futures trading
@@ -763,8 +772,14 @@ class OKXExchange(BaseExchange):
         rate = float(data.get('fundingRate', 0) or 0)
         
         # Convert timestamp to timezone-aware UTC datetime
+        # Check if timestamp is in seconds or milliseconds
         if next_funding_ts:
-            next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc)
+            # If > year 2100 in seconds (4102444800), it's likely milliseconds
+            if next_funding_ts > 4102444800000:
+                next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc)
+            else:
+                # Already in seconds
+                next_funding_time = datetime.fromtimestamp(next_funding_ts, tz=timezone.utc)
         else:
             next_funding_time = datetime.now(timezone.utc)
         

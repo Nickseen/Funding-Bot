@@ -56,6 +56,9 @@ class GateExchange(BaseExchange):
             'options': {
                 'defaultType': 'swap',  # Perpetual futures
                 'defaultSettle': 'usdt',  # USDT-settled
+                'adjustForTimeDifference': True,
+                'recvWindow': 20000,
+                'timeDifference': 0,
             }
         })
         
@@ -70,6 +73,12 @@ class GateExchange(BaseExchange):
     async def connect(self) -> bool:
         """Connect to Gate.io"""
         try:
+            # Sync time with server first
+            server_time = await self.client.fetch_time()
+            local_time = self.client.milliseconds()
+            time_diff = server_time - local_time
+            self.client.options['timeDifference'] = time_diff
+            
             await self.client.load_markets()
             self.connected = True
             return True
