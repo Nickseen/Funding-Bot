@@ -33,11 +33,12 @@ BORDER_RIGHT = "║"
 SEPARATOR = "╠" + BORDER_CHAR * (MENU_WIDTH - 2) + "╣"
 
 
-def _create_line(text: str, padding: int = 1) -> str:
-    """Create a menu line with borders"""
-    content_width = MENU_WIDTH - 2 - (padding * 2)
+def _create_line(text: str, padding: int = 1, has_emoji: bool = False) -> str:
+    """Create a menu line with borders, adjusting for emojis if present"""
+    adjustment = 3 if has_emoji else 2
+    content_width = MENU_WIDTH - adjustment - (padding * 2)
     padded_text = " " * padding + text.ljust(content_width) + " " * padding
-    return f"{BORDER_LEFT}{padded_text[:MENU_WIDTH-2]}{BORDER_RIGHT}"
+    return f"{BORDER_LEFT}{padded_text[:MENU_WIDTH-adjustment]}{BORDER_RIGHT}"
 
 
 def _create_header() -> str:
@@ -109,13 +110,13 @@ def render_side_selection_menu() -> str:
         _create_header(),
         _create_line("SELECT POSITION SIDE"),
         _create_separator(),
-        _create_line("1. 🟢 LONG  (Buy position)"),
-        _create_line("2. 🔴 SHORT (Sell position)"),
+        _create_line("1. 🟢 LONG  (Buy position)", has_emoji=True),
+        _create_line("2. 🔴 SHORT (Sell position)", has_emoji=True),
         _create_line(""),
         _create_line("q. Cancel"),
         _create_footer(),
     ]
-    
+
     return "\n".join(lines)
 
 
@@ -134,7 +135,7 @@ def render_exchange_selection_for_side(
     
     lines = [
         _create_header(),
-        _create_line(f"SELECT EXCHANGE FOR {side_emoji} {side}"),
+        _create_line(f"SELECT EXCHANGE FOR {side_emoji} {side}", has_emoji=True),
         _create_separator(),
         _create_line("Available Exchanges:"),
     ]
@@ -223,6 +224,16 @@ def render_pair_info(
         ex1_name: Name of first exchange
         ex2_name: Name of second exchange
     """
+    # Constants for box formatting
+    BOX_WIDTH = 59  # Total width including borders
+    CONTENT_WIDTH = BOX_WIDTH - 4  # Minus "│ " and " │"
+    
+    def pad_line(content: str) -> str:
+        """Pad content to fit box width exactly"""
+        current_len = len(content)
+        spaces_needed = CONTENT_WIDTH - current_len
+        return f"│ {content}{' ' * spaces_needed} │"
+    
     # Calculate net funding for both possible position configurations
     # Config 1: LONG on ex1, SHORT on ex2
     net_config1 = -funding_ex1.rate_bps + funding_ex2.rate_bps
@@ -266,31 +277,29 @@ def render_pair_info(
     time_diff = abs(funding_ex1.time_to_funding_minutes - funding_ex2.time_to_funding_minutes)
     show_both_times = time_diff > 5
     
+    # Build lines using pad_line function
     lines = [
         "┌─────────────────────────────────────────────────────────┐",
-        f"│ Pair Info:           {symbol:<35}│",
-        f"│ {ex1_name} Funding:     {funding_ex1.rate_bps:+.4f} bps ({ex1_direction}){' '*(15-len(ex1_direction))}│",
-        f"│ {ex2_name} Funding:       {funding_ex2.rate_bps:+.4f} bps ({ex2_direction}){' '*(15-len(ex2_direction))}│",
-        f"│ Net Funding/8h:      {net_funding_bps:+.4f} bps{' '*29}│",
-        f"│ Recommended:         {ex1_name}={recommended_ex1_side}, {ex2_name}={recommended_ex2_side}{' '*(35-len(ex1_name)-len(ex2_name)-len(recommended_ex1_side)-len(recommended_ex2_side)-3)}│",
     ]
+    
+    lines.append(pad_line(f"Pair Info:           {symbol}"))
+    lines.append(pad_line(f"{ex1_name} Funding:     {funding_ex1.rate_bps:+.4f} bps ({ex1_direction})"))
+    lines.append(pad_line(f"{ex2_name} Funding:       {funding_ex2.rate_bps:+.4f} bps ({ex2_direction})"))
+    lines.append(pad_line(f"Net Funding/8h:      {net_funding_bps:+.4f} bps"))
+    lines.append(pad_line(f"Recommended:         {ex1_name}={recommended_ex1_side}, {ex2_name}={recommended_ex2_side}"))
     
     # Add funding time info
     if show_both_times:
-        lines.extend([
-            f"│ Next Payment ({ex1_name}):  {ex1_time:<35}│",
-            f"│ Next Payment ({ex2_name}):    {ex2_time:<35}│",
-        ])
+        lines.append(pad_line(f"Next Payment ({ex1_name}):  {ex1_time}"))
+        lines.append(pad_line(f"Next Payment ({ex2_name}):    {ex2_time}"))
     else:
-        lines.append(f"│ Next Payment:        {ex1_time or ex2_time:<35}│")
+        lines.append(pad_line(f"Next Payment:        {ex1_time or ex2_time}"))
     
-    lines.extend([
-        f"│ Daily Yield:         {daily_yield:+.4f} bps (${daily_yield_usd:.2f} per $10k){' '*7}│",
-        "└─────────────────────────────────────────────────────────┘",
-    ])
+    lines.append(pad_line(f"Daily Yield:         {daily_yield:+.4f} bps (${daily_yield_usd:.2f} per $10k)"))
+    
+    lines.append("└─────────────────────────────────────────────────────────┘")
     
     return "\n".join(lines)
-
 
 def render_position_size_info(
     balance_ex1: float,
@@ -424,7 +433,7 @@ def render_positions_list(positions: List[Position]) -> str:
         size_usd = pos.quantity * mid_price
         
         line = f" {i}. {ex1_icon}{pos.pair[:8]:<8} ${size_usd:>7,.0f}  {pnl_str:>8}  {funding_str:>8}  {age_str}"
-        lines.append(_create_line(line[:MENU_WIDTH-4]))
+        lines.append(_create_line(line[:MENU_WIDTH-4], has_emoji=True))
     
     lines.extend([
         _create_separator(),

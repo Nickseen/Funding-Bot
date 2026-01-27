@@ -334,13 +334,28 @@ async def main_cli():
             # Discover any orphan positions
             orphans = await app_state.discover_exchange_positions(exchanges)
             if orphans:
-                print(f"\n⚠️  Found {len(orphans)} UNTRACKED position(s) on exchanges!")
-                print("   These positions exist but are not tracked by the bot.")
-                for i, pos in enumerate(orphans, 1):
-                    print(f"   {i}. {pos.exchange1}: {pos.pair} {pos.exchange1_side} (qty: {pos.quantity})")
+                # Separate delta-neutral pairs from individual orphans
+                pairs = [p for p in orphans if p.exchange2 and p.exchange2 != '']
+                individuals = [p for p in orphans if not p.exchange2 or p.exchange2 == '']
+                
+                total_count = len(pairs) + len(individuals)
+                print(f"\n⚠️  Found {total_count} position(s) on exchanges!")
+                
+                if pairs:
+                    print(f"\n   ✅ {len(pairs)} Delta-Neutral PAIR(S) recovered:")
+                    for i, pos in enumerate(pairs, 1):
+                        print(f"   {i}. {pos.pair}: {pos.exchange1} {pos.exchange1_side} + {pos.exchange2} {pos.exchange2_side} (qty: {pos.quantity})")
+                        print(f"      pair_id: {pos.pair_id}")
+                
+                if individuals:
+                    print(f"\n   ⚠️  {len(individuals)} UNTRACKED orphan position(s) (no pair found):")
+                    for i, pos in enumerate(individuals, len(pairs) + 1):
+                        print(f"   {i}. {pos.exchange1}: {pos.pair} {pos.exchange1_side} (qty: {pos.quantity})")
                 
                 print("\n   Options:")
-                print("   [C] Close ALL orphan positions with MARKET orders")
+                if pairs:
+                    print("   [A] Add recovered pairs to tracking (recommended)")
+                print("   [C] Close ALL positions with MARKET orders")
                 print("   [S] Skip and continue to CLI (positions remain open)")
                 print("   [1-N] Close specific position")
                 print("\n   Select option: ", end="")
@@ -348,21 +363,48 @@ async def main_cli():
                 try:
                     response = input().strip().upper()
                     
-                    if response == 'C':
-                        # Close all orphan positions
-                        print("\n   ⏳ Closing all orphan positions...")
+                    if response == 'A' and pairs:
+                        # Add recovered pairs to tracking
+                        print("\n   ⏳ Adding recovered delta-neutral pairs to tracking...")
+                        for pos in pairs:
+                            await app_state.add_position(pos)
+                            print(f"   ✓ Added {pos.pair}: {pos.exchange1} + {pos.exchange2}")
+                        
+                        # Save to disk
+                        await app_state.save_all_positions()
+                        print(f"\n   ✅ {len(pairs)} pair(s) added to tracking and saved!")
+                        print()
+                        
+                    elif response == 'C':
+                        # Close all positions (both pairs and orphans)
+                        print("\n   ⏳ Closing all positions...")
                         from src.exchanges.enums import OrderType
                         
                         for pos in orphans:
-                            try:
-                                ex = exchanges.get(pos.exchange1.lower())
-                                if ex:
-                                    await ex.close_position(pos.pair, OrderType.MARKET)
-                                    print(f"   ✓ Closed {pos.exchange1} {pos.pair} {pos.exchange1_side}")
-                                else:
-                                    print(f"   ✗ Exchange {pos.exchange1} not available")
-                            except Exception as e:
-                                print(f"   ✗ Failed to close {pos.exchange1} {pos.pair}: {e}")
+                            # For pairs, close both sides
+                            if pos.exchange2 and pos.exchange2 != '':
+                                try:
+                                    ex1 = exchanges.get(pos.exchange1.lower())
+                                    ex2 = exchanges.get(pos.exchange2.lower())
+                                    if ex1 and ex2:
+                                        await ex1.close_position(pos.pair, OrderType.MARKET)
+                                        await ex2.close_position(pos.pair, OrderType.MARKET)
+                                        print(f"   ✓ Closed pair {pos.pair}: {pos.exchange1} + {pos.exchange2}")
+                                    else:
+                                        print(f"   ✗ Exchange not available")
+                                except Exception as e:
+                                    print(f"   ✗ Failed to close pair {pos.pair}: {e}")
+                            else:
+                                # Single orphan position
+                                try:
+                                    ex = exchanges.get(pos.exchange1.lower())
+                                    if ex:
+                                        await ex.close_position(pos.pair, OrderType.MARKET)
+                                        print(f"   ✓ Closed {pos.exchange1} {pos.pair} {pos.exchange1_side}")
+                                    else:
+                                        print(f"   ✗ Exchange {pos.exchange1} not available")
+                                except Exception as e:
+                                    print(f"   ✗ Failed to close {pos.exchange1} {pos.pair}: {e}")
                         print()
                         
                     elif response.isdigit():

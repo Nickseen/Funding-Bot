@@ -436,6 +436,11 @@ Open position anyway? [Y/n]: """
         
         # 5. Формируем Position объект
         from ..exchanges.types import Position
+        import uuid
+        
+        # Generate unique pair_id to link both positions
+        pair_id = f"pair_{symbol}_{int(asyncio.get_event_loop().time())}_{uuid.uuid4().hex[:8]}"
+        
         position = Position(
             id=f"pos_{symbol}_{int(asyncio.get_event_loop().time())}",
             pair=symbol,
@@ -453,6 +458,7 @@ Open position anyway? [Y/n]: """
             exchange2_leverage=leverage,
             quantity=quantity,
             entry_time=time.time(),
+            pair_id=pair_id,  # Link both positions
             stop_loss_price=sl1,  # Используем SL первой биржи как "общий"
             take_profit_price=tp1,
             liquidation_price_ex1=liq_price1,
@@ -645,6 +651,11 @@ Open position anyway? [Y/n]: """
             log.warning(f"Failed to set SL/TP orders: {e}")
         
         # 10. Create position
+        import uuid
+        
+        # Generate unique pair_id to link both positions
+        pair_id = f"pair_{symbol}_{int(asyncio.get_event_loop().time())}_{uuid.uuid4().hex[:8]}"
+        
         position = Position(
             id=f"pos_market_{symbol}_{int(asyncio.get_event_loop().time())}",
             pair=symbol,
@@ -662,6 +673,7 @@ Open position anyway? [Y/n]: """
             exchange2_leverage=leverage,
             quantity=quantity,
             entry_time=time.time(),
+            pair_id=pair_id,  # Link both positions
             execution_mode="market",
             entry_spread_abs=abs(actual_price2 - actual_price1),
             entry_spread_bps=spread_bps,
@@ -948,6 +960,11 @@ Open position? [Y/n]: """
             # Продолжаем даже если SL/TP не установились
         
         # 10. Создать позицию с сохраненным спредом (используем avg_price как entry_price)
+        import uuid
+        
+        # Generate unique pair_id to link both positions
+        pair_id = f"pair_{symbol}_{int(asyncio.get_event_loop().time())}_{uuid.uuid4().hex[:8]}"
+        
         position = Position(
             id=f"pos_stable_{symbol}_{int(asyncio.get_event_loop().time())}",
             pair=symbol,
@@ -965,6 +982,7 @@ Open position? [Y/n]: """
             exchange2_leverage=leverage,
             quantity=quantity,
             entry_time=time.time(),
+            pair_id=pair_id,  # Link both positions
             execution_mode="stable_spread",
             entry_spread_abs=entry_spread_abs,
             entry_spread_bps=entry_spread_bps,

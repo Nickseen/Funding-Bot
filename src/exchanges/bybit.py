@@ -53,7 +53,7 @@ class BybitExchange(BaseExchange):
             'options': {
                 'defaultType': 'linear',  # Linear perpetual (USDT-settled)
                 'adjustForTimeDifference': True,
-                'recvWindow': 20000,  # Increase receive window to 20 seconds
+                'recvWindow': 60000,  # Increase receive window to 60 seconds
                 'timeDifference': 0,  # Will be auto-adjusted
             }
         })
@@ -462,6 +462,15 @@ class BybitExchange(BaseExchange):
     async def _api_get_positions(self, symbol: Optional[str]) -> List[Dict[str, Any]]:
         """Bybit: GET /v5/position/list"""
         try:
+            # Re-sync time before fetching positions to avoid timestamp errors
+            try:
+                server_time = await self.client.fetch_time()
+                local_time = self.client.milliseconds()
+                time_diff = server_time - local_time
+                self.client.options['timeDifference'] = time_diff
+            except:
+                pass  # Continue even if re-sync fails
+            
             if symbol:
                 ccxt_symbol = self._convert_symbol(symbol)
                 positions = await self.client.fetch_positions([ccxt_symbol])
@@ -661,7 +670,7 @@ class BybitExchange(BaseExchange):
         # Check if timestamp is in seconds or milliseconds
         if next_funding_ts:
             # If > year 2100 in seconds (4102444800), it's likely milliseconds
-            if next_funding_ts > 4102444800000:
+            if next_funding_ts > 4102444800:
                 next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc)
             else:
                 # Already in seconds

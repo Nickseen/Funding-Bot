@@ -59,7 +59,7 @@ class BitgetExchange(BaseExchange):
                 'defaultType': 'swap',  # Perpetual futures
                 'defaultSubType': 'linear',  # USDT-margined
                 'adjustForTimeDifference': True,
-                'recvWindow': 20000,
+                'recvWindow': 60000,
                 'timeDifference': 0,
             }
         })
@@ -204,22 +204,35 @@ class BitgetExchange(BaseExchange):
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # 1. Set isolated margin mode
+            # 1. Set leverage first with proper parameters
             try:
-                await self.client.set_margin_mode('isolated', ccxt_symbol)
+                # Bitget requires marginCoin parameter
+                await self.client.set_leverage(
+                    leverage, 
+                    ccxt_symbol,
+                    params={
+                        'marginCoin': 'USDT',  # For linear futures
+                    }
+                )
+            except Exception as e:
+                if 'leverage' not in str(e).lower() and 'same' not in str(e).lower():
+                    raise
+            
+            # 2. Set isolated margin mode
+            try:
+                await self.client.set_margin_mode(
+                    'isolated', 
+                    ccxt_symbol,
+                    params={
+                        'marginCoin': 'USDT',
+                    }
+                )
             except Exception as e:
                 # Ignore if already set or not supported
                 if 'same' not in str(e).lower() and 'not modified' not in str(e).lower():
                     pass
             
-            # 2. Set leverage
-            try:
-                await self.client.set_leverage(leverage, ccxt_symbol)
-            except Exception as e:
-                if 'leverage' not in str(e).lower() and 'same' not in str(e).lower():
-                    raise
-            
-            # 2. Place order
+            # 3. Place order
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = 'buy' if side == PositionSide.LONG else 'sell'
             
@@ -447,23 +460,12 @@ class BitgetExchange(BaseExchange):
         quantity: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Bitget: Set stop loss order using ccxt create_stop_order
-        Key: Must use tradeSide='close' for one-way position mode
+        Bitget: Set stop loss using plan orders (trigger orders)
+        Uses Bitget native API for proper SL/TP functionality
         """
         try:
             from .enums import PositionSide
             ccxt_symbol = self._convert_symbol(symbol)
-            
-            # Get market info for price precision
-            await self.client.load_markets()
-            market = self.client.market(ccxt_symbol)
-            price_precision = market.get('precision', {}).get('price', 1)
-            
-            # Round price to proper precision
-            if isinstance(price_precision, int):
-                formatted_price = round(stop_price, price_precision)
-            else:
-                formatted_price = round(stop_price, 1)
             
             # Get position to determine size and side
             positions = await self.client.fetch_positions([ccxt_symbol])
@@ -481,25 +483,24 @@ class BitgetExchange(BaseExchange):
             # For SL: if LONG position, sell when price falls; if SHORT, buy when price rises
             order_side = 'sell' if pos_side == 'long' else 'buy'
             
-            # Use ccxt create_stop_order with tradeSide='close' for one-way mode
-            response = await self.client.create_stop_order(
-                symbol=ccxt_symbol,
-                type='market',
-                side=order_side,
-                amount=contracts,
-                price=None,
-                triggerPrice=formatted_price,
-                params={
-                    'reduceOnly': True,
-                    'tradeSide': 'close',  # Critical for one-way position mode
-                }
-            )
+            # Use Bitget's native plan order API for proper stop loss
+            # This creates a conditional order that triggers at stopLossPrice
+            inst_id = ccxt_symbol.replace('/', '-').replace(':USDT', '-USDT')
+            
+            response = await self.client.private_mix_post_plan_placetpsl({
+                'symbol': inst_id,
+                'marginCoin': 'USDT',
+                'planType': 'loss_plan',  # Stop loss plan
+                'triggerPrice': str(stop_price),
+                'holdSide': 'long' if pos_side == 'long' else 'short',
+                'size': str(contracts),
+            })
             
             return {
                 'success': True,
-                'order_id': response.get('id'),
+                'order_id': response.get('data', {}).get('orderId', ''),
                 'type': 'stop_loss',
-                'trigger_price': formatted_price,
+                'trigger_price': stop_price,
                 'info': response
             }
             
@@ -518,23 +519,12 @@ class BitgetExchange(BaseExchange):
         quantity: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Bitget: Set take profit order using ccxt create_stop_order
-        Key: Must use tradeSide='close' for one-way position mode
+        Bitget: Set take profit using plan orders (trigger orders)
+        Uses Bitget native API for proper SL/TP functionality
         """
         try:
             from .enums import PositionSide
             ccxt_symbol = self._convert_symbol(symbol)
-            
-            # Get market info for price precision
-            await self.client.load_markets()
-            market = self.client.market(ccxt_symbol)
-            price_precision = market.get('precision', {}).get('price', 1)
-            
-            # Round price to proper precision
-            if isinstance(price_precision, int):
-                formatted_price = round(take_profit_price, price_precision)
-            else:
-                formatted_price = round(take_profit_price, 1)
             
             # Get position to determine size and side
             positions = await self.client.fetch_positions([ccxt_symbol])
@@ -552,25 +542,23 @@ class BitgetExchange(BaseExchange):
             # For TP: if LONG position, sell when price rises; if SHORT, buy when price falls
             order_side = 'sell' if pos_side == 'long' else 'buy'
             
-            # Use ccxt create_stop_order with tradeSide='close' for one-way mode
-            response = await self.client.create_stop_order(
-                symbol=ccxt_symbol,
-                type='market',
-                side=order_side,
-                amount=contracts,
-                price=None,
-                triggerPrice=formatted_price,
-                params={
-                    'reduceOnly': True,
-                    'tradeSide': 'close',  # Critical for one-way position mode
-                }
-            )
+            # Use Bitget's native plan order API for proper take profit
+            inst_id = ccxt_symbol.replace('/', '-').replace(':USDT', '-USDT')
+            
+            response = await self.client.private_mix_post_plan_placetpsl({
+                'symbol': inst_id,
+                'marginCoin': 'USDT',
+                'planType': 'profit_plan',  # Take profit plan
+                'triggerPrice': str(take_profit_price),
+                'holdSide': 'long' if pos_side == 'long' else 'short',
+                'size': str(contracts),
+            })
             
             return {
                 'success': True,
-                'order_id': response.get('id'),
+                'order_id': response.get('data', {}).get('orderId', ''),
                 'type': 'take_profit',
-                'trigger_price': formatted_price,
+                'trigger_price': take_profit_price,
                 'info': response
             }
             
@@ -809,7 +797,7 @@ class BitgetExchange(BaseExchange):
         if next_funding_ts:
             # Check if timestamp is in seconds or milliseconds
             # If > year 2100 in seconds (4102444800), it's likely milliseconds
-            if next_funding_ts > 4102444800000:
+            if next_funding_ts > 4102444800:
                 next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc)
             else:
                 # Already in seconds

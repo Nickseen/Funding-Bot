@@ -57,7 +57,7 @@ class OKXExchange(BaseExchange):
             'options': {
                 'defaultType': 'swap',  # Perpetual swaps
                 'adjustForTimeDifference': True,
-                'recvWindow': 20000,  # 20 seconds receive window
+                'recvWindow': 60000,  # 60 seconds receive window
                 'timeDifference': 0,
             }
         })
@@ -671,6 +671,23 @@ class OKXExchange(BaseExchange):
         contracts = float(data.get('contracts', 0) or 0)
         side = data.get('side', '')  # 'long' or 'short'
         
+        # OKX: contractSize = how much base currency per 1 contract
+        # Get from CCXT data or load from market info
+        contract_size = float(data.get('contractSize', 0) or 0)
+        
+        if contract_size == 0:
+            # Fallback: get from market info
+            try:
+                if symbol in self.client.markets:
+                    market = self.client.markets[symbol]
+                    contract_size = float(market.get('contractSize', 1) or 1)
+                else:
+                    contract_size = 1  # Final fallback
+            except:
+                contract_size = 1
+        
+        quantity_base = abs(contracts * contract_size)
+        
         return Position(
             id=f"okx_{symbol}_{int(datetime.utcnow().timestamp())}",
             pair=symbol,
@@ -687,7 +704,7 @@ class OKXExchange(BaseExchange):
             exchange2_entry_price=0,
             exchange2_current_price=0,
             exchange2_leverage=1,
-            quantity=abs(contracts),
+            quantity=quantity_base,
             entry_time=datetime.utcnow().timestamp(),
             stop_loss_price=float(data.get('stopLossPrice', 0) or 0),
             take_profit_price=float(data.get('takeProfitPrice', 0) or 0),
@@ -775,7 +792,7 @@ class OKXExchange(BaseExchange):
         # Check if timestamp is in seconds or milliseconds
         if next_funding_ts:
             # If > year 2100 in seconds (4102444800), it's likely milliseconds
-            if next_funding_ts > 4102444800000:
+            if next_funding_ts > 4102444800:
                 next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc)
             else:
                 # Already in seconds

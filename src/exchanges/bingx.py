@@ -59,7 +59,7 @@ class BingXExchange(BaseExchange):
             'options': {
                 'defaultType': 'swap',  # Perpetual futures
                 'adjustForTimeDifference': True,
-                'recvWindow': 20000,  # 20 seconds receive window
+                'recvWindow': 60000,  # 60 seconds receive window
                 'timeDifference': 0,
             }
         })
@@ -783,7 +783,7 @@ class BingXExchange(BaseExchange):
         # Check if timestamp is in seconds or milliseconds
         if next_funding_ts:
             # If > year 2100 in seconds (4102444800), it's likely milliseconds
-            if next_funding_ts > 4102444800000:
+            if next_funding_ts > 4102444800:
                 next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc)
             else:
                 # Already in seconds
