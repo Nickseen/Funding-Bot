@@ -414,8 +414,31 @@ async def _trigger_emergency_close(position: Position):
 **Причина:** Index reference bug - когда position object получался из state, это был тот же reference. При изменении `position.status = CLOSED` и вызове `update_position()`, сравнение `old_position.status != position.status` всегда было False (same object!).  
 **Решение:** Переписан `update_position()` в `src/core/state.py` - теперь ищет текущую индексную принадлежность позиции вместо сравнения статусов объектов.
 
+### 9. ✅ Pair ID Handling and CLI Alignment (27 Jan 2026)
+**Проблема:** Неправильная генерация и обработка pair_id для дельта-нейтральных пар, а также misalignment CLI меню с эмодзи.  
+**Решение:** 
+- Исправлена генерация и использование pair_id в `execution_engine.py`.
+- Улучшено выравнивание меню в `display.py` для строк с эмодзи.
+
+### 10. ✅ Time Sync and SL/TP Improvements (26 Jan 2026)
+**Проблема:** Проблемы с синхронизацией времени и настройкой SL/TP на разных биржах.  
+**Решение:** Улучшена синхронизация времени и логика настройки SL/TP.
+
+### 11. ✅ OKX Isolated Margin Mode (23 Jan 2026)
+**Проблема:** Неправильный режим margin для OKX при установке плеча, SL/TP и закрытии.  
+**Решение:** Исправлен isolated margin mode для OKX.
+
+### 12. ✅ Force Isolated Margin for All Exchanges (23 Jan 2026)
+**Проблема:** Некоторые биржи не использовали isolated margin mode.  
+**Решение:** Принудительно включён isolated margin mode для всех поддерживаемых бирж.
+
+### 13. ✅ CLI Formatting and BingX Demo Balance (23 Jan 2026)
+**Проблема:** Неправильное форматирование CLI и отображение баланса в демо-режиме BingX.  
+**Решение:** Исправлено форматирование и логика отображения баланса.
+
 **Статус тестирования:**  
 ✅ Все баги исправлены и протестированы на production (Bybit + OKX)  
+✅ Новые биржи протестированы на demo/testnet  
 ✅ 52/52 unit tests passing  
 ✅ Позиции успешно открываются, отслеживаются и закрываются
 
@@ -539,6 +562,20 @@ MAKER_COMMISSION_BPS = {
 - [x] Bybit + OKX fully tested on production
 - [x] 52/52 tests passing
 
+### Completed ✅ (январь 2026)
+- [x] Добавить Gate.io адаптер (11 Jan 2026)
+- [x] Добавить BingX адаптер (13 Jan 2026)
+- [x] Добавить Bitget адаптер (14 Jan 2026)
+- [x] Добавить Lighter адаптер (18 Jan 2026)
+- [x] Исправить pair_id handling и CLI alignment с эмодзи (27 Jan 2026)
+- [x] Улучшить time sync и SL/TP configuration (26 Jan 2026)
+- [x] Исправить OKX isolated margin mode (23 Jan 2026)
+- [x] Force isolated margin mode для всех бирж (23 Jan 2026)
+- [x] Исправить CLI formatting и BingX demo mode (23 Jan 2026)
+- [x] Добавить поддержку новых бирж в CLI (21 Jan 2026)
+- [x] Добавить новые тесты: test_persistence.py, test_smart_pnl_close.py
+- [x] Обновить документацию с новыми изменениями
+
 ### Pending ⬜ (Low Priority / Future)
 - [ ] WebSocket price monitoring (REST sufficient for now)
 - [ ] Additional exchanges testing (Binance, KuCoin)
@@ -628,12 +665,15 @@ Funding-Bot/
 │   │   ├── okx.py          # OKX адаптер ✅
 │   │   ├── gate.py         # Gate.io адаптер ✅ (добавлен 11 янв 2026)
 │   │   ├── bingx.py        # BingX адаптер ✅ (добавлен 13 янв 2026)
+│   │   ├── bitget.py       # Bitget адаптер ✅ (добавлен 14 янв 2026)
+│   │   ├── lighter.py       # Lighter адаптер ✅ (добавлен 18 янв 2026)
 │   │   ├── types.py        # 9 dataclasses (Position, Balance, OrderBook...)
 │   │   └── enums.py        # Exchange enum, комиссии в bps
 │   ├── core/               # Бизнес-логика
 │   │   ├── state.py        # AppState с asyncio locks (RAM)
 │   │   ├── execution_engine.py  # 2 modes: hit_the_bid, stable_spread (558 lines)
-│   │   └── position_closer.py   # 6 modes: hit_the_bid, flash, market, stable_spread, smart_pnl, emergency (~770 lines)
+│   │   ├── position_closer.py   # 6 modes: hit_the_bid, flash, market, stable_spread, smart_pnl, emergency (~770 lines)
+│   │   └── persistence.py       # Сохранение и загрузка позиций (558 lines) ✅ (добавлен 12 янв 2026)
 │   ├── monitors/           # Мониторинг (stateful watchers)
 │   │   ├── funding_tracker.py   # Smart monitoring с PnL threshold (431 lines) ✅
 │   │   └── emergency_monitor.py # REST polling 5 sec для SL/TP (348 lines) ✅
@@ -645,21 +685,31 @@ Funding-Bot/
 │   │   ├── formatters.py   # Форматирование вывода
 │   │   ├── logger.py       # Loguru setup
 │   │   └── constants.py    # Константы (TOLERANCE_BPS=2, HTB_TIMEOUT=300...)
-│   ├── cli/                # CLI интерфейс (partner working)
-│   │   └── (TBD)
+│   ├── cli/                # CLI интерфейс (полностью реализован)
+│   │   ├── app.py          # Основное приложение CLI
+│   │   ├── commands.py     # Команды CLI
+│   │   ├── display.py      # Отображение меню
+│   │   ├── input_handler.py # Обработка ввода
+│   │   └── menus.py        # Меню
 │   └── main.py             # Bot orchestration (Bot class, 176 lines) ✅
-├── tests/                  # Tests (57/57 passing) ✅
+├── tests/                  # Tests (52/52 passing) ✅
 │   ├── unit/
 │   │   ├── test_calculations.py       # 7 tests ✅
 │   │   ├── test_emergency_monitor.py  # 5 tests ✅
 │   │   ├── test_smart_pnl_close.py    # 16 tests ✅ (NEW - 11 Jan 2026)
+│   │   ├── test_persistence.py        # 14 tests ✅ (NEW - 12 Jan 2026)
 │   │   └── ... (25 existing tests from other modules)
 │   └── conftest.py         # Pytest fixtures
 ├── config/
 │   ├── config.py           # Конфигурация из .env
 │   └── .env.example        # Пример API ключей
 ├── docs/                   # Documentation
-│   └── TEST_CASES.md       # Test cases and scenarios
+│   ├── TEST_CASES.md       # Test cases and scenarios
+│   ├── BUGFIX_POSITION_OPENING.md
+│   ├── CLI_SPECIFICATION.md
+│   ├── FIX_POSITION_VERIFICATION.md
+│   ├── FIX_SMART_PNL_AGGRESSIVE_FILL.md
+│   └── SMART_PNL_CLOSE_IMPLEMENTATION.md
 ├── logs/                   # Auto-generated logs
 ├── venv/                   # Virtual environment ✅
 ├── examples.py             # Примеры использования
@@ -1222,6 +1272,13 @@ async def funding_monitoring_loop():
   - Demo mode (sandbox=True, 10,000 USDT)
   - Протестировано на demo
   - **Критическое исправление:** SL/TP требует `tradeSide='close'` для one-way mode
+- **Lighter** - полная CCXT интеграция (18 Jan 2026)
+  - Market/Limit orders
+  - Stop Loss / Take Profit
+  - Position management
+  - Leverage control
+  - Funding rate queries
+  - Протестировано на demo
 
 ### Базовая реализация (требует тестирования)
 - **Binance** - REST API адаптер через CCXT
@@ -1231,66 +1288,117 @@ async def funding_monitoring_loop():
 - Hyperliquid
 - MEXC
 - Aster
-- Lighter
 
 ---
 
-**Дата обновления:** 16 января 2026  
+**Дата обновления:** 27 января 2026  
 **Статус:** Phase 1-4 завершены ✅ | Production ready 🚀
 
-**Последние обновления (16 Jan 2026):**
-- ✅ **Aggressive Fill Pricing реализован**
-  - Функция `calculate_aggressive_fill_price()` в `utils/calculations.py`
-  - Проход по уровням стакана для гарантии мгновенного заполнения
-  - Буфер 0.1% для защиты от движения цены
-  - Используется при открытии (Stable Spread) и закрытии (Smart PNL Close)
-- ✅ **Position Verification система**
-  - Метод `_verify_position_exists()` в ExecutionEngine
-  - Retry механизм (3 попытки, 1с задержка)
-  - Атомарный откат: если 2-я позиция не открылась → закрываем 1-ю
-- ✅ **Timezone fixes для всех адаптеров**
-  - Все datetime теперь используют `timezone.utc`
-  - Funding time отображается корректно (fundingTimestamp)
-  - Исправлены: Bybit, OKX, Binance, KuCoin, Gate.io
-- ✅ **Улучшения CLI**
-  - Net funding calculation fix (вычитание вместо сложения для delta-neutral)
-  - Показ обоих funding times если разные между биржами
-  - Новый UI: выбор side → затем выбор биржи
-  - Улучшенная обработка Ctrl+C в async_input
-- ✅ **52/52 tests passing**
+## 📝 Подробный changelog (после 6c57a131cb21d9021c4f079849debb7dd70af0b4)
 
-**Предыдущие обновления:**
-- ✅ **Bitget адаптер добавлен** (14 Jan 2026)
-  - Полная CCXT интеграция с one-way position mode
-  - oneWayMode: True для открытия позиций
-  - tradeSide: 'close' для закрытия позиций и SL/TP
-  - Leverage control
-  - Demo mode с 10,000 USDT
-  - Все типы ордеров протестированы на demo
-  - **Критическое исправление SL/TP:** Требуется параметр `tradeSide='close'` для one-way mode, иначе ошибка "delegateType is error"
-- ✅ **BingX адаптер добавлен** (13 Jan 2026)
-  - Полная CCXT интеграция с hedge mode support
-  - positionSide параметр для всех ордеров
-  - Leverage per-side (LONG/SHORT отдельно)
-  - Demo mode с VST (100,000 виртуальных токенов)
-  - Все типы ордеров протестированы на demo
-- ✅ Gate.io адаптер добавлен и протестирован на testnet (11 Jan 2026)
-- ✅ CLI полностью реализован и протестирован (12 Jan 2026)
-- ✅ Position persistence система с JSON storage (12 Jan 2026)
-- ✅ Orphan position detection и обработка (12 Jan 2026)
-- ✅ Все критические баги исправлены:
-  - ✅ Timezone fixes (datetime.now(timezone.utc))
-  - ✅ Position age calculation fix (time.time() вместо event loop time)
-  - ✅ Position status update fix (index reference bug)
-  - ✅ SL/TP setup with retry + 1s delay for OKX sync
-  - ✅ Smart PnL Close argument order fix
-  - ✅ PnL calculation in position view
-  - ✅ OKX account mode handling (51010 error fix)
-  - ✅ Bitget SL/TP fix (tradeSide='close' requirement)
-- ✅ 52/52 tests passing
-- ✅ Bybit + OKX полностью протестированы на production
-- ✅ Gate.io протестирован на testnet
-- ✅ BingX протестирован на demo (VST)
-- ✅ Bitget протестирован на demo (10,000 USDT)
-- ✅ Data directory excluded from Git (.gitignore)
-- 🚀 Ready for production use (7 бирж поддерживается)
+### 2026-01-27
+- **339faf3**: Merge pull request #12 from Nickseen/dev-Nicola
+- **15a8dae**: fix: correct pair_id handling and CLI menu alignment with emojis
+  - Исправлена генерация и использование pair_id в `execution_engine.py` для корректного связывания дельта-нейтральных пар.
+  - Добавлено детальное логирование в `save_single_position` в `persistence.py` для отладки сохранения позиций.
+  - Обновлен `_create_line` в `display.py` для обработки ширины эмодзи (корректировка на 3 символа).
+  - Обеспечено последовательное выравнивание границ для пунктов меню с эмодзи.
+  - Улучшено распознавание дельта-нейтральных пар во всех модулях.
+  - Изменения в 10 файлах: `src/cli/display.py` (57 изменений), `src/core/execution_engine.py` (18+), `src/core/persistence.py` (103+), и др.
+
+### 2026-01-26
+- **56715e7**: fix: time sync and SL/TP configuration improvements
+  - Добавлена синхронизация времени при подключении для всех бирж (Bybit, OKX, BingX, Gate, Bitget).
+  - Увеличен recvWindow до 20000ms для предотвращения ошибок timestamp.
+  - Исправлен парсинг timestamp funding rate (автоопределение секунд vs миллисекунд).
+  - SL/TP теперь используют DEFAULT_STOP_LOSS_PERCENT и DEFAULT_TAKE_PROFIT_PERCENT из .env.
+  - Исправлены отрицательные countdown для Bitget и ошибки timestamp для Bybit.
+  - Изменения в 6 файлах: `src/core/execution_engine.py` (72 изменения), `src/exchanges/bingx.py` (16+), и др.
+
+### 2026-01-23
+- **4156f55**: fix: OKX isolated margin mode for leverage, SL/TP and close operations
+  - Критические исправления для OKX: установка leverage с параметром 'mgnMode': 'isolated'.
+  - Использование 'tdMode': 'isolated' в SL/TP algo orders (было 'cross').
+  - Использование 'tdMode': 'isolated' в close position orders (было 'cross').
+  - Использование 'tdMode': 'isolated' в place_order params (было 'cross').
+  - Обновлены значения отображения для Lighter: position data показывает 'margin_mode': 'isolated'.
+  - Исправлена ошибка 'you don't have any positions in this direction' при закрытии позиций OKX в isolated mode.
+  - Изменения в 2 файлах: `src/exchanges/okx.py` (19 изменений), `src/exchanges/lighter.py` (4 изменения).
+- **97edf8a**: feat: force isolated margin mode for all exchanges
+  - Все позиции теперь открываются в isolated margin mode по умолчанию.
+  - Bybit: set_margin_mode('isolated') перед leverage.
+  - Binance: fapiPrivate_post_margintype с ISOLATED.
+  - OKX: tdMode='isolated' в order params.
+  - BingX, Gate.io, Bitget: set_margin_mode('isolated') перед leverage.
+  - KuCoin: marginMode='ISOLATED' в order params.
+  - Lighter: ISOLATED_MARGIN_MODE в update_leverage.
+  - Обеспечивает изоляцию рисков для каждой позиции на всех биржах.
+  - Изменения в 8 файлах: `src/exchanges/binance.py` (13+), `src/exchanges/bingx.py` (10+), и др.
+- **088763d**: fix: CLI formatting and BingX demo mode balance
+  - Исправлено выравнивание приветственного сообщения в CLI (ширина поля status 20->30).
+  - BingX demo mode корректно парсит баланс VST token вместо USDT.
+  - Demo mode использует VST (Virtual Standard Token), mainnet - USDT.
+  - Изменения в 2 файлах: `src/cli/app.py` (2 изменения), `src/exchanges/bingx.py` (19 изменений).
+
+### 2026-01-21
+- **6c466e0**: Merge remote-tracking branch 'origin/dev' into dev-Nicola
+- **2f20799**: feat: add Gate.io, BingX, Bitget support in CLI
+  - Импорт GateExchange, BingXExchange, BitgetExchange.
+  - Инициализация бирж в main_cli() если API ключи настроены.
+  - Чтение credentials из config (GATE_API_KEY, BINGX_API_KEY, BITGET_API_KEY).
+  - Поддержка 7 бирж в CLI: Bybit, OKX, Gate.io, BingX, Bitget, Binance, KuCoin.
+  - 52/52 теста проходят.
+  - Изменения в 1 файле: `src/main.py` (34+).
+
+### 2026-01-18
+- **407aa32**: Merge pull request #11 from Nickseen/dev-Max
+- **07f97c2**: Add Lighter Exchange adapter
+  - Добавлен LighterExchange адаптер с использованием lighter-python SDK.
+  - Lighter - децентрализованная perpetual DEX на zkSync Era.
+  - Поддержка testnet и mainnet trading.
+  - Реализованы все необходимые методы: connection, balance, market data, trading operations, SL/TP, leverage.
+  - Добавлены config ключи: LIGHTER_API_KEY, LIGHTER_SECRET_KEY, LIGHTER_ACCOUNT_INDEX, LIGHTER_API_KEY_INDEX.
+  - Обновлен requirements.txt с lighter-python.
+  - Тесты пройдены: connection, balance, open position, limit orders.
+  - Изменения в 4 файлах: `config/config.py` (6+), `requirements.txt` (4+), `src/exchanges/__init__.py` (2+), `src/exchanges/lighter.py` (1142+).
+
+### 2026-01-16
+- **5bbd84b**: Merge pull request #10 from Nickseen/dev-Nicola
+
+---
+
+## 🆕 Основные изменения и дополнения (январь 2026)
+
+### Биржи и адаптеры
+- Добавлены и протестированы новые биржи: Gate.io, BingX, Bitget, Lighter (см. src/exchanges/)
+- Все адаптеры реализуют единый интерфейс BaseExchange
+
+### Persistence
+- Реализована система сохранения и восстановления позиций (`src/core/persistence.py`)
+- Позиции сохраняются в `data/positions.json`, закрытые — в `positions_history.json`
+- При старте бот автоматически загружает позиции и предлагает обработать orphaned positions
+
+### CLI
+- Полностью реализован CLI-интерфейс с меню, выбором режима, отображением позиций, финансовым анализом, обработкой Ctrl+C, улучшенным UI
+- Добавлена поддержка новых бирж в CLI
+
+### Smart PnL Close
+- Режим Smart PnL Close полностью реализован, интегрирован в CLI, покрыт тестами
+
+### FundingTracker и EmergencyMonitor
+- Оба модуля реализованы, интегрированы в основной цикл, покрыты тестами
+
+### Тесты
+- Добавлены новые тесты: `test_persistence.py`, `test_smart_pnl_close.py`
+- 52/52 теста проходят
+
+### Исправленные баги
+- Исправлены баги: timezone, age calculation, orphaned positions, SL/TP на OKX, Smart PnL Close crash, PnL в меню, status update и др.
+
+### Новые функции
+- Aggressive Fill Pricing (расчёт агрессивной цены исполнения)
+- Position Verification (проверка открытия обеих сторон)
+- Улучшения CLI (side selection, funding times, UI)
+- Новые комиссии для бирж (bingx, bitget, gate, lighter)
+
+---
