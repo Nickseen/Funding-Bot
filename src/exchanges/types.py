@@ -105,11 +105,14 @@ class Position:
     quantity: float  # Amount in tokens
     entry_time: float  # Unix timestamp
     
+    # Pair tracking for delta-neutral positions
+    pair_id: Optional[str] = None  # Links two positions opened together
+    
     # Risk management (required)
-    stop_loss_price: float  # ±20% to liquidation
-    take_profit_price: float  # ±20% to liquidation
-    liquidation_price_ex1: float  # Liquidation price on exchange1
-    liquidation_price_ex2: float  # Liquidation price on exchange2
+    stop_loss_price: float = 0  # ±20% to liquidation
+    take_profit_price: float = 0  # ±20% to liquidation
+    liquidation_price_ex1: float = 0  # Liquidation price on exchange1
+    liquidation_price_ex2: float = 0  # Liquidation price on exchange2
     
     # Execution mode (with defaults)
     execution_mode: str = "hit_the_bid"  # "hit_the_bid", "stable_spread"

@@ -108,9 +108,12 @@ class PositionPersistence:
                 
                 # Update or add position
                 if position.status in [PositionStatus.OPEN.value, PositionStatus.CLOSING.value, "OPEN", "CLOSING"]:
+                    logger.info(f"Saving position {position.id} with status {position.status}")
                     data["positions"][position.id] = self._position_to_dict(position)
+                    logger.info(f"Position {position.id} added to data dict")
                 else:
                     # Position closed - remove from active, add to history
+                    logger.info(f"Position {position.id} has closed status {position.status}, archiving")
                     if position.id in data["positions"]:
                         del data["positions"][position.id]
                     await self._archive_position(position)
@@ -123,6 +126,7 @@ class PositionPersistence:
                     json.dump(data, f, indent=2, default=str)
                 temp_file.replace(self.positions_file)
                 
+                logger.info(f"Position {position.id} saved to {self.positions_file}")
                 return True
                 
             except Exception as e:
@@ -306,32 +310,119 @@ class PositionPersistence:
         """
         Discover positions on exchanges that are not tracked by the bot.
         
-        Useful after a crash or when bot was stopped with open positions.
+        Smart detection:
+        1. Loads saved positions to check for pair_id
+        2. Groups orphan positions by symbol and checks if they form delta-neutral pairs
+        3. Returns either linked pairs or individual orphan positions
         
         Args:
             exchanges: Dict of exchange_name -> ExchangeAdapter
             symbols: Optional list of symbols to check (checks all if None)
             
         Returns:
-            List of discovered orphan positions
+            List of discovered positions (linked pairs or individual orphans)
         """
         discovered = []
+        
+        # Step 1: Collect all positions from all exchanges
+        all_exchange_positions = {}  # {exchange_name: [positions]}
         
         for ex_name, adapter in exchanges.items():
             try:
                 # Get all positions from this exchange
                 positions = await adapter.get_positions(None)
                 
-                for pos in positions:
-                    if pos.quantity > 0:
+                if positions:
+                    all_exchange_positions[ex_name] = [
+                        pos for pos in positions if pos.quantity > 0
+                    ]
+                    for pos in all_exchange_positions[ex_name]:
                         logger.info(
                             f"Found position on {ex_name}: {pos.pair} "
                             f"{pos.exchange1_side} {pos.quantity}"
                         )
-                        discovered.append(pos)
                         
             except Exception as e:
                 logger.error(f"Failed to fetch positions from {ex_name}: {e}")
+        
+        if not all_exchange_positions:
+            return []
+        
+        # Step 2: Try to match pairs (same symbol, opposite sides on different exchanges)
+        used_positions = set()  # Track which positions we've already paired
+        
+        for ex1_name, ex1_positions in all_exchange_positions.items():
+            for pos1 in ex1_positions:
+                if id(pos1) in used_positions:
+                    continue
+                
+                # Look for opposite position on another exchange
+                for ex2_name, ex2_positions in all_exchange_positions.items():
+                    if ex1_name == ex2_name:
+                        continue
+                    
+                    for pos2 in ex2_positions:
+                        if id(pos2) in used_positions:
+                            continue
+                        
+                        # Check if they form a delta-neutral pair:
+                        # - Same symbol
+                        # - Opposite sides (LONG vs SHORT)
+                        # - Similar quantity (within 5% tolerance)
+                        if (pos1.pair == pos2.pair and
+                            pos1.exchange1_side != pos2.exchange1_side and
+                            abs(pos1.quantity - pos2.quantity) / max(pos1.quantity, pos2.quantity) < 0.05):
+                            
+                            # Found a pair! Create linked position
+                            import time
+                            import uuid
+                            
+                            pair_id = f"pair_recovered_{pos1.pair}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+                            
+                            linked_position = Position(
+                                id=f"pos_recovered_{pos1.pair}_{int(time.time())}",
+                                pair=pos1.pair,
+                                exchange1=ex1_name,
+                                exchange1_pos_id=pos1.exchange1_pos_id,
+                                exchange1_side=pos1.exchange1_side,
+                                exchange1_entry_price=pos1.exchange1_entry_price,
+                                exchange1_current_price=pos1.exchange1_current_price,
+                                exchange1_leverage=pos1.exchange1_leverage,
+                                exchange2=ex2_name,
+                                exchange2_pos_id=pos2.exchange1_pos_id,
+                                exchange2_side=pos2.exchange1_side,
+                                exchange2_entry_price=pos2.exchange1_entry_price,
+                                exchange2_current_price=pos2.exchange1_current_price,
+                                exchange2_leverage=pos2.exchange1_leverage,
+                                quantity=pos1.quantity,
+                                entry_time=min(pos1.entry_time, pos2.entry_time),
+                                pair_id=pair_id,  # Link them together
+                                stop_loss_price=pos1.stop_loss_price,
+                                take_profit_price=pos1.take_profit_price,
+                                liquidation_price_ex1=pos1.liquidation_price_ex1,
+                                liquidation_price_ex2=pos2.liquidation_price_ex1,
+                                status='OPEN',
+                                notes=f"Recovered delta-neutral pair after restart"
+                            )
+                            
+                            logger.success(
+                                f"✓ Detected delta-neutral pair: {ex1_name} {pos1.exchange1_side} + "
+                                f"{ex2_name} {pos2.exchange1_side} for {pos1.pair}"
+                            )
+                            
+                            discovered.append(linked_position)
+                            used_positions.add(id(pos1))
+                            used_positions.add(id(pos2))
+                            break
+        
+        # Step 3: Add unpaired positions as orphans
+        for ex_name, positions in all_exchange_positions.items():
+            for pos in positions:
+                if id(pos) not in used_positions:
+                    logger.warning(
+                        f"⚠ Orphan position (no pair found): {ex_name} {pos.pair} {pos.exchange1_side}"
+                    )
+                    discovered.append(pos)
         
         return discovered
     
@@ -400,6 +491,7 @@ class PositionPersistence:
             "exchange2_leverage": position.exchange2_leverage,
             "quantity": position.quantity,
             "entry_time": position.entry_time,
+            "pair_id": position.pair_id,  # Save pair tracking
             "stop_loss_price": position.stop_loss_price,
             "take_profit_price": position.take_profit_price,
             "liquidation_price_ex1": position.liquidation_price_ex1,
@@ -442,6 +534,7 @@ class PositionPersistence:
             exchange2_leverage=int(data["exchange2_leverage"]),
             quantity=float(data["quantity"]),
             entry_time=float(data["entry_time"]),
+            pair_id=data.get("pair_id"),  # Load pair tracking
             stop_loss_price=float(data.get("stop_loss_price", 0)),
             take_profit_price=float(data.get("take_profit_price", 0)),
             liquidation_price_ex1=float(data.get("liquidation_price_ex1", 0)),

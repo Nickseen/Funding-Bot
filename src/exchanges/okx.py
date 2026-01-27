@@ -56,6 +56,9 @@ class OKXExchange(BaseExchange):
             'enableRateLimit': True,
             'options': {
                 'defaultType': 'swap',  # Perpetual swaps
+                'adjustForTimeDifference': True,
+                'recvWindow': 60000,  # 60 seconds receive window
+                'timeDifference': 0,
             }
         })
         
@@ -70,6 +73,12 @@ class OKXExchange(BaseExchange):
     async def connect(self) -> bool:
         """Connect to OKX"""
         try:
+            # Sync time with server first
+            server_time = await self.client.fetch_time()
+            local_time = self.client.milliseconds()
+            time_diff = server_time - local_time
+            self.client.options['timeDifference'] = time_diff
+            
             await self.client.load_markets()
             
             # Ensure account is in correct mode for futures trading
@@ -220,11 +229,16 @@ class OKXExchange(BaseExchange):
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # 1. Set leverage (ignore "already set" errors)
+            # 1. Set leverage for isolated margin mode
+            # OKX requires mgnMode parameter for isolated margin
             try:
-                await self.client.set_leverage(leverage, ccxt_symbol)
+                await self.client.set_leverage(
+                    leverage, 
+                    ccxt_symbol,
+                    params={'mgnMode': 'isolated'}
+                )
             except Exception as e:
-                if 'leverage' not in str(e).lower():
+                if 'leverage' not in str(e).lower() and 'same' not in str(e).lower():
                     raise
             
             # 2. Convert quantity to contracts
@@ -242,7 +256,7 @@ class OKXExchange(BaseExchange):
             order_side = 'buy' if side == PositionSide.LONG else 'sell'
             
             params = {
-                'tdMode': 'cross',  # Cross margin mode
+                'tdMode': 'isolated',  # Isolated margin mode
             }
             
             if order_type == OrderType.LIMIT:
@@ -310,7 +324,7 @@ class OKXExchange(BaseExchange):
             
             params = {
                 'reduceOnly': True,
-                'tdMode': 'cross',
+                'tdMode': 'isolated',  # Use isolated margin mode for closing
             }
             
             if order_type == OrderType.LIMIT:
@@ -365,7 +379,7 @@ class OKXExchange(BaseExchange):
             contracts = round(quantity / contract_size)
             
             params = {
-                'tdMode': 'cross',
+                'tdMode': 'isolated',  # Use isolated margin mode
             }
             if reduce_only:
                 params['reduceOnly'] = True
@@ -466,7 +480,7 @@ class OKXExchange(BaseExchange):
             # Use OKX algo order API directly
             response = await self.client.private_post_trade_order_algo({
                 'instId': inst_id,
-                'tdMode': 'cross',
+                'tdMode': 'isolated',  # Use isolated margin mode
                 'side': order_side,
                 'ordType': 'conditional',  # Conditional order (SL/TP)
                 'sz': str(int(contracts)),
@@ -533,7 +547,7 @@ class OKXExchange(BaseExchange):
             # Use OKX algo order API directly
             response = await self.client.private_post_trade_order_algo({
                 'instId': inst_id,
-                'tdMode': 'cross',
+                'tdMode': 'isolated',  # Use isolated margin mode
                 'side': order_side,
                 'ordType': 'conditional',  # Conditional order (SL/TP)
                 'sz': str(int(contracts)),
@@ -657,6 +671,23 @@ class OKXExchange(BaseExchange):
         contracts = float(data.get('contracts', 0) or 0)
         side = data.get('side', '')  # 'long' or 'short'
         
+        # OKX: contractSize = how much base currency per 1 contract
+        # Get from CCXT data or load from market info
+        contract_size = float(data.get('contractSize', 0) or 0)
+        
+        if contract_size == 0:
+            # Fallback: get from market info
+            try:
+                if symbol in self.client.markets:
+                    market = self.client.markets[symbol]
+                    contract_size = float(market.get('contractSize', 1) or 1)
+                else:
+                    contract_size = 1  # Final fallback
+            except:
+                contract_size = 1
+        
+        quantity_base = abs(contracts * contract_size)
+        
         return Position(
             id=f"okx_{symbol}_{int(datetime.utcnow().timestamp())}",
             pair=symbol,
@@ -673,7 +704,7 @@ class OKXExchange(BaseExchange):
             exchange2_entry_price=0,
             exchange2_current_price=0,
             exchange2_leverage=1,
-            quantity=abs(contracts),
+            quantity=quantity_base,
             entry_time=datetime.utcnow().timestamp(),
             stop_loss_price=float(data.get('stopLossPrice', 0) or 0),
             take_profit_price=float(data.get('takeProfitPrice', 0) or 0),
@@ -758,8 +789,14 @@ class OKXExchange(BaseExchange):
         rate = float(data.get('fundingRate', 0) or 0)
         
         # Convert timestamp to timezone-aware UTC datetime
+        # Check if timestamp is in seconds or milliseconds
         if next_funding_ts:
-            next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc)
+            # If > year 2100 in seconds (4102444800), it's likely milliseconds
+            if next_funding_ts > 4102444800:
+                next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc)
+            else:
+                # Already in seconds
+                next_funding_time = datetime.fromtimestamp(next_funding_ts, tz=timezone.utc)
         else:
             next_funding_time = datetime.now(timezone.utc)
         

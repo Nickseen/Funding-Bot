@@ -56,6 +56,9 @@ class GateExchange(BaseExchange):
             'options': {
                 'defaultType': 'swap',  # Perpetual futures
                 'defaultSettle': 'usdt',  # USDT-settled
+                'adjustForTimeDifference': True,
+                'recvWindow': 60000,
+                'timeDifference': 0,
             }
         })
         
@@ -70,6 +73,12 @@ class GateExchange(BaseExchange):
     async def connect(self) -> bool:
         """Connect to Gate.io"""
         try:
+            # Sync time with server first
+            server_time = await self.client.fetch_time()
+            local_time = self.client.milliseconds()
+            time_diff = server_time - local_time
+            self.client.options['timeDifference'] = time_diff
+            
             await self.client.load_markets()
             self.connected = True
             return True
@@ -210,7 +219,15 @@ class GateExchange(BaseExchange):
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # 1. Set leverage (ignore "already set" errors)
+            # 1. Set isolated margin mode
+            try:
+                await self.client.set_margin_mode('isolated', ccxt_symbol)
+            except Exception as e:
+                # Ignore if already set or not supported
+                if 'same' not in str(e).lower() and 'not changed' not in str(e).lower():
+                    pass
+            
+            # 2. Set leverage (ignore "already set" errors)
             try:
                 await self.client.set_leverage(leverage, ccxt_symbol)
             except Exception as e:
@@ -415,7 +432,8 @@ class GateExchange(BaseExchange):
         quantity: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Gate.io: Set stop loss order using CCXT createStopLossOrder
+        Gate.io: Set stop loss using native API price_trigger orders
+        Uses Gate.io's direct API for proper conditional orders
         """
         try:
             from .enums import PositionSide
@@ -438,21 +456,30 @@ class GateExchange(BaseExchange):
             # For SL: if LONG, sell when price falls; if SHORT, buy when price rises
             order_side = 'sell' if pos_side == 'long' else 'buy'
             
-            # Use CCXT's createStopLossOrder with contracts as amount
-            response = await self.client.create_stop_loss_order(
-                symbol=ccxt_symbol,
-                type='market',  # Market order when triggered
-                side=order_side,
-                amount=contracts,  # Number of contracts
-                stopLossPrice=stop_price,  # Required parameter name
-                params={
-                    'reduceOnly': True,
-                }
-            )
+            # Convert symbol to Gate.io format (e.g., BTC/USDT:USDT -> BTC_USDT)
+            settle = 'usdt'
+            contract = ccxt_symbol.split('/')[0].replace('/USDT', '') + '_USDT'
+            
+            # Use Gate.io native API for price trigger orders (auto orders)
+            # This creates proper stop-loss orders visible in the UI
+            response = await self.client.private_futures_post_futures_settle_price_orders({
+                'settle': settle,
+                'initial': {
+                    'contract': contract,
+                    'size': -contracts if order_side == 'sell' else contracts,  # Negative for sell
+                    'price': '0',  # Market order when triggered
+                },
+                'trigger': {
+                    'strategy_type': 0,  # 0 = by price
+                    'price_type': 0,  # 0 = last price
+                    'price': str(stop_price),
+                    'rule': 2 if order_side == 'sell' else 1,  # 1 = >= (for buy), 2 = <= (for sell)
+                },
+            })
             
             return {
                 'success': True,
-                'order_id': response.get('id'),
+                'order_id': response.get('id', ''),
                 'type': 'stop_loss',
                 'trigger_price': stop_price,
                 'info': response
@@ -473,7 +500,8 @@ class GateExchange(BaseExchange):
         quantity: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Gate.io: Set take profit order using CCXT createTakeProfitOrder
+        Gate.io: Set take profit using native API price_trigger orders
+        Uses Gate.io's direct API for proper conditional orders
         """
         try:
             from .enums import PositionSide
@@ -496,21 +524,30 @@ class GateExchange(BaseExchange):
             # For TP: if LONG, sell when price rises; if SHORT, buy when price falls
             order_side = 'sell' if pos_side == 'long' else 'buy'
             
-            # Use CCXT's createTakeProfitOrder with contracts as amount
-            response = await self.client.create_take_profit_order(
-                symbol=ccxt_symbol,
-                type='market',  # Market order when triggered
-                side=order_side,
-                amount=contracts,  # Number of contracts
-                takeProfitPrice=take_profit_price,  # Required parameter name
-                params={
-                    'reduceOnly': True,
-                }
-            )
+            # Convert symbol to Gate.io format (e.g., BTC/USDT:USDT -> BTC_USDT)
+            settle = 'usdt'
+            contract = ccxt_symbol.split('/')[0].replace('/USDT', '') + '_USDT'
+            
+            # Use Gate.io native API for price trigger orders (auto orders)
+            # This creates proper take-profit orders visible in the UI
+            response = await self.client.private_futures_post_futures_settle_price_orders({
+                'settle': settle,
+                'initial': {
+                    'contract': contract,
+                    'size': -contracts if order_side == 'sell' else contracts,  # Negative for sell
+                    'price': '0',  # Market order when triggered
+                },
+                'trigger': {
+                    'strategy_type': 0,  # 0 = by price
+                    'price_type': 0,  # 0 = last price
+                    'price': str(take_profit_price),
+                    'rule': 1 if order_side == 'sell' else 2,  # 1 = >= (for sell TP), 2 = <= (for buy TP)
+                },
+            })
             
             return {
                 'success': True,
-                'order_id': response.get('id'),
+                'order_id': response.get('id', ''),
                 'type': 'take_profit',
                 'trigger_price': take_profit_price,
                 'info': response
@@ -625,6 +662,23 @@ class GateExchange(BaseExchange):
         contracts = float(data.get('contracts', 0) or 0)
         side = data.get('side', '')  # 'long' or 'short'
         
+        # Gate.io: contractSize = how much base currency per 1 contract
+        # Get from CCXT data or load from market info
+        contract_size = float(data.get('contractSize', 0) or 0)
+        
+        if contract_size == 0:
+            # Fallback: get from market info
+            try:
+                if symbol in self.client.markets:
+                    market = self.client.markets[symbol]
+                    contract_size = float(market.get('contractSize', 1) or 1)
+                else:
+                    contract_size = 1  # Final fallback
+            except:
+                contract_size = 1
+        
+        quantity_base = abs(contracts * contract_size)
+        
         return Position(
             id=f"gate_{symbol}_{int(datetime.utcnow().timestamp())}",
             pair=symbol,
@@ -641,7 +695,7 @@ class GateExchange(BaseExchange):
             exchange2_entry_price=0,
             exchange2_current_price=0,
             exchange2_leverage=1,
-            quantity=abs(contracts),
+            quantity=quantity_base,
             entry_time=datetime.utcnow().timestamp(),
             stop_loss_price=float(data.get('stopLossPrice', 0) or 0),
             take_profit_price=float(data.get('takeProfitPrice', 0) or 0),

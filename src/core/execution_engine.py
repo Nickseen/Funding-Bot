@@ -21,10 +21,11 @@ from ..utils.calculations import (
     calculate_net_profit_bps,
     is_profitable_spread,
     calculate_liquidation_price,
-    calculate_stop_loss_take_profit,
+    calculate_sl_tp_by_roi,
     calculate_aggressive_fill_price,
 )
 from ..utils.logger import log
+from config.config import Config
 
 
 class ExecutionEngine:
@@ -379,18 +380,23 @@ Open position anyway? [Y/n]: """
         
         log.info(f"Liquidation prices: {self.exchange1.get_name()}={liq_price1:.4f}, {self.exchange2.get_name()}={liq_price2:.4f}")
         
-        # 3. Рассчитываем SL/TP (по умолчанию 20% distance до ликвидации)
-        sl1, tp1 = calculate_stop_loss_take_profit(
+        # 3. Рассчитываем SL/TP по ROI (из .env: DEFAULT_STOP_LOSS_PERCENT / DEFAULT_TAKE_PROFIT_PERCENT)
+        position_size_usd = price1 * quantity
+        sl1, tp1 = calculate_sl_tp_by_roi(
             entry_price=price1,
-            liquidation_price=liq_price1,
-            side=side1,
-            distance_percent=20.0
+            position_size_usd=position_size_usd,
+            leverage=leverage,
+            side=side1.value,
+            sl_roi_pct=-Config.DEFAULT_STOP_LOSS_PERCENT,  # From .env (e.g., -80%)
+            tp_roi_pct=Config.DEFAULT_TAKE_PROFIT_PERCENT   # From .env (e.g., +80%)
         )
-        sl2, tp2 = calculate_stop_loss_take_profit(
+        sl2, tp2 = calculate_sl_tp_by_roi(
             entry_price=price2,
-            liquidation_price=liq_price2,
-            side=side2,
-            distance_percent=20.0
+            position_size_usd=position_size_usd,
+            leverage=leverage,
+            side=side2.value,
+            sl_roi_pct=-Config.DEFAULT_STOP_LOSS_PERCENT,
+            tp_roi_pct=Config.DEFAULT_TAKE_PROFIT_PERCENT
         )
         
         log.info(f"SL/TP calculated:")
@@ -430,6 +436,11 @@ Open position anyway? [Y/n]: """
         
         # 5. Формируем Position объект
         from ..exchanges.types import Position
+        import uuid
+        
+        # Generate unique pair_id to link both positions
+        pair_id = f"pair_{symbol}_{int(asyncio.get_event_loop().time())}_{uuid.uuid4().hex[:8]}"
+        
         position = Position(
             id=f"pos_{symbol}_{int(asyncio.get_event_loop().time())}",
             pair=symbol,
@@ -447,6 +458,7 @@ Open position anyway? [Y/n]: """
             exchange2_leverage=leverage,
             quantity=quantity,
             entry_time=time.time(),
+            pair_id=pair_id,  # Link both positions
             stop_loss_price=sl1,  # Используем SL первой биржи как "общий"
             take_profit_price=tp1,
             liquidation_price_ex1=liq_price1,
@@ -585,18 +597,23 @@ Open position anyway? [Y/n]: """
         
         log.info(f"Liquidation prices: {self.exchange1.get_name()}={liq_price1:.4f}, {self.exchange2.get_name()}={liq_price2:.4f}")
         
-        # 8. Calculate and set SL/TP
-        sl1, tp1 = calculate_stop_loss_take_profit(
+        # 8. Calculate and set SL/TP по ROI (из .env)
+        position_size_usd = actual_price1 * quantity
+        sl1, tp1 = calculate_sl_tp_by_roi(
             entry_price=actual_price1,
-            liquidation_price=liq_price1,
-            side=side1,
-            distance_percent=20.0
+            position_size_usd=position_size_usd,
+            leverage=leverage,
+            side=side1.value,
+            sl_roi_pct=-Config.DEFAULT_STOP_LOSS_PERCENT,
+            tp_roi_pct=Config.DEFAULT_TAKE_PROFIT_PERCENT
         )
-        sl2, tp2 = calculate_stop_loss_take_profit(
+        sl2, tp2 = calculate_sl_tp_by_roi(
             entry_price=actual_price2,
-            liquidation_price=liq_price2,
-            side=side2,
-            distance_percent=20.0
+            position_size_usd=position_size_usd,
+            leverage=leverage,
+            side=side2.value,
+            sl_roi_pct=-Config.DEFAULT_STOP_LOSS_PERCENT,
+            tp_roi_pct=Config.DEFAULT_TAKE_PROFIT_PERCENT
         )
         
         log.info(f"SL/TP calculated:")
@@ -634,6 +651,11 @@ Open position anyway? [Y/n]: """
             log.warning(f"Failed to set SL/TP orders: {e}")
         
         # 10. Create position
+        import uuid
+        
+        # Generate unique pair_id to link both positions
+        pair_id = f"pair_{symbol}_{int(asyncio.get_event_loop().time())}_{uuid.uuid4().hex[:8]}"
+        
         position = Position(
             id=f"pos_market_{symbol}_{int(asyncio.get_event_loop().time())}",
             pair=symbol,
@@ -651,6 +673,7 @@ Open position anyway? [Y/n]: """
             exchange2_leverage=leverage,
             quantity=quantity,
             entry_time=time.time(),
+            pair_id=pair_id,  # Link both positions
             execution_mode="market",
             entry_spread_abs=abs(actual_price2 - actual_price1),
             entry_spread_bps=spread_bps,
@@ -878,18 +901,23 @@ Open position? [Y/n]: """
         
         log.info(f"Liquidation prices: {self.exchange1.get_name()}={liq_price1:.4f}, {self.exchange2.get_name()}={liq_price2:.4f}")
         
-        # 8. Рассчитать SL/TP (80% до ликвидации)
-        sl1, tp1 = calculate_stop_loss_take_profit(
+        # 8. Рассчитать SL/TP по ROI (из .env)
+        position_size_usd = avg_price1 * quantity
+        sl1, tp1 = calculate_sl_tp_by_roi(
             entry_price=avg_price1,
-            liquidation_price=liq_price1,
-            side=side1,
-            distance_percent=20.0
+            position_size_usd=position_size_usd,
+            leverage=leverage,
+            side=side1.value,
+            sl_roi_pct=-Config.DEFAULT_STOP_LOSS_PERCENT,
+            tp_roi_pct=Config.DEFAULT_TAKE_PROFIT_PERCENT
         )
-        sl2, tp2 = calculate_stop_loss_take_profit(
+        sl2, tp2 = calculate_sl_tp_by_roi(
             entry_price=avg_price2,
-            liquidation_price=liq_price2,
-            side=side2,
-            distance_percent=20.0
+            position_size_usd=position_size_usd,
+            leverage=leverage,
+            side=side2.value,
+            sl_roi_pct=-Config.DEFAULT_STOP_LOSS_PERCENT,
+            tp_roi_pct=Config.DEFAULT_TAKE_PROFIT_PERCENT
         )
         
         log.info(f"SL/TP calculated:")
@@ -932,6 +960,11 @@ Open position? [Y/n]: """
             # Продолжаем даже если SL/TP не установились
         
         # 10. Создать позицию с сохраненным спредом (используем avg_price как entry_price)
+        import uuid
+        
+        # Generate unique pair_id to link both positions
+        pair_id = f"pair_{symbol}_{int(asyncio.get_event_loop().time())}_{uuid.uuid4().hex[:8]}"
+        
         position = Position(
             id=f"pos_stable_{symbol}_{int(asyncio.get_event_loop().time())}",
             pair=symbol,
@@ -949,6 +982,7 @@ Open position? [Y/n]: """
             exchange2_leverage=leverage,
             quantity=quantity,
             entry_time=time.time(),
+            pair_id=pair_id,  # Link both positions
             execution_mode="stable_spread",
             entry_spread_abs=entry_spread_abs,
             entry_spread_bps=entry_spread_bps,

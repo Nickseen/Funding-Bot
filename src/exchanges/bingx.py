@@ -59,6 +59,8 @@ class BingXExchange(BaseExchange):
             'options': {
                 'defaultType': 'swap',  # Perpetual futures
                 'adjustForTimeDifference': True,
+                'recvWindow': 60000,  # 60 seconds receive window
+                'timeDifference': 0,
             }
         })
         
@@ -73,6 +75,12 @@ class BingXExchange(BaseExchange):
     async def connect(self) -> bool:
         """Connect to BingX"""
         try:
+            # Sync time with server first
+            server_time = await self.client.fetch_time()
+            local_time = self.client.milliseconds()
+            time_diff = server_time - local_time
+            self.client.options['timeDifference'] = time_diff
+            
             await self.client.load_markets()
             self.connected = True
             return True
@@ -203,7 +211,15 @@ class BingXExchange(BaseExchange):
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # 1. Set leverage for the position side we're opening
+            # 1. Set isolated margin mode
+            try:
+                await self.client.set_margin_mode('isolated', ccxt_symbol)
+            except Exception as e:
+                # Ignore if already set or not supported
+                if 'same' not in str(e).lower() and 'not modified' not in str(e).lower():
+                    pass
+            
+            # 2. Set leverage for the position side we're opening
             position_side_str = 'LONG' if side == PositionSide.LONG else 'SHORT'
             try:
                 await self.client.set_leverage(leverage, ccxt_symbol, params={'side': position_side_str})
@@ -731,15 +747,20 @@ class BingXExchange(BaseExchange):
     
     def _parse_balance(self, data: Dict[str, Any]) -> Balance:
         """Convert BingX balance to Balance object"""
-        # ccxt normalizes balance - look for USDT
-        usdt = data.get('USDT', data.get('info', {}).get('USDT', {}))
+        # BingX uses different tokens for mainnet vs demo:
+        # - Mainnet: USDT
+        # - Demo: VST (Virtual Standard Token)
+        token = 'VST' if self.testnet else 'USDT'
         
-        if isinstance(usdt, dict):
-            total = float(usdt.get('total', 0) or 0)
-            free = float(usdt.get('free', 0) or 0)
-            used = float(usdt.get('used', 0) or 0)
+        # ccxt normalizes balance - look for the appropriate token
+        balance_data = data.get(token, data.get('info', {}).get(token, {}))
+        
+        if isinstance(balance_data, dict):
+            total = float(balance_data.get('total', 0) or 0)
+            free = float(balance_data.get('free', 0) or 0)
+            used = float(balance_data.get('used', 0) or 0)
         else:
-            total = float(usdt or 0)
+            total = float(balance_data or 0)
             free = total
             used = 0
         
@@ -759,8 +780,14 @@ class BingXExchange(BaseExchange):
         next_funding_ts = int(data.get('nextFundingTime', 0) or 0)
         rate = float(data.get('fundingRate', 0) or 0)
         
+        # Check if timestamp is in seconds or milliseconds
         if next_funding_ts:
-            next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc)
+            # If > year 2100 in seconds (4102444800), it's likely milliseconds
+            if next_funding_ts > 4102444800:
+                next_funding_time = datetime.fromtimestamp(next_funding_ts / 1000, tz=timezone.utc)
+            else:
+                # Already in seconds
+                next_funding_time = datetime.fromtimestamp(next_funding_ts, tz=timezone.utc)
         else:
             next_funding_time = datetime.now(timezone.utc)
         
