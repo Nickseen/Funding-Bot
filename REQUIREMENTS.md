@@ -436,9 +436,29 @@ async def _trigger_emergency_close(position: Position):
 **Проблема:** Неправильное форматирование CLI и отображение баланса в демо-режиме BingX.  
 **Решение:** Исправлено форматирование и логика отображения баланса.
 
+### 14. ✅ MEXC Exchange Adapter (2 Feb 2026)
+**Добавлен:** Полноценный адаптер для MEXC Futures (USDT-margined perpetual swaps).  
+**Особенности:**
+- 33 обязательных метода (connection, market data, trading, account, parsers)
+- Template Method Pattern (бизнес-логика в BaseExchange)
+- Timezone-aware datetime во всех парсерах
+- Конвертация quantity → contracts (MEXC использует контракты: 1 контракт = 0.0001 BTC)
+- Специфичные параметры setLeverage (openType, positionType для LONG/SHORT)
+- Taker: 4.0 bps, Maker: 1.0 bps
+
+**Файлы:**
+- `src/exchanges/mexc.py` (870 строк)
+- `tests/unit/exchange/test_mexc_exchange.py`
+- `config/config.py` (MEXC_API_KEY, MEXC_SECRET_KEY)
+
+**Ограничения:**
+- ⚠️ MEXC не имеет Demo API (только web-интерфейс)
+- Тестирование на реальном счёте с минимальными суммами ($10-20 USDT)
+
 **Статус тестирования:**  
 ✅ Все баги исправлены и протестированы на production (Bybit + OKX)  
 ✅ Новые биржи протестированы на demo/testnet  
+✅ MEXC API connection, market data, balance - протестировано
 ✅ 52/52 unit tests passing  
 ✅ Позиции успешно открываются, отслеживаются и закрываются
 
@@ -567,6 +587,7 @@ MAKER_COMMISSION_BPS = {
 - [x] Добавить BingX адаптер (13 Jan 2026)
 - [x] Добавить Bitget адаптер (14 Jan 2026)
 - [x] Добавить Lighter адаптер (18 Jan 2026)
+- [x] Добавить MEXC адаптер (2 Feb 2026)
 - [x] Исправить pair_id handling и CLI alignment с эмодзи (27 Jan 2026)
 - [x] Улучшить time sync и SL/TP configuration (26 Jan 2026)
 - [x] Исправить OKX isolated margin mode (23 Jan 2026)
@@ -666,7 +687,8 @@ Funding-Bot/
 │   │   ├── gate.py         # Gate.io адаптер ✅ (добавлен 11 янв 2026)
 │   │   ├── bingx.py        # BingX адаптер ✅ (добавлен 13 янв 2026)
 │   │   ├── bitget.py       # Bitget адаптер ✅ (добавлен 14 янв 2026)
-│   │   ├── lighter.py       # Lighter адаптер ✅ (добавлен 18 янв 2026)
+│   │   ├── lighter.py      # Lighter адаптер ✅ (добавлен 18 янв 2026)
+│   │   ├── mexc.py         # MEXC адаптер ✅ (добавлен 2 фев 2026)
 │   │   ├── types.py        # 9 dataclasses (Position, Balance, OrderBook...)
 │   │   └── enums.py        # Exchange enum, комиссии в bps
 │   ├── core/               # Бизнес-логика
@@ -698,6 +720,7 @@ Funding-Bot/
 │   │   ├── test_emergency_monitor.py  # 5 tests ✅
 │   │   ├── test_smart_pnl_close.py    # 16 tests ✅ (NEW - 11 Jan 2026)
 │   │   ├── test_persistence.py        # 14 tests ✅ (NEW - 12 Jan 2026)
+│   │   ├── test_mexc_exchange.py      # MEXC adapter tests ✅ (NEW - 2 Feb 2026)
 │   │   └── ... (25 existing tests from other modules)
 │   └── conftest.py         # Pytest fixtures
 ├── config/
@@ -1279,20 +1302,47 @@ async def funding_monitoring_loop():
   - Leverage control
   - Funding rate queries
   - Протестировано на demo
+- **MEXC** - полная CCXT интеграция (2 Feb 2026)
+  - Market/Limit orders (USDT-margined perpetual swaps)
+  - Stop Loss / Take Profit (separate API calls)
+  - Position management (one-way mode)
+  - Leverage control (openType/positionType params)
+  - Funding rate queries
+  - Contract-based: 1 contract = 0.0001 BTC
+  - **Ограничение:** Demo API отсутствует (тестирование только на live)
+  - Протестировано на demo
+  - **Критическое исправление:** SL/TP требует `tradeSide='close'` для one-way mode
+- **Lighter** - полная CCXT интеграция (18 Jan 2026)
+  - Market/Limit orders
+  - Stop Loss / Take Profit
+  - Position management
+  - Leverage control
+  - Funding rate queries
+  - Протестировано на demo
 
 ### Базовая реализация (требует тестирования)
 - **Binance** - REST API адаптер через CCXT
 - **KuCoin** - REST API адаптер через CCXT
 
+### Новые адаптеры (2 февраля 2026)
+- **MEXC** - полная CCXT интеграция
+  - Market/Limit orders (USDT-margined perpetual swaps)
+  - Stop Loss / Take Profit (separate calls via MEXC API)
+  - Position management (one-way mode)
+  - Leverage control (requires openType/positionType params)
+  - Funding rate queries
+  - Contract-based trading (1 contract = 0.0001 BTC)
+  - **Ограничение:** Demo API отсутствует (только web-интерфейс)
+  - **Особенность:** Конвертация quantity→contracts при открытии позиций
+
 ### Планируется
 - Hyperliquid
-- MEXC
 - Aster
 
 ---
 
-**Дата обновления:** 27 января 2026  
-**Статус:** Phase 1-4 завершены ✅ | Production ready 🚀
+**Дата обновления:** 2 февраля 2026  
+**Статус:** Phase 1-4 завершены ✅ | Production ready 🚀 | MEXC интегрирован
 
 ## 📝 Подробный changelog (после 6c57a131cb21d9021c4f079849debb7dd70af0b4)
 

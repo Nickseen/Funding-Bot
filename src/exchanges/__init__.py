@@ -22,6 +22,7 @@ from .gate import GateExchange
 from .bingx import BingXExchange
 from .bitget import BitgetExchange
 from .lighter import LighterExchange
+from .mexc import MexcExchange
 
 __all__ = [
     # Base class
@@ -35,6 +36,7 @@ __all__ = [
     "BingXExchange",
     "BitgetExchange",
     "LighterExchange",
+    "MexcExchange",
     # Exceptions
     "ExchangeError",
     "InsufficientBalanceError",
