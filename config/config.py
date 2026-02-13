@@ -51,6 +51,10 @@ class Config:
     BITGET_SECRET_KEY: str = os.getenv("BITGET_SECRET_KEY", "")
     BITGET_PASSPHRASE: str = os.getenv("BITGET_PASSPHRASE", "")
     
+    # MEXC
+    MEXC_API_KEY: str = os.getenv("MEXC_API_KEY", "")
+    MEXC_SECRET_KEY: str = os.getenv("MEXC_SECRET_KEY", "")
+    
     # Lighter (zkLighter DEX)
     LIGHTER_API_KEY: str = os.getenv("LIGHTER_API_KEY", "")  # API public key (hex)
     LIGHTER_SECRET_KEY: str = os.getenv("LIGHTER_SECRET_KEY", "")  # API private key (hex)
