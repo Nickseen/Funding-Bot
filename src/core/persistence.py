@@ -240,64 +240,148 @@ class PositionPersistence:
             try:
                 # Check exchange 1
                 ex1_name = position.exchange1.lower()
-                ex2_name = position.exchange2.lower()
+                ex2_name = position.exchange2.lower() if position.exchange2 else None
                 
                 ex1_adapter = exchanges.get(ex1_name)
-                ex2_adapter = exchanges.get(ex2_name)
+                ex2_adapter = exchanges.get(ex2_name) if ex2_name else None
                 
-                if not ex1_adapter or not ex2_adapter:
+                if not ex1_adapter:
                     logger.warning(
-                        f"Position {position.id}: Exchange adapters not available "
-                        f"({ex1_name}, {ex2_name})"
+                        f"Position {position.id}: Exchange1 adapter not available ({ex1_name})"
                     )
                     continue
                 
-                # Fetch actual positions from exchanges
-                ex1_positions = await ex1_adapter.get_positions(position.pair)
-                ex2_positions = await ex2_adapter.get_positions(position.pair)
-                
-                # Check if positions still exist
-                ex1_exists = any(
-                    p.quantity > 0 for p in ex1_positions 
-                    if p.pair == position.pair
-                ) if ex1_positions else False
-                
-                ex2_exists = any(
-                    p.quantity > 0 for p in ex2_positions 
-                    if p.pair == position.pair
-                ) if ex2_positions else False
-                
-                if ex1_exists and ex2_exists:
-                    # Both positions exist - update with current data
-                    logger.info(f"✓ Position {position.id} verified on both exchanges")
-                    verified_positions.append(position)
+                # For delta-neutral pairs, check both exchanges
+                if ex2_name and ex2_adapter:
+                    # Fetch actual positions from exchanges
+                    try:
+                        ex1_positions = await ex1_adapter.get_positions(position.pair)
+                        ex2_positions = await ex2_adapter.get_positions(position.pair)
+                        
+                        # DEBUG LOGGING
+                        logger.info(
+                            f"[SYNC DEBUG] Position {position.id}:\n"
+                            f"  Looking for: {position.pair} | "
+                            f"  Ex1: {ex1_name} {position.exchange1_side} | "
+                            f"  Ex2: {ex2_name} {position.exchange2_side}\n"
+                            f"  Ex1 positions found: {len(ex1_positions) if ex1_positions else 0}\n"
+                            f"  Ex2 positions found: {len(ex2_positions) if ex2_positions else 0}"
+                        )
+                        
+                        if ex1_positions:
+                            for p in ex1_positions:
+                                logger.info(
+                                    f"  Ex1 position: {p.pair} side={p.exchange1_side} qty={p.quantity}"
+                                )
+                        
+                        if ex2_positions:
+                            for p in ex2_positions:
+                                logger.info(
+                                    f"  Ex2 position: {p.pair} side={p.exchange1_side} qty={p.quantity}"
+                                )
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to fetch positions for {position.id}: {e}")
+                        # Keep position if we can't verify
+                        position.notes = f"Verification failed: {e}"
+                        verified_positions.append(position)
+                        continue
                     
-                elif ex1_exists or ex2_exists:
-                    # Only one side exists - ORPHANED POSITION!
-                    orphan_exchange = ex1_name if ex1_exists else ex2_name
-                    logger.warning(
-                        f"⚠ ORPHANED POSITION detected: {position.id} "
-                        f"only exists on {orphan_exchange}"
-                    )
-                    # Still add to list so user can see and close it
-                    position.notes = f"ORPHANED - only on {orphan_exchange}"
-                    verified_positions.append(position)
+                    # Check if positions still exist (more robust check)
+                    # Match by symbol AND side to ensure we find the correct position
+                    # Normalize symbols for comparison (BTCUSDT vs BTC/USDT:USDT)
+                    def normalize_symbol(s: str) -> str:
+                        """Normalize symbol for comparison: BTC/USDT:USDT -> BTCUSDT"""
+                        return s.replace('/', '').replace(':USDT', '').replace(':BUSD', '').upper()
                     
-                else:
-                    # Neither side exists - position was closed externally
+                    position_symbol_normalized = normalize_symbol(position.pair)
+                    
+                    ex1_exists = any(
+                        p.quantity > 0 and 
+                        normalize_symbol(p.pair) == position_symbol_normalized and
+                        p.exchange1_side.upper() == position.exchange1_side.upper()
+                        for p in ex1_positions
+                    ) if ex1_positions else False
+                    
+                    ex2_exists = any(
+                        p.quantity > 0 and 
+                        normalize_symbol(p.pair) == position_symbol_normalized and
+                        p.exchange1_side.upper() == position.exchange2_side.upper()
+                        for p in ex2_positions
+                    ) if ex2_positions else False
+                    
                     logger.info(
-                        f"Position {position.id} no longer exists on exchanges, "
-                        f"marking as closed"
+                        f"  Match result: ex1_exists={ex1_exists}, ex2_exists={ex2_exists}"
                     )
-                    position.status = PositionStatus.CLOSED.value
-                    position.close_reason = "closed_externally"
-                    await self._archive_position(position)
-                    await self.remove_position(position.id)
+                    
+                    if ex1_exists and ex2_exists:
+                        # Both positions exist - delta-neutral pair is intact
+                        logger.info(f"✓ Delta-neutral pair {position.id} verified on both exchanges")
+                        verified_positions.append(position)
+                        
+                    elif ex1_exists or ex2_exists:
+                        # Only one side exists - ORPHANED POSITION!
+                        orphan_exchange = ex1_name if ex1_exists else ex2_name
+                        logger.warning(
+                            f"⚠ ORPHANED POSITION detected: {position.id} "
+                            f"only exists on {orphan_exchange}"
+                        )
+                        # Still add to list so user can see and close it
+                        position.notes = f"ORPHANED - only on {orphan_exchange}"
+                        verified_positions.append(position)
+                        
+                    else:
+                        # Neither side exists - position was closed externally
+                        logger.info(
+                            f"Position {position.id} (delta-pair) no longer exists on exchanges, "
+                            f"marking as closed"
+                        )
+                        position.status = PositionStatus.CLOSED.value
+                        position.close_reason = "closed_externally"
+                        await self._archive_position(position)
+                        await self.remove_position(position.id)
+                
+                else:
+                    # Single exchange position (not delta-neutral pair)
+                    try:
+                        ex1_positions = await ex1_adapter.get_positions(position.pair)
+                    except Exception as e:
+                        logger.error(f"Failed to fetch positions for {position.id}: {e}")
+                        position.notes = f"Verification failed: {e}"
+                        verified_positions.append(position)
+                        continue
+                    
+                    # Normalize symbol for comparison
+                    def normalize_symbol(s: str) -> str:
+                        """Normalize symbol for comparison: BTC/USDT:USDT -> BTCUSDT"""
+                        return s.replace('/', '').replace(':USDT', '').replace(':BUSD', '').upper()
+                    
+                    position_symbol_normalized = normalize_symbol(position.pair)
+                    
+                    ex1_exists = any(
+                        p.quantity > 0 and normalize_symbol(p.pair) == position_symbol_normalized
+                        for p in ex1_positions
+                    ) if ex1_positions else False
+                    
+                    if ex1_exists:
+                        logger.info(f"✓ Single position {position.id} verified on {ex1_name}")
+                        verified_positions.append(position)
+                    else:
+                        logger.info(
+                            f"Position {position.id} no longer exists on {ex1_name}, "
+                            f"marking as closed"
+                        )
+                        position.status = PositionStatus.CLOSED.value
+                        position.close_reason = "closed_externally"
+                        await self._archive_position(position)
+                        await self.remove_position(position.id)
                     
             except Exception as e:
                 logger.error(f"Failed to verify position {position.id}: {e}")
-                # Keep position in list to be safe
-                position.notes = f"Verification failed: {e}"
+                import traceback
+                logger.debug(traceback.format_exc())
+                # Keep position in list to be safe - better to show it than lose it
+                position.notes = f"Verification failed: {str(e)[:100]}"
                 verified_positions.append(position)
         
         return verified_positions

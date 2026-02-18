@@ -58,7 +58,8 @@ class CliApp:
     def __init__(
         self,
         exchanges: Dict[str, BaseExchange],
-        config: Optional[Dict[str, Any]] = None
+        config: Optional[Dict[str, Any]] = None,
+        state: Optional[AppState] = None
     ):
         """
         Initialize CLI application with dependencies.
@@ -70,12 +71,13 @@ class CliApp:
                    - default_leverage: int
                    - auto_close_enabled: bool
                    - pnl_threshold: float
+            state: Optional existing AppState with loaded positions
         """
         self.exchanges = exchanges
         self.config = config or {}
         
         # Core components (initialized in start())
-        self.state: Optional[AppState] = None
+        self.state: Optional[AppState] = state
         self.funding_tracker: Optional[FundingTracker] = None
         
         # UI components
@@ -123,9 +125,12 @@ class CliApp:
         """Initialize all components."""
         log.info("Initializing components...")
         
-        # Create AppState
-        self.state = AppState()
-        log.info("AppState initialized")
+        # Create AppState if not provided
+        if self.state is None:
+            self.state = AppState()
+            log.info("AppState initialized")
+        else:
+            log.info("Using existing AppState with loaded positions")
         
         # Connect to exchanges
         for name, exchange in self.exchanges.items():
@@ -294,6 +299,16 @@ class CliApp:
         log.info("Shutting down...")
         
         self._running = False
+        
+        # Save positions BEFORE stopping anything
+        if self.state:
+            log.info("💾 Saving positions to disk...")
+            saved = await self.state.save_all_positions()
+            if saved:
+                positions_count = len(await self.state.get_open_positions())
+                log.info(f"✅ Saved {positions_count} position(s)")
+            else:
+                log.warning("⚠️ Failed to save positions")
         
         # Stop funding tracker
         if self.funding_tracker:
