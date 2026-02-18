@@ -775,10 +775,12 @@ class BingXExchange(BaseExchange):
     
     def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
         """Convert BingX funding data to FundingRate"""
-        from datetime import timezone
+        from datetime import timezone, timedelta
         
         next_funding_ts = int(data.get('nextFundingTime', 0) or 0)
         rate = float(data.get('fundingRate', 0) or 0)
+        
+        now = datetime.now(timezone.utc)
         
         # Check if timestamp is in seconds or milliseconds
         if next_funding_ts:
@@ -788,8 +790,23 @@ class BingXExchange(BaseExchange):
             else:
                 # Already in seconds
                 next_funding_time = datetime.fromtimestamp(next_funding_ts, tz=timezone.utc)
+            
+            # If funding time is in the past, calculate next occurrence (8h intervals)
+            while next_funding_time < now:
+                next_funding_time += timedelta(hours=8)
         else:
-            next_funding_time = datetime.now(timezone.utc)
+            # No funding time provided - estimate next 00:00, 08:00, or 16:00 UTC
+            current_hour = now.hour
+            if current_hour < 8:
+                next_hour = 8
+            elif current_hour < 16:
+                next_hour = 16
+            else:
+                next_hour = 0  # Next day
+            
+            next_funding_time = now.replace(hour=next_hour, minute=0, second=0, microsecond=0)
+            if next_hour == 0:
+                next_funding_time += timedelta(days=1)
         
         return FundingRate(
             symbol=data.get('symbol', ''),

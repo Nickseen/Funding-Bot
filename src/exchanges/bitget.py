@@ -460,8 +460,7 @@ class BitgetExchange(BaseExchange):
         quantity: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Bitget: Set stop loss using plan orders (trigger orders)
-        Uses Bitget native API for proper SL/TP functionality
+        Bitget: Set stop loss using CCXT createStopLossOrder
         """
         try:
             from .enums import PositionSide
@@ -483,22 +482,39 @@ class BitgetExchange(BaseExchange):
             # For SL: if LONG position, sell when price falls; if SHORT, buy when price rises
             order_side = 'sell' if pos_side == 'long' else 'buy'
             
-            # Use Bitget's native plan order API for proper stop loss
-            # This creates a conditional order that triggers at stopLossPrice
-            inst_id = ccxt_symbol.replace('/', '-').replace(':USDT', '-USDT')
+            # Bitget requires holdSide parameter
+            hold_side = 'long' if pos_side == 'long' else 'short'
             
-            response = await self.client.private_mix_post_plan_placetpsl({
-                'symbol': inst_id,
-                'marginCoin': 'USDT',
-                'planType': 'loss_plan',  # Stop loss plan
-                'triggerPrice': str(stop_price),
-                'holdSide': 'long' if pos_side == 'long' else 'short',
-                'size': str(contracts),
-            })
+            # Use CCXT's createStopLossOrder (if available) or create_order with stopLoss params
+            try:
+                # Try CCXT unified method first
+                response = await self.client.create_stop_loss_order(
+                    symbol=ccxt_symbol,
+                    type='market',
+                    side=order_side,
+                    amount=contracts,
+                    stopLossPrice=stop_price,
+                    params={
+                        'holdSide': hold_side,
+                    }
+                )
+            except AttributeError:
+                # Fallback: use create_order with Bitget-specific params
+                response = await self.client.create_order(
+                    symbol=ccxt_symbol,
+                    type='market',
+                    side=order_side,
+                    amount=contracts,
+                    params={
+                        'stopLossPrice': stop_price,
+                        'holdSide': hold_side,
+                        'reduceOnly': 'true',
+                    }
+                )
             
             return {
                 'success': True,
-                'order_id': response.get('data', {}).get('orderId', ''),
+                'order_id': response.get('id', ''),
                 'type': 'stop_loss',
                 'trigger_price': stop_price,
                 'info': response
@@ -519,8 +535,7 @@ class BitgetExchange(BaseExchange):
         quantity: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Bitget: Set take profit using plan orders (trigger orders)
-        Uses Bitget native API for proper SL/TP functionality
+        Bitget: Set take profit using CCXT createTakeProfitOrder
         """
         try:
             from .enums import PositionSide
@@ -542,21 +557,39 @@ class BitgetExchange(BaseExchange):
             # For TP: if LONG position, sell when price rises; if SHORT, buy when price falls
             order_side = 'sell' if pos_side == 'long' else 'buy'
             
-            # Use Bitget's native plan order API for proper take profit
-            inst_id = ccxt_symbol.replace('/', '-').replace(':USDT', '-USDT')
+            # Bitget requires holdSide parameter
+            hold_side = 'long' if pos_side == 'long' else 'short'
             
-            response = await self.client.private_mix_post_plan_placetpsl({
-                'symbol': inst_id,
-                'marginCoin': 'USDT',
-                'planType': 'profit_plan',  # Take profit plan
-                'triggerPrice': str(take_profit_price),
-                'holdSide': 'long' if pos_side == 'long' else 'short',
-                'size': str(contracts),
-            })
+            # Use CCXT's createTakeProfitOrder (if available) or create_order with takeProfit params
+            try:
+                # Try CCXT unified method first
+                response = await self.client.create_take_profit_order(
+                    symbol=ccxt_symbol,
+                    type='market',
+                    side=order_side,
+                    amount=contracts,
+                    takeProfitPrice=take_profit_price,
+                    params={
+                        'holdSide': hold_side,
+                    }
+                )
+            except AttributeError:
+                # Fallback: use create_order with Bitget-specific params
+                response = await self.client.create_order(
+                    symbol=ccxt_symbol,
+                    type='market',
+                    side=order_side,
+                    amount=contracts,
+                    params={
+                        'takeProfitPrice': take_profit_price,
+                        'holdSide': hold_side,
+                        'reduceOnly': 'true',
+                    }
+                )
             
             return {
                 'success': True,
-                'order_id': response.get('data', {}).get('orderId', ''),
+                'order_id': response.get('id', ''),
                 'type': 'take_profit',
                 'trigger_price': take_profit_price,
                 'info': response
@@ -787,10 +820,12 @@ class BitgetExchange(BaseExchange):
         
         Uses timezone-aware datetime to ensure correct time calculations.
         """
-        from datetime import timezone
+        from datetime import timezone, timedelta
         
         next_funding_ts = int(data.get('nextFundingTime', 0) or 0)
         rate = float(data.get('fundingRate', 0) or 0)
+        
+        now = datetime.now(timezone.utc)
         
         # Convert timestamp to timezone-aware UTC datetime
         # Bitget returns timestamp in milliseconds
@@ -802,8 +837,23 @@ class BitgetExchange(BaseExchange):
             else:
                 # Already in seconds
                 next_funding_time = datetime.fromtimestamp(next_funding_ts, tz=timezone.utc)
+            
+            # If funding time is in the past, calculate next occurrence (8h intervals)
+            while next_funding_time < now:
+                next_funding_time += timedelta(hours=8)
         else:
-            next_funding_time = datetime.now(timezone.utc)
+            # No funding time provided - estimate next 00:00, 08:00, or 16:00 UTC
+            current_hour = now.hour
+            if current_hour < 8:
+                next_hour = 8
+            elif current_hour < 16:
+                next_hour = 16
+            else:
+                next_hour = 0  # Next day
+            
+            next_funding_time = now.replace(hour=next_hour, minute=0, second=0, microsecond=0)
+            if next_hour == 0:
+                next_funding_time += timedelta(days=1)
         
         return FundingRate(
             symbol=data.get('symbol', ''),

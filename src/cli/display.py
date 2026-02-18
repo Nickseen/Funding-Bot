@@ -263,12 +263,24 @@ def render_pair_info(
     
     if funding_ex1.next_funding_time:
         minutes = funding_ex1.time_to_funding_minutes
+        # Handle negative time (funding already passed)
+        if minutes < 0:
+            # Add 8 hours (480 minutes) to get next funding period
+            minutes += 480
+            if minutes < 0:
+                minutes = 0
         hours = int(minutes // 60)
         mins = int(minutes % 60)
         ex1_time = f"{hours}h {mins}m"
     
     if funding_ex2.next_funding_time:
         minutes = funding_ex2.time_to_funding_minutes
+        # Handle negative time (funding already passed)
+        if minutes < 0:
+            # Add 8 hours (480 minutes) to get next funding period
+            minutes += 480
+            if minutes < 0:
+                minutes = 0
         hours = int(minutes // 60)
         mins = int(minutes % 60)
         ex2_time = f"{hours}h {mins}m"
