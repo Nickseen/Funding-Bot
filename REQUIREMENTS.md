@@ -436,11 +436,30 @@ async def _trigger_emergency_close(position: Position):
 **Проблема:** Неправильное форматирование CLI и отображение баланса в демо-режиме BingX.  
 **Решение:** Исправлено форматирование и логика отображения баланса.
 
+### 14. ✅ Negative Funding Time Display for BingX/Bitget (24 Feb 2026)
+**Проблема:** Время до следующего funding показывало "-1h 59m" для BingX и Bitget пар.  
+**Причина:** API возвращает устаревший `nextFundingTime` из прошлого периода, не обновив на следующий.  
+**Решение:**
+- `bingx.py`: добавлен цикл `while next_funding_time < now: next_funding_time += timedelta(hours=8)` в `_parse_funding_rate()`
+- `display.py`: добавлена обработка отрицательного `time_to_funding_minutes` с добавлением 8h интервалов как fallback
+
+### 15. ✅ Bitget SL/TP AttributeError (24 Feb 2026)
+**Проблема:** Установка SL/TP на Bitget падала с ошибкой `AttributeError: 'bitget' object has no attribute 'private_mix_post_plan_placetpsl'`.  
+**Причина:** Использование несуществующего low-level CCXT метода вместо unified API.  
+**Решение:** Заменено на CCXT unified методы `create_stop_loss_order()` и `create_take_profit_order()` с параметром `holdSide`.
+
+### 16. ✅ Bitget Position Close Error 40774 (24 Feb 2026)
+**Проблема:** Закрытие позиций на Bitget (Market, Smart PnL, Stable Spread) завершалось ошибкой `40774: "The order type for unilateral position must also be the unilateral position type"`.  
+**Причина:** `create_order()` с параметрами `holdSide`, `reduceOnly`, `oneWayMode` вызывал конфликт с режимом аккаунта (unilateral vs hedge mode). CCXT Bitget игнорирует переданные params и подставляет свои — независимо от комбинации параметров ошибка 40774 воспроизводилась.  
+**Решение:** Заменён весь `create_order()` подход на CCXT native метод `close_position()`, который вызывает Bitget Flash Close API (`POST /api/v2/mix/order/close-positions`). Этот endpoint работает для обоих режимов (unilateral и hedge) без дополнительных параметров.  
+**Файл:** `src/exchanges/bitget.py` → `_api_close_position()`
+
 **Статус тестирования:**  
 ✅ Все баги исправлены и протестированы на production (Bybit + OKX)  
 ✅ Новые биржи протестированы на demo/testnet  
 ✅ 52/52 unit tests passing  
 ✅ Позиции успешно открываются, отслеживаются и закрываются
+✅ Bitget: Market close и Smart PnL close протестированы и работают (24 Feb 2026)
 
 ---
 
@@ -1171,12 +1190,12 @@ async def funding_monitoring_loop():
   - [x] Demo mode with VST (Virtual Standard Token)
 - [x] Bitget adapter (full CCXT integration - 14 Jan 2026)
   - [x] Market/Limit orders (tested on demo)
-  - [x] Stop Loss / Take Profit (tested on demo - fixed with tradeSide='close')
-  - [x] Position management (one-way mode)
+  - [x] Stop Loss / Take Profit (fixed: unified CCXT `create_stop_loss_order`/`create_take_profit_order` with `holdSide`)
+  - [x] Position management (unilateral mode)
   - [x] Leverage control
   - [x] Balance queries
   - [x] Demo mode (sandbox=True, 10,000 USDT)
-  - [x] Critical fix: SL/TP requires tradeSide='close' for one-way position mode
+  - [x] Critical fix (24 Feb 2026): Close position uses `close_position()` Flash Close endpoint — fixes error 40774 for all close modes (Market, Smart PnL, Stable Spread, Hit-the-bid)
 - [x] Unit testing validation
 - [x] Gate.io testnet testing (all order types verified)
 - [x] BingX demo testing (all order types verified)
@@ -1263,15 +1282,15 @@ async def funding_monitoring_loop():
   - Funding rate queries
   - Demo mode (VST - Virtual Standard Token)
   - Протестировано на demo (100k VST)
-- **Bitget** - полная CCXT интеграция (14 Jan 2026)
-  - Market/Limit orders (oneWayMode: True)
-  - Stop Loss / Take Profit (tradeSide: 'close' for one-way mode)
-  - Position management (one-way position mode)
+- **Bitget** - полная CCXT интеграция (14 Jan 2026, обновлено 24 Feb 2026)
+  - Market/Limit orders
+  - Stop Loss / Take Profit (unified CCXT методы с `holdSide`)
+  - Position management (unilateral mode)
   - Leverage control
   - Funding rate queries
   - Demo mode (sandbox=True, 10,000 USDT)
   - Протестировано на demo
-  - **Критическое исправление:** SL/TP требует `tradeSide='close'` для one-way mode
+  - **Критическое исправление (24 Feb 2026):** Закрытие позиций через `close_position()` Flash Close API — устраняет ошибку 40774 для всех режимов закрытия
 - **Lighter** - полная CCXT интеграция (18 Jan 2026)
   - Market/Limit orders
   - Stop Loss / Take Profit
@@ -1291,10 +1310,30 @@ async def funding_monitoring_loop():
 
 ---
 
-**Дата обновления:** 27 января 2026  
+**Дата обновления:** 24 февраля 2026  
 **Статус:** Phase 1-4 завершены ✅ | Production ready 🚀
 
 ## 📝 Подробный changelog (после 6c57a131cb21d9021c4f079849debb7dd70af0b4)
+
+### 2026-02-24
+- **fix**: Negative funding time display for BingX/Bitget pairs
+  - BingX `_parse_funding_rate()`: цикл добавления 8h пока `next_funding_time` в прошлом
+  - `display.py`: fallback обработка отрицательного `time_to_funding_minutes`
+  - Файлы: `src/exchanges/bingx.py`, `src/cli/display.py`
+- **fix**: Bitget SL/TP AttributeError
+  - Заменены несуществующие low-level методы на unified CCXT `create_stop_loss_order()` / `create_take_profit_order()`
+  - Параметр `holdSide` для корректного указания стороны хедж-позиции
+  - Файл: `src/exchanges/bitget.py` → `_api_set_stop_loss()`, `_api_set_take_profit()`
+- **fix**: Bitget position close error 40774 (все режимы закрытия)
+  - Причина: `create_order()` с `holdSide`/`reduceOnly`/`oneWayMode` несовместим с unilateral mode
+  - Решение: `_api_close_position()` теперь всегда использует `client.close_position()` — Flash Close API (`POST /api/v2/mix/order/close-positions`)
+  - Работает для unilateral и hedge mode без дополнительных параметров
+  - Протестировано: Market close ✅, Smart PnL close ✅
+  - Файл: `src/exchanges/bitget.py` → `_api_close_position()`
+- **fix**: Position persistence across restarts
+  - `cli/app.py`: `save_positions()` вызывается в `_shutdown()` до остановки компонент
+  - `core/persistence.py`: `normalize_symbol()` для корректного сравнения форматов (BTCUSDT vs BTC/USDT:USDT)
+  - `main.py` → `cli/app.py`: передача существующего `AppState` вместо создания нового
 
 ### 2026-01-27
 - **339faf3**: Merge pull request #12 from Nickseen/dev-Nicola

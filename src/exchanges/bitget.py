@@ -14,11 +14,13 @@ Bitget Testnet:
 
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+import asyncio
 import ccxt.async_support as ccxt
 
 from .base import BaseExchange, ExchangeError, RateLimitError, NetworkError
 from .enums import Exchange, PositionSide, OrderSide, OrderType
 from .types import Position, Order, OrderBook, PriceData, Balance, FundingRate
+from ..utils.logger import log
 
 
 class BitgetExchange(BaseExchange):
@@ -307,64 +309,48 @@ class BitgetExchange(BaseExchange):
         price: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Bitget: Close position
-        
-        Get current position, place opposite order with reduceOnly=True
+        Bitget: Close position using dedicated Flash Close endpoint.
+
+        Bitget's regular place-order endpoint with reduceOnly/holdSide causes
+        error 40774 depending on the account's position mode (unilateral vs hedge).
+        The dedicated close-positions endpoint (Flash Close) works for both modes
+        regardless of params, so we always use it.
+        CCXT: POST /api/v2/mix/order/close-positions
         """
         try:
             ccxt_symbol = self._convert_symbol(symbol)
-            
-            # 1. Get current position
+
+            # Verify position exists first
             positions = await self.client.fetch_positions([ccxt_symbol])
             position = next(
                 (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
                 None
             )
-            
+
             if not position:
-                # Position already closed - return empty result
                 return {'symbol': symbol, 'contracts': 0, 'side': None, 'status': 'CLOSED'}
-            
-            contracts = float(position['contracts'])
-            position_side = position.get('side', '')  # 'long' or 'short'
-            
-            # 2. For one-way mode: use tradeSide='close' to close position
-            order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
-            order_side = 'sell' if position_side == 'long' else 'buy'
-            
-            # tradeSide='close' tells Bitget to close the position in one-way mode
-            params = {'tradeSide': 'close'}
-            
-            try:
-                if order_type == OrderType.LIMIT and price:
-                    await self.client.create_order(
-                        symbol=ccxt_symbol,
-                        type=order_type_str,
-                        side=order_side,
-                        amount=abs(contracts),
-                        price=price,
-                        params=params
-                    )
-                else:
-                    await self.client.create_order(
-                        symbol=ccxt_symbol,
-                        type=order_type_str,
-                        side=order_side,
-                        amount=abs(contracts),
-                        params=params
-                    )
-            except ccxt.ExchangeError as e:
-                if '22002' in str(e):  # "No position to close"
-                    return {'symbol': symbol, 'contracts': 0, 'side': None, 'status': 'CLOSED'}
-                raise
-            
-            # 3. Return updated position (should be closed now)
+
+            # Use Flash Close endpoint - works for unilateral and hedge mode
+            # Smart PnL already verifies instant fill so market execution is fine
+            await self.client.close_position(ccxt_symbol)
+
+            # Wait for the order to execute
+            await asyncio.sleep(0.5)
+
+            # Verify closure
             positions = await self.client.fetch_positions([ccxt_symbol])
+            remaining = next(
+                (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
+                None
+            )
+            if remaining:
+                log.warning(f"Bitget: Position {symbol} not fully closed, remaining: {remaining.get('contracts', 0)}")
+
             return next(
                 (p for p in positions if p['symbol'] == ccxt_symbol),
                 {'symbol': symbol, 'contracts': 0, 'side': None}
             )
-            
+
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except ExchangeError:
