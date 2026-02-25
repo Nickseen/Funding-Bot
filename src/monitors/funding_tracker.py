@@ -375,17 +375,17 @@ class FundingTracker:
             return None
         
         # 2. Рассчитать funding spread (в bps)
-        # Positive spread = получаем funding
-        # Negative spread = платим funding (потери!)
-        funding_spread_bps = (funding1.rate - funding2.rate) * 10000
-        
-        # Учитываем направление позиций
-        # Если SHORT на ex1 и LONG на ex2:
-        #   - мы получаем funding от ex2 (LONG платит)
-        #   - мы платим funding на ex1 (SHORT получает от longs)
-        # Поэтому нужно инвертировать для SHORT
-        if position.exchange1_side == "SHORT":
-            funding_spread_bps = -funding_spread_bps
+        # При delta-neutral (SHORT на ex1, LONG на ex2):
+        #   - SHORT получает funding если rate положительный
+        #   - LONG платит funding если rate положительный
+        #   - Spread = rate_bps(ex1) - rate_bps(ex2)
+        # 
+        # Пример 1: Ex1 SHORT rate=+2 bps, Ex2 LONG rate=+1 bps
+        #   Spread = +2 - (+1) = +1 bps → прибыль!
+        #
+        # Пример 2: Ex1 SHORT rate=+1 bps, Ex2 LONG rate=+5 bps
+        #   Spread = +1 - (+5) = -4 bps → убыток!
+        funding_spread_bps = funding1.rate_bps - funding2.rate_bps
         
         logger.info(
             f"📊 Funding spread for {position.pair}: {funding_spread_bps:.2f} bps "
