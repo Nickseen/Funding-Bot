@@ -146,9 +146,19 @@ Position #1: JUP LIGHTER-ASTER
 ### Проблема
 Позиция открыта на ночь → пройдет через 2-4 funding payment. Если к следующему фандингу спред изменится и позиция потеряет выгодность?
 
-### Решение - FundingTracker ✅ IMPLEMENTED
+### Решение - FundingTracker ✅ IMPLEMENTED & UPDATED (v3.0 - 25 Feb 2026)
 
-**Модуль:** `src/monitors/funding_tracker.py` (431 lines)
+**Модуль:** `src/monitors/funding_tracker.py` (520+ lines)
+
+> 🆕 **НОВАЯ ЛОГИКА v3.0:** Мониторит **funding spread** вместо PnL. Мониторинг **по умолчанию выключен** - пользователь выбирает какие позиции мониторить.
+
+**Ключевые изменения v3.0:**
+- ✅ Проверка **funding spread** (разница funding rates между биржами)
+- ✅ Два порога автозакрытия:
+  - **-3 bps** (< -0.03%) → Smart PnL Close
+  - **-20 bps** (< -0.2%) → Market Close (срочно!)
+- ✅ **Выборочный мониторинг:** `position.funding_monitoring_enabled = True/False`
+- ✅ Методы управления: `enable_monitoring()`, `disable_monitoring()`, `list_monitored_positions()`
 
 **Интервалы фандинга по биржам:**
 
@@ -168,57 +178,91 @@ Position #1: JUP LIGHTER-ASTER
 
 > ⚠️ **Важно:** Бот получает `next_funding_time` **напрямую из API биржи**, а не вычисляет самостоятельно. Это гарантирует точность независимо от интервала.
 
-**Новая улучшенная логика (3 января 2026):**
+**Новая логика v3.0 (25 февраля 2026):**
 
 1. **Smart Monitoring:**
    - **Passive mode**: Sleep до 55-й минуты (no API calls)
    - **Active mode**: Проверка каждые 40 сек когда ≤5 минут до funding
+   - **Фильтрация**: Проверяет ТОЛЬКО позиции с `funding_monitoring_enabled=True`
 
-2. **Критерии автозакрытия (оба условия!):**
-   - ✅ Spread отрицательный (< 0 bps)
-   - ✅ PnL < +1% (AUTO_CLOSE_PNL_THRESHOLD_PCT = 1.0)
+2. **Критерии автозакрытия (funding spread):**
+   - ✅ Spread >= 0 bps → НЕ ЗАКРЫВАТЬ (получаем funding)
+   - ⚠️ -3 bps <= Spread < 0 → НЕ ЗАКРЫВАТЬ (допустимые потери)
+   - 📉 Spread < -3 bps → **Smart PnL Close** (минимизировать потери)
+   - 🔴 Spread < -20 bps → **Market Close** (критично!)
 
 ```python
-# Smart monitoring algorithm
+# v3.0 monitoring algorithm
 async def _monitor_loop():
     while self.running:
-        for position in open_positions:
+        positions = await state.get_positions_by_status(PositionStatus.OPEN)
+        
+        # Фильтруем только позиции с включенным мониторингом!
+        monitored_positions = [
+            p for p in positions 
+            if p.funding_monitoring_enabled
+        ]
+        
+        if not monitored_positions:
+            await asyncio.sleep(60)  # Нет мониторимых позиций
+            continue
+        
+        for position in monitored_positions:
             time_to_funding = await self._get_time_to_funding(position)
             
             if time_to_funding > 300:  # > 5 минут
-                # Passive mode: sleep до 55-й минуты
+                # Passive mode
                 sleep_duration = time_to_funding - 300
                 await asyncio.sleep(sleep_duration)
                 continue
             
             # Active mode: ≤ 5 минут до funding
-            current_spread = await self._calculate_spread(position)
-            current_pnl_pct = await self._get_pnl_percentage(position)
+            # Проверяем funding spread
+            funding1 = await exchange1.get_funding_rate(position.pair)
+            funding2 = await exchange2.get_funding_rate(position.pair)
             
-            # Автозакрытие только если ОБА условия:
-            if current_spread < 0 and current_pnl_pct < 1.0:
-                logger.warning(
-                    f"🔴 Auto-close: spread={current_spread:.2f} bps, "
-                    f"PnL={current_pnl_pct:.2f}% (threshold: 1%)"
-                )
-                await self._auto_close_position(position)
+            funding_spread_bps = (funding1.rate - funding2.rate) * 10000
+            if position.exchange1_side == "SHORT":
+                funding_spread_bps = -funding_spread_bps
+            
+            # Автозакрытие по порогам
+            if funding_spread_bps < -20.0:
+                # КРИТИЧНО! Market close
+                await self._auto_close_position(position, close_mode="market")
+            elif funding_spread_bps < -3.0:
+                # ПРЕДУПРЕЖДЕНИЕ! Smart PnL close
+                await self._auto_close_position(position, close_mode="smart_pnl")
             
             await asyncio.sleep(40)  # Check every 40 seconds
 ```
 
-**Правила автозакрытия:**
-- ✅ Spread > 0 OR PnL > +1% → **НЕ ТРОГАТЬ** (позиция выгодна)
-- 🔴 Spread < 0 AND PnL < +1% → **ЗАКРЫТЬ АВТОМАТИЧЕСКИ**
+**Правила автозакрытия v3.0:**
+- ✅ Funding spread >= 0 → **НЕ ТРОГАТЬ** (получаем funding)
+- ⚠️ -3 bps <= spread < 0 → **НЕ ТРОГАТЬ** (допустимые потери)
+- 📉 spread < -3 bps → **Smart PnL Close** (минимизировать потери)
+- 🔴 spread < -20 bps → **Market Close** (критические потери!)
 
-**Преимущества:**
-- 🎯 Оптимизация API calls: passive mode до 55-й минуты
-- 📊 PnL threshold защищает profitable позиции
-- 🔄 Интеграция с PositionCloser (правильный режим: hit_the_bid или stable_spread)
-- ⚡ Умное определение режима закрытия по Position.execution_mode
+**Преимущества v3.0:**
+- 🎯 **Точность:** funding spread напрямую показывает выгодность следующего funding
+- 📊 **Гибкость:** два порога (smart_pnl vs market)
+- 🔄 **Контроль:** пользователь выбирает какие позиции мониторить
+- ⚡ **Эффективность:** меньше API calls (только monitored positions)
 
-**Тесты:** Covered in unit tests
+**Управление мониторингом:**
+```python
+# Включить мониторинг для позиции
+await funding_tracker.enable_monitoring("pos_001")
 
-> ⚠️ **Логика:** Spread < 0 означает потери на следующем funding. Но если PnL уже > +1%, сохраняем позицию (накопленный профит покрывает risk).
+# Выключить мониторинг
+await funding_tracker.disable_monitoring("pos_001")
+
+# Список мониторимых позиций
+monitored = await funding_tracker.list_monitored_positions()
+```
+
+**Тесты:** Unit tests + integration tests ([see docs/FUNDING_TRACKER_V3.md](docs/FUNDING_TRACKER_V3.md))
+
+> 📘 **Полная документация:** См. [FUNDING_TRACKER_V3.md](docs/FUNDING_TRACKER_V3.md) для деталей и примеров использования.
 
 ### Извлечение Funding Rate
 
