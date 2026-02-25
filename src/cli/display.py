@@ -92,8 +92,9 @@ def render_main_menu(
         _create_line("1. Open Position"),
         _create_line(f"2. View Open Positions ({active_positions_count})"),
         _create_line("3. Close Position"),
-        _create_line("4. View Balances"),
-        _create_line("5. Exit"),
+        _create_line("4. Manage Funding Monitoring"),
+        _create_line("5. View Balances"),
+        _create_line("6. Exit"),
         _create_footer(),
     ]
     

@@ -871,3 +871,102 @@ class ViewBalancesCommand:
         ))
         
         await wait_for_keypress()
+
+
+class ManageFundingMonitoringCommand:
+    """
+    Command handler for managing funding monitoring on positions.
+    
+    Allows user to enable/disable FundingTracker monitoring for each position.
+    """
+    
+    def __init__(self, state: AppState, funding_tracker):
+        self.state = state
+        self.funding_tracker = funding_tracker
+    
+    async def execute(self) -> None:
+        """Execute manage funding monitoring flow."""
+        clear_screen()
+        print("╔══════════════════════════════════════════════════════════╗")
+        print("║ MANAGE FUNDING MONITORING                                ║")
+        print("╠══════════════════════════════════════════════════════════╣")
+        
+        # Get open positions
+        positions = await self.state.get_open_positions()
+        
+        if not positions:
+            print("║ No open positions                                        ║")
+            print("╚══════════════════════════════════════════════════════════╝")
+            await wait_for_keypress()
+            return
+        
+        # Display positions with monitoring status
+        print("║  #  Pair        Monitoring   Size     Age                ║")
+        print("╠══════════════════════════════════════════════════════════╣")
+        
+        for i, pos in enumerate(positions, 1):
+            status_icon = "✅" if pos.funding_monitoring_enabled else "❌"
+            age_hours = (datetime.now().timestamp() - pos.entry_time) / 3600
+            
+            print(f"║  {i}. {pos.pair:10s}  {status_icon}       ${pos.initial_capital:6.0f}   {age_hours:4.1f}h            ║")
+        
+        print("╠══════════════════════════════════════════════════════════╣")
+        print("║ Select position [1-N] or [0] to go back:                 ║")
+        print("╚══════════════════════════════════════════════════════════╝")
+        
+        choice = await async_input("Select position: ")
+        
+        if choice == "0" or choice is None:
+            return
+        
+        try:
+            idx = int(choice) - 1
+            if idx < 0 or idx >= len(positions):
+                print(render_error("Invalid position number"))
+                await wait_for_keypress()
+                return
+            
+            position = positions[idx]
+            
+            # Toggle monitoring
+            if position.funding_monitoring_enabled:
+                # Disable monitoring
+                await self.funding_tracker.disable_monitoring(position.id)
+                clear_screen()
+                print("╔══════════════════════════════════════════════════════════╗")
+                print("║ MONITORING DISABLED                                      ║")
+                print("╠══════════════════════════════════════════════════════════╣")
+                print(f"║ Position: {position.id:45s} ║")
+                print(f"║ Pair: {position.pair:50s} ║")
+                print("║                                                          ║")
+                print("║ ✅ Funding monitoring DISABLED                            ║")
+                print("║                                                          ║")
+                print("║ Position will NOT be auto-closed if funding becomes     ║")
+                print("║ unprofitable.                                            ║")
+                print("╚══════════════════════════════════════════════════════════╝")
+            else:
+                # Enable monitoring
+                await self.funding_tracker.enable_monitoring(position.id)
+                clear_screen()
+                print("╔══════════════════════════════════════════════════════════╗")
+                print("║ MONITORING ENABLED                                       ║")
+                print("╠══════════════════════════════════════════════════════════╣")
+                print(f"║ Position: {position.id:45s} ║")
+                print(f"║ Pair: {position.pair:50s} ║")
+                print("║                                                          ║")
+                print("║ ✅ Funding monitoring ENABLED                             ║")
+                print("║                                                          ║")
+                print("║ FundingTracker will now monitor this position and       ║")
+                print("║ auto-close if funding spread becomes negative:          ║")
+                print("║   • < -3 bps  → Smart PnL Close                          ║")
+                print("║   • < -20 bps → Market Close (urgent!)                   ║")
+                print("╚══════════════════════════════════════════════════════════╝")
+            
+            await wait_for_keypress()
+            
+        except ValueError:
+            print(render_error("Invalid input"))
+            await wait_for_keypress()
+        except Exception as e:
+            print(render_error(f"Error: {e}"))
+            await wait_for_keypress()

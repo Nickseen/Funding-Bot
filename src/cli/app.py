@@ -32,6 +32,7 @@ from .commands import (
     OpenPositionCommand,
     ViewPositionsCommand,
     ClosePositionCommand,
+    ManageFundingMonitoringCommand,
     SettingsCommand,
     ViewLogsCommand,
     ViewBalancesCommand,
@@ -171,6 +172,7 @@ class CliApp:
             MenuAction.OPEN_POSITION: self._handle_open_position,
             MenuAction.VIEW_POSITIONS: self._handle_view_positions,
             MenuAction.CLOSE_POSITION: self._handle_close_position,
+            MenuAction.MANAGE_FUNDING: self._handle_manage_funding,
             MenuAction.VIEW_BALANCES: self._handle_view_balances,
             MenuAction.SETTINGS: self._handle_settings,
             MenuAction.VIEW_LOGS: self._handle_view_logs,
@@ -249,6 +251,14 @@ class CliApp:
         command = ClosePositionCommand(
             state=self.state,
             exchanges=self.exchanges
+        )
+        await command.execute()
+    
+    async def _handle_manage_funding(self) -> None:
+        """Handle Manage Funding Monitoring menu action."""
+        command = ManageFundingMonitoringCommand(
+            state=self.state,
+            funding_tracker=self.funding_tracker
         )
         await command.execute()
     

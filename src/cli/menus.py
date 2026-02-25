@@ -29,6 +29,7 @@ class MenuAction(Enum):
     OPEN_POSITION = auto()
     VIEW_POSITIONS = auto()
     CLOSE_POSITION = auto()
+    MANAGE_FUNDING = auto()  # NEW: Manage funding monitoring
     VIEW_BALANCES = auto()  # NEW: Financial Analysis
     SETTINGS = auto()
     VIEW_LOGS = auto()
@@ -85,10 +86,10 @@ class MainMenu:
             next_funding_str=stats.get('next_funding', 'N/A')
         ))
         
-        # Get user choice (updated to 5 options per CLI_SPECIFICATION.md)
+        # Get user choice (updated to 6 options - added Manage Funding)
         choice = await get_menu_choice(
-            "Select [1-5]: ",
-            valid_choices=["1", "2", "3", "4", "5"]
+            "Select [1-6]: ",
+            valid_choices=["1", "2", "3", "4", "5", "6"]
         )
         
         if choice is None:
@@ -98,6 +99,7 @@ class MainMenu:
             "1": MenuAction.OPEN_POSITION,
             "2": MenuAction.VIEW_POSITIONS,
             "3": MenuAction.CLOSE_POSITION,
+            "4": MenuAction.MANAGE_FUNDING,
             "4": MenuAction.VIEW_BALANCES,  # Changed from SETTINGS
             "5": MenuAction.EXIT,
         }
