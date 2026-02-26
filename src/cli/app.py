@@ -195,7 +195,13 @@ class CliApp:
             positions = await self.state.get_open_positions()
             
             # Calculate totals
-            total_pnl = sum(p.total_pnl for p in positions)
+            total_pnl_usd = sum(p.total_pnl for p in positions)
+            total_initial_capital = sum(p.initial_capital for p in positions)
+            
+            # Calculate PnL percentage
+            total_pnl_pct = 0.0
+            if total_initial_capital > 0:
+                total_pnl_pct = (total_pnl_usd / total_initial_capital) * 100
             
             # Calculate pending funding (rough estimate)
             pending_funding = sum(p.funding_received for p in positions)
@@ -217,7 +223,8 @@ class CliApp:
             
             return {
                 'active_positions': len(positions),
-                'total_pnl': total_pnl,
+                'total_pnl_usd': total_pnl_usd,
+                'total_pnl_pct': total_pnl_pct,
                 'pending_funding': pending_funding,
                 'next_funding': next_funding
             }

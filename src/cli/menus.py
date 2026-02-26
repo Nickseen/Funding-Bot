@@ -81,7 +81,8 @@ class MainMenu:
         # Render menu
         print(render_main_menu(
             active_positions_count=stats.get('active_positions', 0),
-            total_pnl=stats.get('total_pnl', 0.0),
+            total_pnl_usd=stats.get('total_pnl_usd', 0.0),
+            total_pnl_pct=stats.get('total_pnl_pct', 0.0),
             pending_funding=stats.get('pending_funding', 0.0),
             next_funding_str=stats.get('next_funding', 'N/A')
         ))
@@ -100,8 +101,8 @@ class MainMenu:
             "2": MenuAction.VIEW_POSITIONS,
             "3": MenuAction.CLOSE_POSITION,
             "4": MenuAction.MANAGE_FUNDING,
-            "4": MenuAction.VIEW_BALANCES,  # Changed from SETTINGS
-            "5": MenuAction.EXIT,
+            "5": MenuAction.VIEW_BALANCES,
+            "6": MenuAction.EXIT,
         }
         
         return action_map.get(choice, MenuAction.MAIN_MENU)
