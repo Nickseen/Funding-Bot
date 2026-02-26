@@ -1485,3 +1485,101 @@ async def funding_monitoring_loop():
 - Новые комиссии для бирж (bingx, bitget, gate, lighter)
 
 ---
+
+## 🆕 Текущее состояние проекта (февраль 2026)
+
+### 26 февраля 2026 - UI и Exchange Data Integration
+
+#### 1. PnL Display Format (commits: 78cf00d, 9003236)
+**Проблема:** PnL отображался только в процентах: `Total PnL: +8.4%`
+
+**Решение:**
+- Изменен формат на: `Total PnL: $8.43 (+0.17%)`
+- Файлы: `src/cli/app.py`, `src/cli/display.py`, `src/cli/menus.py`
+- Расчет: `total_pnl_pct = (total_pnl_usd / total_initial_capital) * 100`
+
+**Также исправлено:**
+- Баг дублирования key "4" в action_map (меню открывало неправильный пункт)
+
+#### 2. Funding & Fees Integration (commits: f61b235, 7056c51)
+**Проблема:** `fees_paid` и `funding_received` показывали $0.00 несмотря на открытую позицию
+
+**Причина:** Данные не извлекались из биржевых API ответов
+
+**Решение:**
+Извлечение из CCXT `position['info']` field (raw exchange response):
+
+**Bitget API:**
+```python
+info['totalFee']      # Accumulated funding received (положительное = профит)
+info['deductedFee']   # Transaction fees paid (комиссии за открытие/поддержание)
+
+# Пример из реальной позиции:
+# totalFee = 0.19647438 USDT (funding received)
+# deductedFee = 1.49921652 USDT (transaction fees)
+```
+
+**BingX API:**
+```python
+info['realisedProfit']  # Combined: realized PnL + funding + fees
+
+# ⚠️ Проблема: BingX не предоставляет отдельные поля!
+# realisedProfit = -1.0759 (все вместе: PnL + funding + fees)
+# Для точности нужен отдельный вызов income history API
+```
+
+**Файлы изменены:**
+- `src/exchanges/bitget.py` - `_parse_position()` извлекает totalFee/deductedFee
+- `src/exchanges/bingx.py` - использует realisedProfit как approximation
+- `src/cli/commands.py` - `_update_position_prices()` суммирует от обеих бирж
+- `src/core/execution_engine.py` - инициализирует поля при создании позиции
+
+**Важно:**
+```python
+# ✅ ПРАВИЛЬНО: Биржи возвращают НАКОПЛЕННЫЕ значения
+position.funding_received = ex1_funding + ex2_funding
+position.fees_paid = ex1_fees + ex2_fees
+
+# ❌ НЕПРАВИЛЬНО: += приведет к накоплению при каждом refresh!
+position.funding_received += ex1_funding  # NO!
+```
+
+#### 3. Position Structure Updates
+**Добавлены поля в Position dataclass:**
+- `initial_capital: float` - начальный капитал (2 × position_value)
+- `funding_received: float` - накопленный полученный фандинг
+- `fees_paid: float` - оплаченные комиссии
+
+**Расчет при открытии (3 режима):**
+```python
+# hit_the_bid / stable_spread: maker fees
+fees_paid = 2 × position_value × (maker_fee_ex1 + maker_fee_ex2)
+
+# market: taker fees
+fees_paid = 2 × position_value × (taker_fee_ex1 + taker_fee_ex2)
+
+# funding начинается с 0.0, накапливается с биржи
+```
+
+#### 4. TODO: BingX Income History API
+**Задача:** Получить точные funding и fees для BingX
+
+**Метод:**
+```python
+# BingX income history endpoint
+GET /openApi/swap/v2/user/income
+
+# Параметры:
+symbol: str      # BTC-USDT
+incomeType: str  # 'FUNDING_FEE' | 'REALIZED_PNL' | 'COMMISSION'
+startTime: int   # Unix timestamp ms
+limit: int       # Max 1000
+```
+
+**Требуется:**
+- Добавить метод `get_income_history()` в `BingXExchange`
+- Фильтровать по incomeType для отдельного funding/fees
+- Суммировать за период жизни позиции
+- Обновлять при каждом refresh в CLI
+
+---

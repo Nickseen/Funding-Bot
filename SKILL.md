@@ -2,8 +2,8 @@
 
 > **Purpose:** Quick context loading for AI assistants in new sessions. Read this first to maximize productivity.
 > 
-> **Last Updated:** 26 February 2026 (Evening - Funding/Fees Fix)  
-> **Project Status:** Active Development (FundingTracker v3.0 just completed)
+> **Last Updated:** 26 February 2026
+> **Project Status:** Active Development (FundingTracker v3.0 completed; See REQUIREMENTS.md for current work)
 
 ---
 
@@ -143,51 +143,8 @@ async def close_position(position_id: str, side: str, quantity: float) -> bool
 - `OrderBook` - Bids/asks snapshot
 - `FundingRate` - Funding rate + next funding time
 
-**Exchange-Specific Position Fields (26 Feb 2026):**
-
-⚠️ **Critical:** Each exchange returns funding/fees data differently in CCXT's `position['info']` field!
-
-**Bitget:**
-```python
-# Fields in 'info' dict (verified with actual API):
-info['totalFee']      # Accumulated funding fees RECEIVED (positive = profit)
-info['deductedFee']   # Transaction fees PAID (opening + maintenance)
-
-# Example: totalFee = 0.19647438 USDT, deductedFee = 1.49921652 USDT
-```
-
-**BingX:**
-```python
-# ⚠️ BingX does NOT provide separate funding/fee fields!
-info['realisedProfit']  # Combined: realized PnL + funding + fees (negative = net loss)
-
-# Example: realisedProfit = -1.0759 (includes everything mixed)
-# To get accurate breakdown, need to use income history API separately
-```
-
-**Pattern for `_parse_position()`:**
-```python
-def _parse_position(self, data: Dict[str, Any]) -> Position:
-    info = data.get('info', {})
-    
-    # Extract exchange-specific fields
-    funding_received = abs(float(info.get('totalFee', 0)))  # Bitget
-    fees_paid = abs(float(info.get('deductedFee', 0)))       # Bitget
-    
-    # BingX: use realisedProfit as approximation
-    if 'realisedProfit' in info and info['realisedProfit'] < 0:
-        fees_paid = abs(float(info['realisedProfit']))
-```
-
-**CLI Update Pattern (`src/cli/commands.py`):**
-```python
-# ✅ CORRECT: Exchanges return ACCUMULATED values, sum from both exchanges
-position.funding_received = ex1_funding + ex2_funding
-position.fees_paid = ex1_fees + ex2_fees
-
-# ❌ WRONG: Don't use += (would accumulate on every refresh!)
-position.funding_received += ex1_funding  # NO!
-```
+**Exchange-Specific Details:**
+> ⚠️ Each exchange returns funding/fees differently. See **REQUIREMENTS.md § Текущее состояние проекта** for detailed field mappings (Bitget, BingX, etc.)
 
 ### 2. Core Logic (`src/core/`)
 
