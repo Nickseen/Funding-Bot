@@ -435,17 +435,63 @@ class ViewPositionsCommand:
             await self._show_position_detail(position)
     
     async def _update_position_prices(self, position: Position) -> None:
-        """Update position with current prices and calculate unrealized PnL"""
+        """Update position with current prices, PnL, funding, and fees from exchanges"""
         ex1 = self.exchanges.get(position.exchange1.lower())
         ex2 = self.exchanges.get(position.exchange2.lower())
         
+        # Try to get full position data from exchanges (includes funding & fees)
+        ex1_position = None
+        ex2_position = None
+        
+        # Accumulated values from both exchanges
+        ex1_funding = 0.0
+        ex1_fees = 0.0
+        ex2_funding = 0.0
+        ex2_fees = 0.0
+        
         if ex1:
-            price1 = await ex1.get_price_data(position.pair)
-            position.exchange1_current_price = price1.mid_price
+            try:
+                ex1_position = await ex1.get_position_by_symbol(position.pair)
+                if ex1_position:
+                    position.exchange1_current_price = ex1_position.exchange1_current_price
+                    # Exchange returns accumulated values, not incremental
+                    ex1_funding = ex1_position.funding_received
+                    ex1_fees = ex1_position.fees_paid
+                else:
+                    # Fallback to just price if position not found
+                    price1 = await ex1.get_price_data(position.pair)
+                    position.exchange1_current_price = price1.mid_price
+            except Exception as e:
+                # Silent fallback - just update price
+                try:
+                    price1 = await ex1.get_price_data(position.pair)
+                    position.exchange1_current_price = price1.mid_price
+                except:
+                    pass
         
         if ex2:
-            price2 = await ex2.get_price_data(position.pair)
-            position.exchange2_current_price = price2.mid_price
+            try:
+                ex2_position = await ex2.get_position_by_symbol(position.pair)
+                if ex2_position:
+                    position.exchange2_current_price = ex2_position.exchange1_current_price
+                    # Exchange returns accumulated values, not incremental
+                    ex2_funding = ex2_position.funding_received
+                    ex2_fees = ex2_position.fees_paid
+                else:
+                    # Fallback to just price if position not found
+                    price2 = await ex2.get_price_data(position.pair)
+                    position.exchange2_current_price = price2.mid_price
+            except Exception as e:
+                # Silent fallback - just update price
+                try:
+                    price2 = await ex2.get_price_data(position.pair)
+                    position.exchange2_current_price = price2.mid_price
+                except:
+                    pass
+        
+        # Sum accumulated values from both exchanges
+        position.funding_received = ex1_funding + ex2_funding
+        position.fees_paid = ex1_fees + ex2_fees
         
         # Calculate unrealized PnL based on current prices
         # LONG: profit when price goes up, loss when down
