@@ -529,6 +529,36 @@ class BaseExchange(ABC):
         except Exception as e:
             raise ExchangeError(f"Failed to get funding rate: {e}")
     
+    async def get_income_history(
+        self, 
+        symbol: str, 
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 100
+    ) -> Dict[str, float]:
+        """Get accumulated funding and fees from income history
+        
+        Args:
+            symbol: Trading pair
+            start_time: Start timestamp in milliseconds (optional)
+            end_time: End timestamp in milliseconds (optional)
+            limit: Maximum number of records to fetch (default: 100)
+            
+        Returns:
+            Dict with 'funding_received' and 'fees_paid' keys
+        """
+        if not validate_symbol(symbol):
+            raise ValueError(f"Invalid symbol: {symbol}")
+        
+        try:
+            return await self._api_get_income_history(symbol, start_time, end_time, limit)
+        except ExchangeError:
+            raise
+        except Exception as e:
+            log.warning(f"{self.get_name()}: Income history not available: {e}")
+            # Return zeros if income history not supported
+            return {'funding_received': 0.0, 'fees_paid': 0.0}
+    
     # ============================================
     # WEBSOCKET SUBSCRIPTIONS
     # ============================================
@@ -688,6 +718,22 @@ class BaseExchange(ABC):
     async def _api_get_funding_rate(self, symbol: str) -> Dict[str, Any]:
         """API call to get funding rate"""
         pass
+    
+    async def _api_get_income_history(
+        self, 
+        symbol: str, 
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 100
+    ) -> Dict[str, float]:
+        """API call to get income history (funding + fees)
+        
+        Default implementation returns zeros. Override in subclass if supported.
+        
+        Returns:
+            Dict with 'funding_received' and 'fees_paid' keys
+        """
+        return {'funding_received': 0.0, 'fees_paid': 0.0}
     
     # ============================================
     # PARSERS (common implementation, can override)

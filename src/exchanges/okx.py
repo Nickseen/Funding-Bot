@@ -670,6 +670,8 @@ class OKXExchange(BaseExchange):
         symbol = data.get('symbol', '')
         contracts = float(data.get('contracts', 0) or 0)
         side = data.get('side', '')  # 'long' or 'short'
+        entry_price = float(data.get('entryPrice', 0) or 0)
+        notional = float(data.get('notional', 0) or 0)
         
         # OKX: contractSize = how much base currency per 1 contract
         # Get from CCXT data or load from market info
@@ -688,13 +690,28 @@ class OKXExchange(BaseExchange):
         
         quantity_base = abs(contracts * contract_size)
         
+        # Extract fees and funding from raw exchange data ('info' field)
+        info = data.get('info', {})
+        
+        # OKX-specific fields (from position info)
+        # For exact funding/fees, use get_income_history() separately
+        
+        funding_received = 0.0
+        fees_paid = 0.0
+        
+        # Note: OKX position data doesn't separate funding from fees in 'info'
+        # Use get_income_history() for accurate breakdown
+        
+        # Initial capital (position value at entry)
+        initial_capital = notional if notional > 0 else abs(contracts) * entry_price
+        
         return Position(
             id=f"okx_{symbol}_{int(datetime.utcnow().timestamp())}",
             pair=symbol,
             exchange1=self.exchange_name.value,
             exchange1_pos_id=data.get('id', ''),
             exchange1_side=side.upper() if side else 'LONG',
-            exchange1_entry_price=float(data.get('entryPrice', 0) or 0),
+            exchange1_entry_price=entry_price,
             exchange1_current_price=float(data.get('markPrice', 0) or 0),
             exchange1_leverage=int(data.get('leverage', 1) or 1),
             # For single exchange position
@@ -712,6 +729,9 @@ class OKXExchange(BaseExchange):
             liquidation_price_ex2=0,
             status='OPEN' if contracts != 0 else 'CLOSED',
             unrealized_pnl=float(data.get('unrealizedPnl', 0) or 0),
+            initial_capital=initial_capital,
+            funding_received=funding_received,
+            fees_paid=fees_paid,
         )
     
     def _parse_order(self, data: Dict[str, Any]) -> Order:
@@ -808,6 +828,98 @@ class OKXExchange(BaseExchange):
             next_funding_time=next_funding_time,
             timestamp=datetime.now(timezone.utc).timestamp()
         )
+    
+    async def _api_get_income_history(
+        self, 
+        symbol: str, 
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 100
+    ) -> Dict[str, float]:
+        """OKX: Get income history for funding and fees
+        
+        API: GET /api/v5/account/bills-history
+        Docs: https://www.okx.com/docs-v5/en/#trading-account-rest-api-get-bills-details-last-3-months
+        
+        Bill types:
+        - 8: Funding fee
+        - 2: Transfer
+        - Multiple types for trading fees
+        
+        Returns:
+            Dict with 'funding_received' and 'fees_paid' keys
+        """
+        try:
+            ccxt_symbol = self._convert_symbol(symbol)
+            
+            # Convert CCXT symbol to OKX instId format
+            # BTC/USDT:USDT -> BTC-USDT-SWAP
+            inst_id = ccxt_symbol.replace('/', '-').replace(':USDT', '-SWAP')
+            
+            funding_received = 0.0
+            fees_paid = 0.0
+            
+            # Fetch funding fees (type=8)
+            try:
+                params = {
+                    'instType': 'SWAP',
+                    'instId': inst_id,
+                    'type': '8',  # Funding fee
+                    'limit': str(limit)
+                }
+                if start_time:
+                    params['begin'] = str(start_time)
+                if end_time:
+                    params['end'] = str(end_time)
+                
+                # Use CCXT's private API access
+                response = await self.client.private_get_account_bills_history(params)
+                
+                if response and 'data' in response:
+                    for record in response['data']:
+                        # balChg: balance change (positive = received, negative = paid)
+                        bal_change = float(record.get('balChg', 0))
+                        if bal_change > 0:
+                            funding_received += bal_change
+                            
+            except Exception as e:
+                log.warning(f"OKX: Failed to fetch funding fee history: {e}")
+            
+            # Fetch trading fees
+            # OKX combines fees in the 'fee' field of trades
+            # We'll fetch fills/trades to calculate total fees
+            try:
+                # Get recent fills for accurate fee tracking
+                fills_params = {
+                    'instType': 'SWAP',
+                    'instId': inst_id,
+                    'limit': str(limit)
+                }
+                if start_time:
+                    fills_params['begin'] = str(start_time)
+                if end_time:
+                    fills_params['end'] = str(end_time)
+                
+                fills_response = await self.client.private_get_trade_fills_history(fills_params)
+                
+                if fills_response and 'data' in fills_response:
+                    for fill in fills_response['data']:
+                        # fee: trading fee (negative value)
+                        fee = abs(float(fill.get('fee', 0)))
+                        if fee > 0:
+                            fees_paid += fee
+                            
+            except Exception as e:
+                log.warning(f"OKX: Failed to fetch trading fee history: {e}")
+            
+            return {
+                'funding_received': funding_received,
+                'fees_paid': fees_paid
+            }
+            
+        except Exception as e:
+            log.error(f"OKX: get_income_history failed: {e}")
+            return {'funding_received': 0.0, 'fees_paid': 0.0}
     
     # ============================================
     # WEBSOCKET (to be implemented)

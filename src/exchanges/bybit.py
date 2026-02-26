@@ -558,6 +558,24 @@ class BybitExchange(BaseExchange):
         symbol = data.get('symbol', '')
         contracts = float(data.get('contracts', 0) or 0)
         side = data.get('side', '')  # 'long' or 'short'
+        entry_price = float(data.get('entryPrice', 0) or 0)
+        notional = float(data.get('notional', 0) or 0)
+        
+        # Extract fees and funding from raw exchange data ('info' field)
+        info = data.get('info', {})
+        
+        # Bybit-specific fields (from position info)
+        # - cumRealisedPnl: cumulative realized PnL (includes funding + fees)
+        # For exact funding/fees, use get_income_history() separately
+        
+        funding_received = 0.0
+        fees_paid = 0.0
+        
+        # Note: Bybit position data doesn't separate funding from fees
+        # Use get_income_history() for accurate breakdown
+        
+        # Initial capital (position value at entry)
+        initial_capital = notional if notional > 0 else abs(contracts) * entry_price
         
         return Position(
             id=f"bybit_{symbol}_{int(datetime.utcnow().timestamp())}",
@@ -565,7 +583,7 @@ class BybitExchange(BaseExchange):
             exchange1=self.exchange_name.value,
             exchange1_pos_id=data.get('id', ''),
             exchange1_side=side.upper() if side else 'LONG',
-            exchange1_entry_price=float(data.get('entryPrice', 0) or 0),
+            exchange1_entry_price=entry_price,
             exchange1_current_price=float(data.get('markPrice', 0) or 0),
             exchange1_leverage=int(data.get('leverage', 1) or 1),
             # For single exchange position, duplicate fields
@@ -583,6 +601,9 @@ class BybitExchange(BaseExchange):
             liquidation_price_ex2=0,
             status='OPEN' if contracts != 0 else 'CLOSED',
             unrealized_pnl=float(data.get('unrealizedPnl', 0) or 0),
+            initial_capital=initial_capital,
+            funding_received=funding_received,
+            fees_paid=fees_paid,
         )
     
     def _parse_order(self, data: Dict[str, Any]) -> Order:
@@ -686,6 +707,78 @@ class BybitExchange(BaseExchange):
             next_funding_time=next_funding_time,
             timestamp=datetime.now(timezone.utc)
         )
+    
+    async def _api_get_income_history(
+        self, 
+        symbol: str, 
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 100
+    ) -> Dict[str, float]:
+        """Bybit: Get income history for funding and fees
+        
+        API: GET /v5/account/transaction-log
+        Docs: https://bybit-exchange.github.io/docs/v5/account/transaction-log
+        
+        Returns:
+            Dict with 'funding_received' and 'fees_paid' keys
+        """
+        try:
+            ccxt_symbol = self._convert_symbol(symbol)
+            
+            funding_received = 0.0
+            fees_paid = 0.0
+            
+            # Bybit V5 API: fetch transaction log
+            # category: 'linear' for USDT perpetuals
+            # type: filter by transaction type
+            
+            # Fetch funding fees (can be positive or negative)
+            try:
+                params = {
+                    'category': 'linear',
+                    'limit': limit
+                }
+                if start_time:
+                    params['startTime'] = start_time
+                if end_time:
+                    params['endTime'] = end_time
+                
+                # Use CCXT's private API access
+                response = await self.client.private_get_v5_account_transaction_log(params)
+                
+                if response and 'result' in response:
+                    for record in response['result'].get('list', []):
+                        tx_type = record.get('type', '')
+                        tx_symbol = record.get('symbol', '')
+                        
+                        # Only process transactions for this symbol
+                        if tx_symbol != ccxt_symbol:
+                            continue
+                        
+                        # FUNDING_FEE: positive = received, negative = paid
+                        if tx_type == 'FUNDING_FEE':
+                            amount = float(record.get('cashFlow', 0))
+                            if amount > 0:
+                                funding_received += amount
+                        
+                        # TRADE: trading fee (always paid, negative cashFlow)
+                        elif tx_type == 'TRADE':
+                            fee = abs(float(record.get('fee', 0)))
+                            if fee > 0:
+                                fees_paid += fee
+                                
+            except Exception as e:
+                log.warning(f"Bybit: Failed to fetch transaction log: {e}")
+            
+            return {
+                'funding_received': funding_received,
+                'fees_paid': fees_paid
+            }
+            
+        except Exception as e:
+            log.error(f"Bybit: get_income_history failed: {e}")
+            return {'funding_received': 0.0, 'fees_paid': 0.0}
     
     # ============================================
     # WEBSOCKET (to be implemented)

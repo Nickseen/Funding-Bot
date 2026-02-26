@@ -457,6 +457,19 @@ class ViewPositionsCommand:
                     # Exchange returns accumulated values, not incremental
                     ex1_funding = ex1_position.funding_received
                     ex1_fees = ex1_position.fees_paid
+                    
+                    # If position data doesn't have funding/fees, fetch from income history
+                    if ex1_funding == 0.0 and ex1_fees == 0.0:
+                        try:
+                            income = await ex1.get_income_history(
+                                symbol=position.pair,
+                                start_time=int(position.entry_time * 1000),  # Convert to ms
+                                limit=1000
+                            )
+                            ex1_funding = income.get('funding_received', 0.0)
+                            ex1_fees = income.get('fees_paid', 0.0)
+                        except Exception as e:
+                            pass  # Silent fallback - use 0.0
                 else:
                     # Fallback to just price if position not found
                     price1 = await ex1.get_price_data(position.pair)
@@ -477,6 +490,19 @@ class ViewPositionsCommand:
                     # Exchange returns accumulated values, not incremental
                     ex2_funding = ex2_position.funding_received
                     ex2_fees = ex2_position.fees_paid
+                    
+                    # If position data doesn't have funding/fees, fetch from income history
+                    if ex2_funding == 0.0 and ex2_fees == 0.0:
+                        try:
+                            income = await ex2.get_income_history(
+                                symbol=position.pair,
+                                start_time=int(position.entry_time * 1000),  # Convert to ms
+                                limit=1000
+                            )
+                            ex2_funding = income.get('funding_received', 0.0)
+                            ex2_fees = income.get('fees_paid', 0.0)
+                        except Exception as e:
+                            pass  # Silent fallback - use 0.0
                 else:
                     # Fallback to just price if position not found
                     price2 = await ex2.get_price_data(position.pair)
