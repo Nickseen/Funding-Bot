@@ -735,6 +735,40 @@ git log --oneline -10
 4. ✅ Check `docs/` for feature-specific docs
 5. ✅ Use search to find implementation: `grep -r "pattern" src/`
 
+### When Ending Session
+
+> 🔔 **User will explicitly say:** "конец сессии" / "end of session" / "завершаем сессию"
+
+**When user signals end of session, perform these steps:**
+
+1. ✅ **Update REQUIREMENTS.md** - Add section under "Текущее состояние проекта" with:
+   - Date and brief title of work done
+   - Problems encountered and solutions implemented
+   - Code changes made (which files, what changed)
+   - Examples with actual data/API responses if relevant
+   - TODOs for follow-up work
+   
+2. ✅ **Update SKILL.md** (ONLY if you learned something new and universal):
+   - New patterns discovered (exchange API quirks, CCXT behaviors, etc.)
+   - Critical bugs to avoid in future (accumulation vs assignment, field mappings, etc.)
+   - Workflow improvements that applied across project
+   - **DON'T add session-specific details** (those go in REQUIREMENTS.md)
+
+3. ✅ **Commit and push** all changes:
+   - Separate commits for code vs documentation
+   - Clear commit messages with context
+   - Push to `dev-Nicola` branch
+
+4. ✅ **Summary message** to user:
+   - What was completed
+   - What was committed and pushed
+   - What remains as TODO
+   - Any critical findings
+
+**Rationale:**
+- SKILL.md = Timeless onboarding knowledge for AI in new sessions
+- REQUIREMENTS.md = Current project state, session work log, evolving details
+
 ### When Editing Code
 
 1. ✅ Always read surrounding context (±10 lines minimum)
