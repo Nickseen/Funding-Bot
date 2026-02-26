@@ -674,6 +674,32 @@ class BingXExchange(BaseExchange):
         symbol = data.get('symbol', '')
         contracts = float(data.get('contracts', 0) or 0)
         side = data.get('side', '')  # 'long' or 'short'
+        entry_price = float(data.get('entryPrice', 0) or 0)
+        notional = float(data.get('notional', 0) or 0)  # Position value in USDT
+        
+        # Extract fees and funding from raw exchange data ('info' field)
+        info = data.get('info', {})
+        
+        # BingX-specific fields (verified from actual API response):
+        # - realisedProfit: combined realized PnL + funding + fees (negative = loss)
+        # BingX does NOT provide separate funding and fee fields in position data
+        # Need to use trade history API or income history API for detailed breakdown
+        
+        # For now, use realisedProfit as realized PnL (includes everything)
+        # This will be improved later by fetching income history
+        funding_received = 0.0
+        fees_paid = 0.0
+        
+        # Check for realized profit (combined value)
+        if 'realisedProfit' in info and info['realisedProfit'] is not None:
+            realised = float(info['realisedProfit'])
+            # If negative, it's likely fees > funding
+            # This is approximate - should use income history API for accuracy
+            if realised < 0:
+                fees_paid = abs(realised)  # Approximate
+        
+        # Initial capital (position value at entry)
+        initial_capital = notional if notional > 0 else abs(contracts) * entry_price
         
         return Position(
             id=f"bingx_{symbol}_{int(datetime.utcnow().timestamp())}",
@@ -681,7 +707,7 @@ class BingXExchange(BaseExchange):
             exchange1=self.exchange_name.value,
             exchange1_pos_id=data.get('id', ''),
             exchange1_side=side.upper() if side else 'LONG',
-            exchange1_entry_price=float(data.get('entryPrice', 0) or 0),
+            exchange1_entry_price=entry_price,
             exchange1_current_price=float(data.get('markPrice', 0) or 0),
             exchange1_leverage=int(data.get('leverage', 1) or 1),
             exchange2='',
@@ -698,6 +724,9 @@ class BingXExchange(BaseExchange):
             liquidation_price_ex2=0,
             status='OPEN' if contracts != 0 else 'CLOSED',
             unrealized_pnl=float(data.get('unrealizedPnl', 0) or 0),
+            initial_capital=initial_capital,
+            funding_received=funding_received,
+            fees_paid=fees_paid,
         )
     
     def _parse_order(self, data: Dict[str, Any]) -> Order:
