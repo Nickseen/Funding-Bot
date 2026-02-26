@@ -1561,25 +1561,67 @@ fees_paid = 2 × position_value × (taker_fee_ex1 + taker_fee_ex2)
 # funding начинается с 0.0, накапливается с биржи
 ```
 
-#### 4. TODO: BingX Income History API
-**Задача:** Получить точные funding и fees для BingX
+#### 4. ✅ Income History API Implementation (26 февраля 2026)
 
-**Метод:**
+**Задача:** Получить точные funding и fees для всех бирж ✅ COMPLETED
+
+**Реализация:**
+
+Добавлен базовый метод `get_income_history()` в `BaseExchange`:
 ```python
-# BingX income history endpoint
-GET /openApi/swap/v2/user/income
-
-# Параметры:
-symbol: str      # BTC-USDT
-incomeType: str  # 'FUNDING_FEE' | 'REALIZED_PNL' | 'COMMISSION'
-startTime: int   # Unix timestamp ms
-limit: int       # Max 1000
+async def get_income_history(
+    symbol: str,
+    start_time: Optional[int] = None,  # Timestamp ms
+    end_time: Optional[int] = None,    # Timestamp ms
+    limit: int = 100
+) -> Dict[str, float]:
+    # Returns: {'funding_received': float, 'fees_paid': float}
 ```
 
-**Требуется:**
-- Добавить метод `get_income_history()` в `BingXExchange`
-- Фильтровать по incomeType для отдельного funding/fees
-- Суммировать за период жизни позиции
-- Обновлять при каждом refresh в CLI
+**Реализовано для всех бирж:**
+
+**BingX:**
+- Endpoint: `GET /openApi/swap/v2/user/income`
+- Два вызова: `incomeType='FUNDING_FEE'` и `'COMMISSION'`
+- Funding: positive income = received
+- Fees: abs(commission income)
+
+**Bybit:**
+- Endpoint: `GET /v5/account/transaction-log`
+- Фильтр: `type='FUNDING_FEE'` для funding, `type='TRADE'` для fees
+- Использует `cashFlow` для расчета (positive = received)
+
+**OKX:**
+- Endpoints: 
+  - `GET /api/v5/account/bills-history` (type='8' для funding)
+  - `GET /api/v5/trade/fills-history` (для trading fees)
+- Funding: `balChg` positive = received
+- Fees: sum of `fee` from fills
+
+**Gate.io:**
+- Endpoint: `GET /api/v4/futures/{settle}/account_book`
+- Два вызова: `type='fund'` и `type='fee'`
+- Funding: `change` positive = received
+- Fees: abs(change) from fee records
+
+**Bitget:**
+- Использует прямое извлечение из `info` field в position data
+- `totalFee`: accumulated funding received
+- `deductedFee`: transaction fees paid
+- Уже работает точно без income history API
+
+**CLI Integration:**
+
+Обновлен `src/cli/commands.py` → `_update_position_prices()`:
+- Проверяет если `funding_received == 0.0` и `fees_paid == 0.0`
+- Автоматически вызывает `get_income_history()` с `start_time=position.entry_time`
+- Суммирует данные от обеих бирж
+- Обновляет позицию с точными накопленными значениями
+
+**Результат:**
+- ✅ Все биржи теперь показывают точный funding и fees
+- ✅ Данные обновляются при каждом refresh позиции
+- ✅ CLI отображает: `Funding: $X.XX | Fees: $Y.YY`
+- ✅ Total PnL корректно учитывает funding и fees
 
 ---
