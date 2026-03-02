@@ -32,6 +32,10 @@ data/
 .coverage
 htmlcov/
 
+# Debug/Test scripts
+scripts/*.py
+!scripts/README.md
+
 # OS
 .DS_Store
 Thumbs.db

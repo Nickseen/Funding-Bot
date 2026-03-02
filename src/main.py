@@ -440,20 +440,18 @@ async def main_cli():
         'pnl_threshold': 1.0,
     }
     
-    # Create and run CLI
-    app = CliApp(exchanges=exchanges, config=cli_config)
+    # Create and run CLI with existing app_state
+    app = CliApp(exchanges=exchanges, config=cli_config, state=app_state)
     
     try:
         await app.run()
     finally:
-        # Save positions before exit
-        log.info("💾 Saving positions before exit...")
-        await app_state.save_all_positions()
-        
-        # Close exchange connections
+        # Positions are saved in app._shutdown()
+        # Just ensure exchanges are closed
         for name, exchange in exchanges.items():
             try:
-                await exchange.disconnect()
+                if exchange.connected:
+                    await exchange.disconnect()
             except Exception as e:
                 log.warning(f"Error disconnecting {name}: {e}")
 

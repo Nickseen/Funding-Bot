@@ -14,11 +14,13 @@ Bitget Testnet:
 
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+import asyncio
 import ccxt.async_support as ccxt
 
 from .base import BaseExchange, ExchangeError, RateLimitError, NetworkError
 from .enums import Exchange, PositionSide, OrderSide, OrderType
 from .types import Position, Order, OrderBook, PriceData, Balance, FundingRate
+from ..utils.logger import log
 
 
 class BitgetExchange(BaseExchange):
@@ -307,64 +309,48 @@ class BitgetExchange(BaseExchange):
         price: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Bitget: Close position
-        
-        Get current position, place opposite order with reduceOnly=True
+        Bitget: Close position using dedicated Flash Close endpoint.
+
+        Bitget's regular place-order endpoint with reduceOnly/holdSide causes
+        error 40774 depending on the account's position mode (unilateral vs hedge).
+        The dedicated close-positions endpoint (Flash Close) works for both modes
+        regardless of params, so we always use it.
+        CCXT: POST /api/v2/mix/order/close-positions
         """
         try:
             ccxt_symbol = self._convert_symbol(symbol)
-            
-            # 1. Get current position
+
+            # Verify position exists first
             positions = await self.client.fetch_positions([ccxt_symbol])
             position = next(
                 (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
                 None
             )
-            
+
             if not position:
-                # Position already closed - return empty result
                 return {'symbol': symbol, 'contracts': 0, 'side': None, 'status': 'CLOSED'}
-            
-            contracts = float(position['contracts'])
-            position_side = position.get('side', '')  # 'long' or 'short'
-            
-            # 2. For one-way mode: use tradeSide='close' to close position
-            order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
-            order_side = 'sell' if position_side == 'long' else 'buy'
-            
-            # tradeSide='close' tells Bitget to close the position in one-way mode
-            params = {'tradeSide': 'close'}
-            
-            try:
-                if order_type == OrderType.LIMIT and price:
-                    await self.client.create_order(
-                        symbol=ccxt_symbol,
-                        type=order_type_str,
-                        side=order_side,
-                        amount=abs(contracts),
-                        price=price,
-                        params=params
-                    )
-                else:
-                    await self.client.create_order(
-                        symbol=ccxt_symbol,
-                        type=order_type_str,
-                        side=order_side,
-                        amount=abs(contracts),
-                        params=params
-                    )
-            except ccxt.ExchangeError as e:
-                if '22002' in str(e):  # "No position to close"
-                    return {'symbol': symbol, 'contracts': 0, 'side': None, 'status': 'CLOSED'}
-                raise
-            
-            # 3. Return updated position (should be closed now)
+
+            # Use Flash Close endpoint - works for unilateral and hedge mode
+            # Smart PnL already verifies instant fill so market execution is fine
+            await self.client.close_position(ccxt_symbol)
+
+            # Wait for the order to execute
+            await asyncio.sleep(0.5)
+
+            # Verify closure
             positions = await self.client.fetch_positions([ccxt_symbol])
+            remaining = next(
+                (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
+                None
+            )
+            if remaining:
+                log.warning(f"Bitget: Position {symbol} not fully closed, remaining: {remaining.get('contracts', 0)}")
+
             return next(
                 (p for p in positions if p['symbol'] == ccxt_symbol),
                 {'symbol': symbol, 'contracts': 0, 'side': None}
             )
-            
+
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except ExchangeError:
@@ -460,8 +446,7 @@ class BitgetExchange(BaseExchange):
         quantity: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Bitget: Set stop loss using plan orders (trigger orders)
-        Uses Bitget native API for proper SL/TP functionality
+        Bitget: Set stop loss using CCXT createStopLossOrder
         """
         try:
             from .enums import PositionSide
@@ -483,22 +468,39 @@ class BitgetExchange(BaseExchange):
             # For SL: if LONG position, sell when price falls; if SHORT, buy when price rises
             order_side = 'sell' if pos_side == 'long' else 'buy'
             
-            # Use Bitget's native plan order API for proper stop loss
-            # This creates a conditional order that triggers at stopLossPrice
-            inst_id = ccxt_symbol.replace('/', '-').replace(':USDT', '-USDT')
+            # Bitget requires holdSide parameter
+            hold_side = 'long' if pos_side == 'long' else 'short'
             
-            response = await self.client.private_mix_post_plan_placetpsl({
-                'symbol': inst_id,
-                'marginCoin': 'USDT',
-                'planType': 'loss_plan',  # Stop loss plan
-                'triggerPrice': str(stop_price),
-                'holdSide': 'long' if pos_side == 'long' else 'short',
-                'size': str(contracts),
-            })
+            # Use CCXT's createStopLossOrder (if available) or create_order with stopLoss params
+            try:
+                # Try CCXT unified method first
+                response = await self.client.create_stop_loss_order(
+                    symbol=ccxt_symbol,
+                    type='market',
+                    side=order_side,
+                    amount=contracts,
+                    stopLossPrice=stop_price,
+                    params={
+                        'holdSide': hold_side,
+                    }
+                )
+            except AttributeError:
+                # Fallback: use create_order with Bitget-specific params
+                response = await self.client.create_order(
+                    symbol=ccxt_symbol,
+                    type='market',
+                    side=order_side,
+                    amount=contracts,
+                    params={
+                        'stopLossPrice': stop_price,
+                        'holdSide': hold_side,
+                        'reduceOnly': 'true',
+                    }
+                )
             
             return {
                 'success': True,
-                'order_id': response.get('data', {}).get('orderId', ''),
+                'order_id': response.get('id', ''),
                 'type': 'stop_loss',
                 'trigger_price': stop_price,
                 'info': response
@@ -519,8 +521,7 @@ class BitgetExchange(BaseExchange):
         quantity: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Bitget: Set take profit using plan orders (trigger orders)
-        Uses Bitget native API for proper SL/TP functionality
+        Bitget: Set take profit using CCXT createTakeProfitOrder
         """
         try:
             from .enums import PositionSide
@@ -542,21 +543,39 @@ class BitgetExchange(BaseExchange):
             # For TP: if LONG position, sell when price rises; if SHORT, buy when price falls
             order_side = 'sell' if pos_side == 'long' else 'buy'
             
-            # Use Bitget's native plan order API for proper take profit
-            inst_id = ccxt_symbol.replace('/', '-').replace(':USDT', '-USDT')
+            # Bitget requires holdSide parameter
+            hold_side = 'long' if pos_side == 'long' else 'short'
             
-            response = await self.client.private_mix_post_plan_placetpsl({
-                'symbol': inst_id,
-                'marginCoin': 'USDT',
-                'planType': 'profit_plan',  # Take profit plan
-                'triggerPrice': str(take_profit_price),
-                'holdSide': 'long' if pos_side == 'long' else 'short',
-                'size': str(contracts),
-            })
+            # Use CCXT's createTakeProfitOrder (if available) or create_order with takeProfit params
+            try:
+                # Try CCXT unified method first
+                response = await self.client.create_take_profit_order(
+                    symbol=ccxt_symbol,
+                    type='market',
+                    side=order_side,
+                    amount=contracts,
+                    takeProfitPrice=take_profit_price,
+                    params={
+                        'holdSide': hold_side,
+                    }
+                )
+            except AttributeError:
+                # Fallback: use create_order with Bitget-specific params
+                response = await self.client.create_order(
+                    symbol=ccxt_symbol,
+                    type='market',
+                    side=order_side,
+                    amount=contracts,
+                    params={
+                        'takeProfitPrice': take_profit_price,
+                        'holdSide': hold_side,
+                        'reduceOnly': 'true',
+                    }
+                )
             
             return {
                 'success': True,
-                'order_id': response.get('data', {}).get('orderId', ''),
+                'order_id': response.get('id', ''),
                 'type': 'take_profit',
                 'trigger_price': take_profit_price,
                 'info': response
@@ -669,6 +688,28 @@ class BitgetExchange(BaseExchange):
         symbol = data.get('symbol', '')
         contracts = float(data.get('contracts', 0) or 0)
         side = data.get('side', '')  # 'long' or 'short'
+        entry_price = float(data.get('entryPrice', 0) or 0)
+        notional = float(data.get('notional', 0) or 0)  # Position value in USDT
+        
+        # Extract fees and funding from raw exchange data ('info' field)
+        info = data.get('info', {})
+        
+        # Bitget-specific fields (verified from actual API response):
+        # - totalFee: accumulated funding fees received (positive value)
+        # - deductedFee: transaction fees paid (absolute value)
+        
+        # Funding received (accumulated funding fees - positive if received)
+        funding_received = 0.0
+        if 'totalFee' in info and info['totalFee'] is not None:
+            funding_received = abs(float(info['totalFee']))
+        
+        # Transaction fees paid (opening + closing fees)
+        fees_paid = 0.0
+        if 'deductedFee' in info and info['deductedFee'] is not None:
+            fees_paid = abs(float(info['deductedFee']))
+        
+        # Initial capital (position value at entry)
+        initial_capital = notional if notional > 0 else abs(contracts) * entry_price
         
         return Position(
             id=f"bitget_{symbol}_{int(datetime.utcnow().timestamp())}",
@@ -676,7 +717,7 @@ class BitgetExchange(BaseExchange):
             exchange1=self.exchange_name.value,
             exchange1_pos_id=data.get('id'),
             exchange1_side=side.upper() if side else 'LONG',
-            exchange1_entry_price=float(data.get('entryPrice', 0) or 0),
+            exchange1_entry_price=entry_price,
             exchange1_current_price=float(data.get('markPrice', 0) or 0),
             exchange1_leverage=int(data.get('leverage', 1) or 1),
             # For single exchange position
@@ -694,6 +735,9 @@ class BitgetExchange(BaseExchange):
             liquidation_price_ex2=0,
             status='OPEN' if contracts != 0 else 'CLOSED',
             unrealized_pnl=float(data.get('unrealizedPnl', 0) or 0),
+            initial_capital=initial_capital,
+            funding_received=funding_received,
+            fees_paid=fees_paid,
         )
     
     def _parse_order(self, data: Dict[str, Any]) -> Order:
@@ -787,10 +831,12 @@ class BitgetExchange(BaseExchange):
         
         Uses timezone-aware datetime to ensure correct time calculations.
         """
-        from datetime import timezone
+        from datetime import timezone, timedelta
         
         next_funding_ts = int(data.get('nextFundingTime', 0) or 0)
         rate = float(data.get('fundingRate', 0) or 0)
+        
+        now = datetime.now(timezone.utc)
         
         # Convert timestamp to timezone-aware UTC datetime
         # Bitget returns timestamp in milliseconds
@@ -802,8 +848,23 @@ class BitgetExchange(BaseExchange):
             else:
                 # Already in seconds
                 next_funding_time = datetime.fromtimestamp(next_funding_ts, tz=timezone.utc)
+            
+            # If funding time is in the past, calculate next occurrence (8h intervals)
+            while next_funding_time < now:
+                next_funding_time += timedelta(hours=8)
         else:
-            next_funding_time = datetime.now(timezone.utc)
+            # No funding time provided - estimate next 00:00, 08:00, or 16:00 UTC
+            current_hour = now.hour
+            if current_hour < 8:
+                next_hour = 8
+            elif current_hour < 16:
+                next_hour = 16
+            else:
+                next_hour = 0  # Next day
+            
+            next_funding_time = now.replace(hour=next_hour, minute=0, second=0, microsecond=0)
+            if next_hour == 0:
+                next_funding_time += timedelta(days=1)
         
         return FundingRate(
             symbol=data.get('symbol', ''),

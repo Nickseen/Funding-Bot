@@ -661,6 +661,8 @@ class GateExchange(BaseExchange):
         symbol = data.get('symbol', '')
         contracts = float(data.get('contracts', 0) or 0)
         side = data.get('side', '')  # 'long' or 'short'
+        entry_price = float(data.get('entryPrice', 0) or 0)
+        notional = float(data.get('notional', 0) or 0)
         
         # Gate.io: contractSize = how much base currency per 1 contract
         # Get from CCXT data or load from market info
@@ -679,13 +681,28 @@ class GateExchange(BaseExchange):
         
         quantity_base = abs(contracts * contract_size)
         
+        # Extract fees and funding from raw exchange data ('info' field)
+        info = data.get('info', {})
+        
+        # Gate.io-specific fields (from position info)
+        # For exact funding/fees, use get_income_history() separately
+        
+        funding_received = 0.0
+        fees_paid = 0.0
+        
+        # Note: Gate.io position data doesn't separate funding from fees in 'info'
+        # Use get_income_history() for accurate breakdown
+        
+        # Initial capital (position value at entry)
+        initial_capital = notional if notional > 0 else abs(contracts) * entry_price
+        
         return Position(
             id=f"gate_{symbol}_{int(datetime.utcnow().timestamp())}",
             pair=symbol,
             exchange1=self.exchange_name.value,
             exchange1_pos_id=data.get('id', ''),
             exchange1_side=side.upper() if side else 'LONG',
-            exchange1_entry_price=float(data.get('entryPrice', 0) or 0),
+            exchange1_entry_price=entry_price,
             exchange1_current_price=float(data.get('markPrice', 0) or 0),
             exchange1_leverage=int(data.get('leverage', 1) or 1),
             # For single exchange position
@@ -703,6 +720,9 @@ class GateExchange(BaseExchange):
             liquidation_price_ex2=0,
             status='OPEN' if contracts != 0 else 'CLOSED',
             unrealized_pnl=float(data.get('unrealizedPnl', 0) or 0),
+            initial_capital=initial_capital,
+            funding_received=funding_received,
+            fees_paid=fees_paid,
         )
     
     def _parse_order(self, data: Dict[str, Any]) -> Order:
@@ -813,6 +833,96 @@ class GateExchange(BaseExchange):
             next_funding_time=next_funding_time,
             timestamp=datetime.now(timezone.utc)
         )
+    
+    async def _api_get_income_history(
+        self, 
+        symbol: str, 
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 100
+    ) -> Dict[str, float]:
+        """Gate.io: Get income history for funding and fees
+        
+        API: GET /api/v4/futures/{settle}/account_book
+        Docs: https://www.gate.io/docs/developers/apiv4/en/#list-account-book
+        
+        Types:
+        - fund: Funding fee
+        - fee: Trading fee
+        - dnw: Deposit/withdrawal
+        - pnl: Realized PnL
+        
+        Returns:
+            Dict with 'funding_received' and 'fees_paid' keys
+        """
+        try:
+            ccxt_symbol = self._convert_symbol(symbol)
+            
+            # Convert symbol format: BTC/USDT:USDT -> BTC_USDT
+            contract = ccxt_symbol.split('/')[0].replace('/USDT', '') + '_USDT'
+            settle = 'usdt'
+            
+            funding_received = 0.0
+            fees_paid = 0.0
+            
+            # Fetch funding fees (type='fund')
+            try:
+                params = {
+                    'settle': settle,
+                    'contract': contract,
+                    'type': 'fund',
+                    'limit': limit
+                }
+                if start_time:
+                    params['from'] = int(start_time / 1000)  # Gate uses seconds
+                if end_time:
+                    params['to'] = int(end_time / 1000)
+                
+                # Use CCXT's private API access
+                response = await self.client.private_futures_get_futures_settle_account_book(params)
+                
+                if response:
+                    for record in response:
+                        # change: balance change (positive = received, negative = paid)
+                        change = float(record.get('change', 0))
+                        if change > 0:
+                            funding_received += change
+                            
+            except Exception as e:
+                log.warning(f"Gate.io: Failed to fetch funding history: {e}")
+            
+            # Fetch trading fees (type='fee')
+            try:
+                fee_params = {
+                    'settle': settle,
+                    'contract': contract,
+                    'type': 'fee',
+                    'limit': limit
+                }
+                if start_time:
+                    fee_params['from'] = int(start_time / 1000)
+                if end_time:
+                    fee_params['to'] = int(end_time / 1000)
+                
+                fee_response = await self.client.private_futures_get_futures_settle_account_book(fee_params)
+                
+                if fee_response:
+                    for record in fee_response:
+                        # fee change is negative, so take absolute value
+                        change = abs(float(record.get('change', 0)))
+                        fees_paid += change
+                        
+            except Exception as e:
+                log.warning(f"Gate.io: Failed to fetch fee history: {e}")
+            
+            return {
+                'funding_received': funding_received,
+                'fees_paid': fees_paid
+            }
+            
+        except Exception as e:
+            log.error(f"Gate.io: get_income_history failed: {e}")
+            return {'funding_received': 0.0, 'fees_paid': 0.0}
     
     # ============================================
     # WEBSOCKET (to be implemented)

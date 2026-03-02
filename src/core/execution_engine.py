@@ -15,7 +15,13 @@ from datetime import datetime
 
 from ..exchanges.base import BaseExchange
 from ..exchanges.types import Position, PriceData, IntersectionOpportunity
-from ..exchanges.enums import PositionSide, Exchange, ExecutionMode
+from ..exchanges.enums import (
+    PositionSide,
+    Exchange,
+    ExecutionMode,
+    get_maker_fee_bps,
+    get_taker_fee_bps,
+)
 from ..utils.calculations import (
     calculate_spread_bps,
     calculate_net_profit_bps,
@@ -441,6 +447,20 @@ Open position anyway? [Y/n]: """
         # Generate unique pair_id to link both positions
         pair_id = f"pair_{symbol}_{int(asyncio.get_event_loop().time())}_{uuid.uuid4().hex[:8]}"
         
+        # Calculate initial capital and fees (hit-the-bid uses limit orders = maker fees)
+        position_value1 = quantity * price1
+        position_value2 = quantity * price2
+        initial_capital = position_value1 + position_value2
+        
+        # Get exchange enums for fee calculation
+        ex1_enum = Exchange(self.exchange1.get_name())  # "bingx" -> Exchange.BINGX
+        ex2_enum = Exchange(self.exchange2.get_name())  # "bitget" -> Exchange.BITGET
+        
+        # Calculate fees paid (maker fees for limit orders)
+        fee1_bps = get_maker_fee_bps(ex1_enum)
+        fee2_bps = get_maker_fee_bps(ex2_enum)
+        fees_paid = (position_value1 * fee1_bps / 10000) + (position_value2 * fee2_bps / 10000)
+        
         position = Position(
             id=f"pos_{symbol}_{int(asyncio.get_event_loop().time())}",
             pair=symbol,
@@ -463,6 +483,9 @@ Open position anyway? [Y/n]: """
             take_profit_price=tp1,
             liquidation_price_ex1=liq_price1,
             liquidation_price_ex2=liq_price2,
+            initial_capital=initial_capital,
+            fees_paid=fees_paid,
+            funding_received=0.0,
         )
         
         return position
@@ -656,6 +679,20 @@ Open position anyway? [Y/n]: """
         # Generate unique pair_id to link both positions
         pair_id = f"pair_{symbol}_{int(asyncio.get_event_loop().time())}_{uuid.uuid4().hex[:8]}"
         
+        # Calculate initial capital and fees (market mode uses taker fees)
+        position_value1 = quantity * actual_price1
+        position_value2 = quantity * actual_price2
+        initial_capital = position_value1 + position_value2
+        
+        # Get exchange enums for fee calculation
+        ex1_enum = Exchange(self.exchange1.get_name())  # "bingx" -> Exchange.BINGX
+        ex2_enum = Exchange(self.exchange2.get_name())  # "bitget" -> Exchange.BITGET
+        
+        # Calculate fees paid (taker fees for market orders)
+        fee1_bps = get_taker_fee_bps(ex1_enum)
+        fee2_bps = get_taker_fee_bps(ex2_enum)
+        fees_paid = (position_value1 * fee1_bps / 10000) + (position_value2 * fee2_bps / 10000)
+        
         position = Position(
             id=f"pos_market_{symbol}_{int(asyncio.get_event_loop().time())}",
             pair=symbol,
@@ -681,6 +718,9 @@ Open position anyway? [Y/n]: """
             take_profit_price=tp1,
             liquidation_price_ex1=liq_price1,
             liquidation_price_ex2=liq_price2,
+            initial_capital=initial_capital,
+            fees_paid=fees_paid,
+            funding_received=0.0,
         )
         
         return (position, message)
@@ -965,6 +1005,20 @@ Open position? [Y/n]: """
         # Generate unique pair_id to link both positions
         pair_id = f"pair_{symbol}_{int(asyncio.get_event_loop().time())}_{uuid.uuid4().hex[:8]}"
         
+        # Calculate initial capital and fees (stable_spread uses limit orders = maker fees)
+        position_value1 = quantity * avg_price1
+        position_value2 = quantity * avg_price2
+        initial_capital = position_value1 + position_value2
+        
+        # Get exchange enums for fee calculation
+        ex1_enum = Exchange(self.exchange1.get_name())  # "bingx" -> Exchange.BINGX
+        ex2_enum = Exchange(self.exchange2.get_name())  # "bitget" -> Exchange.BITGET
+        
+        # Calculate fees paid (maker fees for limit orders)
+        fee1_bps = get_maker_fee_bps(ex1_enum)
+        fee2_bps = get_maker_fee_bps(ex2_enum)
+        fees_paid = (position_value1 * fee1_bps / 10000) + (position_value2 * fee2_bps / 10000)
+        
         position = Position(
             id=f"pos_stable_{symbol}_{int(asyncio.get_event_loop().time())}",
             pair=symbol,
@@ -990,6 +1044,9 @@ Open position? [Y/n]: """
             take_profit_price=tp1,
             liquidation_price_ex1=liq_price1,
             liquidation_price_ex2=liq_price2,
+            initial_capital=initial_capital,
+            fees_paid=fees_paid,
+            funding_received=0.0,
         )
         
         return (position, message)

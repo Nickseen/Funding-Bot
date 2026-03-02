@@ -32,6 +32,7 @@ from .commands import (
     OpenPositionCommand,
     ViewPositionsCommand,
     ClosePositionCommand,
+    ManageFundingMonitoringCommand,
     SettingsCommand,
     ViewLogsCommand,
     ViewBalancesCommand,
@@ -58,7 +59,8 @@ class CliApp:
     def __init__(
         self,
         exchanges: Dict[str, BaseExchange],
-        config: Optional[Dict[str, Any]] = None
+        config: Optional[Dict[str, Any]] = None,
+        state: Optional[AppState] = None
     ):
         """
         Initialize CLI application with dependencies.
@@ -70,12 +72,13 @@ class CliApp:
                    - default_leverage: int
                    - auto_close_enabled: bool
                    - pnl_threshold: float
+            state: Optional existing AppState with loaded positions
         """
         self.exchanges = exchanges
         self.config = config or {}
         
         # Core components (initialized in start())
-        self.state: Optional[AppState] = None
+        self.state: Optional[AppState] = state
         self.funding_tracker: Optional[FundingTracker] = None
         
         # UI components
@@ -123,9 +126,12 @@ class CliApp:
         """Initialize all components."""
         log.info("Initializing components...")
         
-        # Create AppState
-        self.state = AppState()
-        log.info("AppState initialized")
+        # Create AppState if not provided
+        if self.state is None:
+            self.state = AppState()
+            log.info("AppState initialized")
+        else:
+            log.info("Using existing AppState with loaded positions")
         
         # Connect to exchanges
         for name, exchange in self.exchanges.items():
@@ -166,6 +172,7 @@ class CliApp:
             MenuAction.OPEN_POSITION: self._handle_open_position,
             MenuAction.VIEW_POSITIONS: self._handle_view_positions,
             MenuAction.CLOSE_POSITION: self._handle_close_position,
+            MenuAction.MANAGE_FUNDING: self._handle_manage_funding,
             MenuAction.VIEW_BALANCES: self._handle_view_balances,
             MenuAction.SETTINGS: self._handle_settings,
             MenuAction.VIEW_LOGS: self._handle_view_logs,
@@ -188,7 +195,13 @@ class CliApp:
             positions = await self.state.get_open_positions()
             
             # Calculate totals
-            total_pnl = sum(p.total_pnl for p in positions)
+            total_pnl_usd = sum(p.total_pnl for p in positions)
+            total_initial_capital = sum(p.initial_capital for p in positions)
+            
+            # Calculate PnL percentage
+            total_pnl_pct = 0.0
+            if total_initial_capital > 0:
+                total_pnl_pct = (total_pnl_usd / total_initial_capital) * 100
             
             # Calculate pending funding (rough estimate)
             pending_funding = sum(p.funding_received for p in positions)
@@ -210,7 +223,8 @@ class CliApp:
             
             return {
                 'active_positions': len(positions),
-                'total_pnl': total_pnl,
+                'total_pnl_usd': total_pnl_usd,
+                'total_pnl_pct': total_pnl_pct,
                 'pending_funding': pending_funding,
                 'next_funding': next_funding
             }
@@ -244,6 +258,14 @@ class CliApp:
         command = ClosePositionCommand(
             state=self.state,
             exchanges=self.exchanges
+        )
+        await command.execute()
+    
+    async def _handle_manage_funding(self) -> None:
+        """Handle Manage Funding Monitoring menu action."""
+        command = ManageFundingMonitoringCommand(
+            state=self.state,
+            funding_tracker=self.funding_tracker
         )
         await command.execute()
     
@@ -294,6 +316,16 @@ class CliApp:
         log.info("Shutting down...")
         
         self._running = False
+        
+        # Save positions BEFORE stopping anything
+        if self.state:
+            log.info("💾 Saving positions to disk...")
+            saved = await self.state.save_all_positions()
+            if saved:
+                positions_count = len(await self.state.get_open_positions())
+                log.info(f"✅ Saved {positions_count} position(s)")
+            else:
+                log.warning("⚠️ Failed to save positions")
         
         # Stop funding tracker
         if self.funding_tracker:

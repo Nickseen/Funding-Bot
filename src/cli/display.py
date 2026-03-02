@@ -62,7 +62,8 @@ def _create_separator() -> str:
 
 def render_main_menu(
     active_positions_count: int = 0,
-    total_pnl: float = 0.0,
+    total_pnl_usd: float = 0.0,
+    total_pnl_pct: float = 0.0,
     pending_funding: float = 0.0,
     next_funding_str: str = "N/A"
 ) -> str:
@@ -71,18 +72,20 @@ def render_main_menu(
     
     Args:
         active_positions_count: Number of open positions
-        total_pnl: Total realized + unrealized PnL
+        total_pnl_usd: Total PnL in USD
+        total_pnl_pct: Total PnL as percentage of initial capital
         pending_funding: Expected funding from next payment
         next_funding_str: Time to next funding (formatted)
     
     Returns:
         Formatted menu string
     """
-    pnl_sign = "+" if total_pnl >= 0 else ""
-    pnl_pct = f"{pnl_sign}{total_pnl:.1f}%" if total_pnl != 0 else "0.0%"
+    # Format PnL: $8.43 (+0.17%)
+    pnl_sign = "+" if total_pnl_usd >= 0 else ""
+    pnl_str = f"${total_pnl_usd:.2f} ({pnl_sign}{total_pnl_pct:.2f}%)"
     
     # Status line with positions and PnL
-    status_line = f"Open positions: {active_positions_count} | Total PnL: {pnl_pct}"
+    status_line = f"Open positions: {active_positions_count} | Total PnL: {pnl_str}"
     
     lines = [
         _create_header(),
@@ -92,8 +95,9 @@ def render_main_menu(
         _create_line("1. Open Position"),
         _create_line(f"2. View Open Positions ({active_positions_count})"),
         _create_line("3. Close Position"),
-        _create_line("4. View Balances"),
-        _create_line("5. Exit"),
+        _create_line("4. Manage Funding Monitoring"),
+        _create_line("5. View Balances"),
+        _create_line("6. Exit"),
         _create_footer(),
     ]
     
@@ -263,12 +267,24 @@ def render_pair_info(
     
     if funding_ex1.next_funding_time:
         minutes = funding_ex1.time_to_funding_minutes
+        # Handle negative time (funding already passed)
+        if minutes < 0:
+            # Add 8 hours (480 minutes) to get next funding period
+            minutes += 480
+            if minutes < 0:
+                minutes = 0
         hours = int(minutes // 60)
         mins = int(minutes % 60)
         ex1_time = f"{hours}h {mins}m"
     
     if funding_ex2.next_funding_time:
         minutes = funding_ex2.time_to_funding_minutes
+        # Handle negative time (funding already passed)
+        if minutes < 0:
+            # Add 8 hours (480 minutes) to get next funding period
+            minutes += 480
+            if minutes < 0:
+                minutes = 0
         hours = int(minutes // 60)
         mins = int(minutes % 60)
         ex2_time = f"{hours}h {mins}m"

@@ -435,17 +435,89 @@ class ViewPositionsCommand:
             await self._show_position_detail(position)
     
     async def _update_position_prices(self, position: Position) -> None:
-        """Update position with current prices and calculate unrealized PnL"""
+        """Update position with current prices, PnL, funding, and fees from exchanges"""
         ex1 = self.exchanges.get(position.exchange1.lower())
         ex2 = self.exchanges.get(position.exchange2.lower())
         
+        # Try to get full position data from exchanges (includes funding & fees)
+        ex1_position = None
+        ex2_position = None
+        
+        # Accumulated values from both exchanges
+        ex1_funding = 0.0
+        ex1_fees = 0.0
+        ex2_funding = 0.0
+        ex2_fees = 0.0
+        
         if ex1:
-            price1 = await ex1.get_price_data(position.pair)
-            position.exchange1_current_price = price1.mid_price
+            try:
+                ex1_position = await ex1.get_position_by_symbol(position.pair)
+                if ex1_position:
+                    position.exchange1_current_price = ex1_position.exchange1_current_price
+                    # Exchange returns accumulated values, not incremental
+                    ex1_funding = ex1_position.funding_received
+                    ex1_fees = ex1_position.fees_paid
+                    
+                    # If position data doesn't have funding/fees, fetch from income history
+                    if ex1_funding == 0.0 and ex1_fees == 0.0:
+                        try:
+                            income = await ex1.get_income_history(
+                                symbol=position.pair,
+                                start_time=int(position.entry_time * 1000),  # Convert to ms
+                                limit=1000
+                            )
+                            ex1_funding = income.get('funding_received', 0.0)
+                            ex1_fees = income.get('fees_paid', 0.0)
+                        except Exception as e:
+                            pass  # Silent fallback - use 0.0
+                else:
+                    # Fallback to just price if position not found
+                    price1 = await ex1.get_price_data(position.pair)
+                    position.exchange1_current_price = price1.mid_price
+            except Exception as e:
+                # Silent fallback - just update price
+                try:
+                    price1 = await ex1.get_price_data(position.pair)
+                    position.exchange1_current_price = price1.mid_price
+                except:
+                    pass
         
         if ex2:
-            price2 = await ex2.get_price_data(position.pair)
-            position.exchange2_current_price = price2.mid_price
+            try:
+                ex2_position = await ex2.get_position_by_symbol(position.pair)
+                if ex2_position:
+                    position.exchange2_current_price = ex2_position.exchange1_current_price
+                    # Exchange returns accumulated values, not incremental
+                    ex2_funding = ex2_position.funding_received
+                    ex2_fees = ex2_position.fees_paid
+                    
+                    # If position data doesn't have funding/fees, fetch from income history
+                    if ex2_funding == 0.0 and ex2_fees == 0.0:
+                        try:
+                            income = await ex2.get_income_history(
+                                symbol=position.pair,
+                                start_time=int(position.entry_time * 1000),  # Convert to ms
+                                limit=1000
+                            )
+                            ex2_funding = income.get('funding_received', 0.0)
+                            ex2_fees = income.get('fees_paid', 0.0)
+                        except Exception as e:
+                            pass  # Silent fallback - use 0.0
+                else:
+                    # Fallback to just price if position not found
+                    price2 = await ex2.get_price_data(position.pair)
+                    position.exchange2_current_price = price2.mid_price
+            except Exception as e:
+                # Silent fallback - just update price
+                try:
+                    price2 = await ex2.get_price_data(position.pair)
+                    position.exchange2_current_price = price2.mid_price
+                except:
+                    pass
+        
+        # Sum accumulated values from both exchanges
+        position.funding_received = ex1_funding + ex2_funding
+        position.fees_paid = ex1_fees + ex2_fees
         
         # Calculate unrealized PnL based on current prices
         # LONG: profit when price goes up, loss when down
@@ -871,3 +943,102 @@ class ViewBalancesCommand:
         ))
         
         await wait_for_keypress()
+
+
+class ManageFundingMonitoringCommand:
+    """
+    Command handler for managing funding monitoring on positions.
+    
+    Allows user to enable/disable FundingTracker monitoring for each position.
+    """
+    
+    def __init__(self, state: AppState, funding_tracker):
+        self.state = state
+        self.funding_tracker = funding_tracker
+    
+    async def execute(self) -> None:
+        """Execute manage funding monitoring flow."""
+        clear_screen()
+        print("╔══════════════════════════════════════════════════════════╗")
+        print("║ MANAGE FUNDING MONITORING                                ║")
+        print("╠══════════════════════════════════════════════════════════╣")
+        
+        # Get open positions
+        positions = await self.state.get_open_positions()
+        
+        if not positions:
+            print("║ No open positions                                        ║")
+            print("╚══════════════════════════════════════════════════════════╝")
+            await wait_for_keypress()
+            return
+        
+        # Display positions with monitoring status
+        print("║  #  Pair        Monitoring   Size     Age                ║")
+        print("╠══════════════════════════════════════════════════════════╣")
+        
+        for i, pos in enumerate(positions, 1):
+            status_icon = "✅" if pos.funding_monitoring_enabled else "❌"
+            age_hours = (datetime.now().timestamp() - pos.entry_time) / 3600
+            
+            print(f"║  {i}. {pos.pair:10s}  {status_icon}       ${pos.initial_capital:6.0f}   {age_hours:4.1f}h            ║")
+        
+        print("╠══════════════════════════════════════════════════════════╣")
+        print("║ Select position [1-N] or [0] to go back:                 ║")
+        print("╚══════════════════════════════════════════════════════════╝")
+        
+        choice = await async_input("Select position: ")
+        
+        if choice == "0" or choice is None:
+            return
+        
+        try:
+            idx = int(choice) - 1
+            if idx < 0 or idx >= len(positions):
+                print(render_error("Invalid position number"))
+                await wait_for_keypress()
+                return
+            
+            position = positions[idx]
+            
+            # Toggle monitoring
+            if position.funding_monitoring_enabled:
+                # Disable monitoring
+                await self.funding_tracker.disable_monitoring(position.id)
+                clear_screen()
+                print("╔══════════════════════════════════════════════════════════╗")
+                print("║ MONITORING DISABLED                                      ║")
+                print("╠══════════════════════════════════════════════════════════╣")
+                print(f"║ Position: {position.id:45s} ║")
+                print(f"║ Pair: {position.pair:50s} ║")
+                print("║                                                          ║")
+                print("║ ✅ Funding monitoring DISABLED                            ║")
+                print("║                                                          ║")
+                print("║ Position will NOT be auto-closed if funding becomes     ║")
+                print("║ unprofitable.                                            ║")
+                print("╚══════════════════════════════════════════════════════════╝")
+            else:
+                # Enable monitoring
+                await self.funding_tracker.enable_monitoring(position.id)
+                clear_screen()
+                print("╔══════════════════════════════════════════════════════════╗")
+                print("║ MONITORING ENABLED                                       ║")
+                print("╠══════════════════════════════════════════════════════════╣")
+                print(f"║ Position: {position.id:45s} ║")
+                print(f"║ Pair: {position.pair:50s} ║")
+                print("║                                                          ║")
+                print("║ ✅ Funding monitoring ENABLED                             ║")
+                print("║                                                          ║")
+                print("║ FundingTracker will now monitor this position and       ║")
+                print("║ auto-close if funding spread becomes negative:          ║")
+                print("║   • < -3 bps  → Smart PnL Close                          ║")
+                print("║   • < -20 bps → Market Close (urgent!)                   ║")
+                print("╚══════════════════════════════════════════════════════════╝")
+            
+            await wait_for_keypress()
+            
+        except ValueError:
+            print(render_error("Invalid input"))
+            await wait_for_keypress()
+        except Exception as e:
+            print(render_error(f"Error: {e}"))
+            await wait_for_keypress()

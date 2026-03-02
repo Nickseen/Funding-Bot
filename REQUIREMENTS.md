@@ -146,9 +146,19 @@ Position #1: JUP LIGHTER-ASTER
 ### Проблема
 Позиция открыта на ночь → пройдет через 2-4 funding payment. Если к следующему фандингу спред изменится и позиция потеряет выгодность?
 
-### Решение - FundingTracker ✅ IMPLEMENTED
+### Решение - FundingTracker ✅ IMPLEMENTED & UPDATED (v3.0 - 25 Feb 2026)
 
-**Модуль:** `src/monitors/funding_tracker.py` (431 lines)
+**Модуль:** `src/monitors/funding_tracker.py` (520+ lines)
+
+> 🆕 **НОВАЯ ЛОГИКА v3.0:** Мониторит **funding spread** вместо PnL. Мониторинг **по умолчанию выключен** - пользователь выбирает какие позиции мониторить.
+
+**Ключевые изменения v3.0:**
+- ✅ Проверка **funding spread** (разница funding rates между биржами)
+- ✅ Два порога автозакрытия:
+  - **-3 bps** (< -0.03%) → Smart PnL Close
+  - **-20 bps** (< -0.2%) → Market Close (срочно!)
+- ✅ **Выборочный мониторинг:** `position.funding_monitoring_enabled = True/False`
+- ✅ Методы управления: `enable_monitoring()`, `disable_monitoring()`, `list_monitored_positions()`
 
 **Интервалы фандинга по биржам:**
 
@@ -168,57 +178,91 @@ Position #1: JUP LIGHTER-ASTER
 
 > ⚠️ **Важно:** Бот получает `next_funding_time` **напрямую из API биржи**, а не вычисляет самостоятельно. Это гарантирует точность независимо от интервала.
 
-**Новая улучшенная логика (3 января 2026):**
+**Новая логика v3.0 (25 февраля 2026):**
 
 1. **Smart Monitoring:**
    - **Passive mode**: Sleep до 55-й минуты (no API calls)
    - **Active mode**: Проверка каждые 40 сек когда ≤5 минут до funding
+   - **Фильтрация**: Проверяет ТОЛЬКО позиции с `funding_monitoring_enabled=True`
 
-2. **Критерии автозакрытия (оба условия!):**
-   - ✅ Spread отрицательный (< 0 bps)
-   - ✅ PnL < +1% (AUTO_CLOSE_PNL_THRESHOLD_PCT = 1.0)
+2. **Критерии автозакрытия (funding spread):**
+   - ✅ Spread >= 0 bps → НЕ ЗАКРЫВАТЬ (получаем funding)
+   - ⚠️ -3 bps <= Spread < 0 → НЕ ЗАКРЫВАТЬ (допустимые потери)
+   - 📉 Spread < -3 bps → **Smart PnL Close** (минимизировать потери)
+   - 🔴 Spread < -20 bps → **Market Close** (критично!)
 
 ```python
-# Smart monitoring algorithm
+# v3.0 monitoring algorithm
 async def _monitor_loop():
     while self.running:
-        for position in open_positions:
+        positions = await state.get_positions_by_status(PositionStatus.OPEN)
+        
+        # Фильтруем только позиции с включенным мониторингом!
+        monitored_positions = [
+            p for p in positions 
+            if p.funding_monitoring_enabled
+        ]
+        
+        if not monitored_positions:
+            await asyncio.sleep(60)  # Нет мониторимых позиций
+            continue
+        
+        for position in monitored_positions:
             time_to_funding = await self._get_time_to_funding(position)
             
             if time_to_funding > 300:  # > 5 минут
-                # Passive mode: sleep до 55-й минуты
+                # Passive mode
                 sleep_duration = time_to_funding - 300
                 await asyncio.sleep(sleep_duration)
                 continue
             
             # Active mode: ≤ 5 минут до funding
-            current_spread = await self._calculate_spread(position)
-            current_pnl_pct = await self._get_pnl_percentage(position)
+            # Проверяем funding spread
+            funding1 = await exchange1.get_funding_rate(position.pair)
+            funding2 = await exchange2.get_funding_rate(position.pair)
             
-            # Автозакрытие только если ОБА условия:
-            if current_spread < 0 and current_pnl_pct < 1.0:
-                logger.warning(
-                    f"🔴 Auto-close: spread={current_spread:.2f} bps, "
-                    f"PnL={current_pnl_pct:.2f}% (threshold: 1%)"
-                )
-                await self._auto_close_position(position)
+            funding_spread_bps = (funding1.rate - funding2.rate) * 10000
+            if position.exchange1_side == "SHORT":
+                funding_spread_bps = -funding_spread_bps
+            
+            # Автозакрытие по порогам
+            if funding_spread_bps < -20.0:
+                # КРИТИЧНО! Market close
+                await self._auto_close_position(position, close_mode="market")
+            elif funding_spread_bps < -3.0:
+                # ПРЕДУПРЕЖДЕНИЕ! Smart PnL close
+                await self._auto_close_position(position, close_mode="smart_pnl")
             
             await asyncio.sleep(40)  # Check every 40 seconds
 ```
 
-**Правила автозакрытия:**
-- ✅ Spread > 0 OR PnL > +1% → **НЕ ТРОГАТЬ** (позиция выгодна)
-- 🔴 Spread < 0 AND PnL < +1% → **ЗАКРЫТЬ АВТОМАТИЧЕСКИ**
+**Правила автозакрытия v3.0:**
+- ✅ Funding spread >= 0 → **НЕ ТРОГАТЬ** (получаем funding)
+- ⚠️ -3 bps <= spread < 0 → **НЕ ТРОГАТЬ** (допустимые потери)
+- 📉 spread < -3 bps → **Smart PnL Close** (минимизировать потери)
+- 🔴 spread < -20 bps → **Market Close** (критические потери!)
 
-**Преимущества:**
-- 🎯 Оптимизация API calls: passive mode до 55-й минуты
-- 📊 PnL threshold защищает profitable позиции
-- 🔄 Интеграция с PositionCloser (правильный режим: hit_the_bid или stable_spread)
-- ⚡ Умное определение режима закрытия по Position.execution_mode
+**Преимущества v3.0:**
+- 🎯 **Точность:** funding spread напрямую показывает выгодность следующего funding
+- 📊 **Гибкость:** два порога (smart_pnl vs market)
+- 🔄 **Контроль:** пользователь выбирает какие позиции мониторить
+- ⚡ **Эффективность:** меньше API calls (только monitored positions)
 
-**Тесты:** Covered in unit tests
+**Управление мониторингом:**
+```python
+# Включить мониторинг для позиции
+await funding_tracker.enable_monitoring("pos_001")
 
-> ⚠️ **Логика:** Spread < 0 означает потери на следующем funding. Но если PnL уже > +1%, сохраняем позицию (накопленный профит покрывает risk).
+# Выключить мониторинг
+await funding_tracker.disable_monitoring("pos_001")
+
+# Список мониторимых позиций
+monitored = await funding_tracker.list_monitored_positions()
+```
+
+**Тесты:** Unit tests + integration tests ([see docs/FUNDING_TRACKER_V3.md](docs/FUNDING_TRACKER_V3.md))
+
+> 📘 **Полная документация:** См. [FUNDING_TRACKER_V3.md](docs/FUNDING_TRACKER_V3.md) для деталей и примеров использования.
 
 ### Извлечение Funding Rate
 
@@ -436,24 +480,23 @@ async def _trigger_emergency_close(position: Position):
 **Проблема:** Неправильное форматирование CLI и отображение баланса в демо-режиме BingX.  
 **Решение:** Исправлено форматирование и логика отображения баланса.
 
-### 14. ✅ MEXC Exchange Adapter (2 Feb 2026)
-**Добавлен:** Полноценный адаптер для MEXC Futures (USDT-margined perpetual swaps).  
-**Особенности:**
-- 33 обязательных метода (connection, market data, trading, account, parsers)
-- Template Method Pattern (бизнес-логика в BaseExchange)
-- Timezone-aware datetime во всех парсерах
-- Конвертация quantity → contracts (MEXC использует контракты: 1 контракт = 0.0001 BTC)
-- Специфичные параметры setLeverage (openType, positionType для LONG/SHORT)
-- Taker: 4.0 bps, Maker: 1.0 bps
+### 14. ✅ Negative Funding Time Display for BingX/Bitget (24 Feb 2026)
+**Проблема:** Время до следующего funding показывало "-1h 59m" для BingX и Bitget пар.  
+**Причина:** API возвращает устаревший `nextFundingTime` из прошлого периода, не обновив на следующий.  
+**Решение:**
+- `bingx.py`: добавлен цикл `while next_funding_time < now: next_funding_time += timedelta(hours=8)` в `_parse_funding_rate()`
+- `display.py`: добавлена обработка отрицательного `time_to_funding_minutes` с добавлением 8h интервалов как fallback
 
-**Файлы:**
-- `src/exchanges/mexc.py` (870 строк)
-- `tests/unit/exchange/test_mexc_exchange.py`
-- `config/config.py` (MEXC_API_KEY, MEXC_SECRET_KEY)
+### 15. ✅ Bitget SL/TP AttributeError (24 Feb 2026)
+**Проблема:** Установка SL/TP на Bitget падала с ошибкой `AttributeError: 'bitget' object has no attribute 'private_mix_post_plan_placetpsl'`.  
+**Причина:** Использование несуществующего low-level CCXT метода вместо unified API.  
+**Решение:** Заменено на CCXT unified методы `create_stop_loss_order()` и `create_take_profit_order()` с параметром `holdSide`.
 
-**Ограничения:**
-- ⚠️ MEXC не имеет Demo API (только web-интерфейс)
-- Тестирование на реальном счёте с минимальными суммами ($10-20 USDT)
+### 16. ✅ Bitget Position Close Error 40774 (24 Feb 2026)
+**Проблема:** Закрытие позиций на Bitget (Market, Smart PnL, Stable Spread) завершалось ошибкой `40774: "The order type for unilateral position must also be the unilateral position type"`.  
+**Причина:** `create_order()` с параметрами `holdSide`, `reduceOnly`, `oneWayMode` вызывал конфликт с режимом аккаунта (unilateral vs hedge mode). CCXT Bitget игнорирует переданные params и подставляет свои — независимо от комбинации параметров ошибка 40774 воспроизводилась.  
+**Решение:** Заменён весь `create_order()` подход на CCXT native метод `close_position()`, который вызывает Bitget Flash Close API (`POST /api/v2/mix/order/close-positions`). Этот endpoint работает для обоих режимов (unilateral и hedge) без дополнительных параметров.  
+**Файл:** `src/exchanges/bitget.py` → `_api_close_position()`
 
 **Статус тестирования:**  
 ✅ Все баги исправлены и протестированы на production (Bybit + OKX)  
@@ -461,6 +504,7 @@ async def _trigger_emergency_close(position: Position):
 ✅ MEXC API connection, market data, balance - протестировано
 ✅ 52/52 unit tests passing  
 ✅ Позиции успешно открываются, отслеживаются и закрываются
+✅ Bitget: Market close и Smart PnL close протестированы и работают (24 Feb 2026)
 
 ---
 
@@ -1194,12 +1238,12 @@ async def funding_monitoring_loop():
   - [x] Demo mode with VST (Virtual Standard Token)
 - [x] Bitget adapter (full CCXT integration - 14 Jan 2026)
   - [x] Market/Limit orders (tested on demo)
-  - [x] Stop Loss / Take Profit (tested on demo - fixed with tradeSide='close')
-  - [x] Position management (one-way mode)
+  - [x] Stop Loss / Take Profit (fixed: unified CCXT `create_stop_loss_order`/`create_take_profit_order` with `holdSide`)
+  - [x] Position management (unilateral mode)
   - [x] Leverage control
   - [x] Balance queries
   - [x] Demo mode (sandbox=True, 10,000 USDT)
-  - [x] Critical fix: SL/TP requires tradeSide='close' for one-way position mode
+  - [x] Critical fix (24 Feb 2026): Close position uses `close_position()` Flash Close endpoint — fixes error 40774 for all close modes (Market, Smart PnL, Stable Spread, Hit-the-bid)
 - [x] Unit testing validation
 - [x] Gate.io testnet testing (all order types verified)
 - [x] BingX demo testing (all order types verified)
@@ -1286,15 +1330,15 @@ async def funding_monitoring_loop():
   - Funding rate queries
   - Demo mode (VST - Virtual Standard Token)
   - Протестировано на demo (100k VST)
-- **Bitget** - полная CCXT интеграция (14 Jan 2026)
-  - Market/Limit orders (oneWayMode: True)
-  - Stop Loss / Take Profit (tradeSide: 'close' for one-way mode)
-  - Position management (one-way position mode)
+- **Bitget** - полная CCXT интеграция (14 Jan 2026, обновлено 24 Feb 2026)
+  - Market/Limit orders
+  - Stop Loss / Take Profit (unified CCXT методы с `holdSide`)
+  - Position management (unilateral mode)
   - Leverage control
   - Funding rate queries
   - Demo mode (sandbox=True, 10,000 USDT)
   - Протестировано на demo
-  - **Критическое исправление:** SL/TP требует `tradeSide='close'` для one-way mode
+  - **Критическое исправление (24 Feb 2026):** Закрытие позиций через `close_position()` Flash Close API — устраняет ошибку 40774 для всех режимов закрытия
 - **Lighter** - полная CCXT интеграция (18 Jan 2026)
   - Market/Limit orders
   - Stop Loss / Take Profit
@@ -1341,10 +1385,30 @@ async def funding_monitoring_loop():
 
 ---
 
-**Дата обновления:** 2 февраля 2026  
-**Статус:** Phase 1-4 завершены ✅ | Production ready 🚀 | MEXC интегрирован
+**Дата обновления:** 24 февраля 2026  
+**Статус:** Phase 1-4 завершены ✅ | Production ready 🚀
 
 ## 📝 Подробный changelog (после 6c57a131cb21d9021c4f079849debb7dd70af0b4)
+
+### 2026-02-24
+- **fix**: Negative funding time display for BingX/Bitget pairs
+  - BingX `_parse_funding_rate()`: цикл добавления 8h пока `next_funding_time` в прошлом
+  - `display.py`: fallback обработка отрицательного `time_to_funding_minutes`
+  - Файлы: `src/exchanges/bingx.py`, `src/cli/display.py`
+- **fix**: Bitget SL/TP AttributeError
+  - Заменены несуществующие low-level методы на unified CCXT `create_stop_loss_order()` / `create_take_profit_order()`
+  - Параметр `holdSide` для корректного указания стороны хедж-позиции
+  - Файл: `src/exchanges/bitget.py` → `_api_set_stop_loss()`, `_api_set_take_profit()`
+- **fix**: Bitget position close error 40774 (все режимы закрытия)
+  - Причина: `create_order()` с `holdSide`/`reduceOnly`/`oneWayMode` несовместим с unilateral mode
+  - Решение: `_api_close_position()` теперь всегда использует `client.close_position()` — Flash Close API (`POST /api/v2/mix/order/close-positions`)
+  - Работает для unilateral и hedge mode без дополнительных параметров
+  - Протестировано: Market close ✅, Smart PnL close ✅
+  - Файл: `src/exchanges/bitget.py` → `_api_close_position()`
+- **fix**: Position persistence across restarts
+  - `cli/app.py`: `save_positions()` вызывается в `_shutdown()` до остановки компонент
+  - `core/persistence.py`: `normalize_symbol()` для корректного сравнения форматов (BTCUSDT vs BTC/USDT:USDT)
+  - `main.py` → `cli/app.py`: передача существующего `AppState` вместо создания нового
 
 ### 2026-01-27
 - **339faf3**: Merge pull request #12 from Nickseen/dev-Nicola
@@ -1450,5 +1514,145 @@ async def funding_monitoring_loop():
 - Position Verification (проверка открытия обеих сторон)
 - Улучшения CLI (side selection, funding times, UI)
 - Новые комиссии для бирж (bingx, bitget, gate, lighter)
+
+---
+
+## 🆕 Текущее состояние проекта (февраль 2026)
+
+### 26 февраля 2026 - UI и Exchange Data Integration
+
+#### 1. PnL Display Format (commits: 78cf00d, 9003236)
+**Проблема:** PnL отображался только в процентах: `Total PnL: +8.4%`
+
+**Решение:**
+- Изменен формат на: `Total PnL: $8.43 (+0.17%)`
+- Файлы: `src/cli/app.py`, `src/cli/display.py`, `src/cli/menus.py`
+- Расчет: `total_pnl_pct = (total_pnl_usd / total_initial_capital) * 100`
+
+**Также исправлено:**
+- Баг дублирования key "4" в action_map (меню открывало неправильный пункт)
+
+#### 2. Funding & Fees Integration (commits: f61b235, 7056c51)
+**Проблема:** `fees_paid` и `funding_received` показывали $0.00 несмотря на открытую позицию
+
+**Причина:** Данные не извлекались из биржевых API ответов
+
+**Решение:**
+Извлечение из CCXT `position['info']` field (raw exchange response):
+
+**Bitget API:**
+```python
+info['totalFee']      # Accumulated funding received (положительное = профит)
+info['deductedFee']   # Transaction fees paid (комиссии за открытие/поддержание)
+
+# Пример из реальной позиции:
+# totalFee = 0.19647438 USDT (funding received)
+# deductedFee = 1.49921652 USDT (transaction fees)
+```
+
+**BingX API:**
+```python
+info['realisedProfit']  # Combined: realized PnL + funding + fees
+
+# ⚠️ Проблема: BingX не предоставляет отдельные поля!
+# realisedProfit = -1.0759 (все вместе: PnL + funding + fees)
+# Для точности нужен отдельный вызов income history API
+```
+
+**Файлы изменены:**
+- `src/exchanges/bitget.py` - `_parse_position()` извлекает totalFee/deductedFee
+- `src/exchanges/bingx.py` - использует realisedProfit как approximation
+- `src/cli/commands.py` - `_update_position_prices()` суммирует от обеих бирж
+- `src/core/execution_engine.py` - инициализирует поля при создании позиции
+
+**Важно:**
+```python
+# ✅ ПРАВИЛЬНО: Биржи возвращают НАКОПЛЕННЫЕ значения
+position.funding_received = ex1_funding + ex2_funding
+position.fees_paid = ex1_fees + ex2_fees
+
+# ❌ НЕПРАВИЛЬНО: += приведет к накоплению при каждом refresh!
+position.funding_received += ex1_funding  # NO!
+```
+
+#### 3. Position Structure Updates
+**Добавлены поля в Position dataclass:**
+- `initial_capital: float` - начальный капитал (2 × position_value)
+- `funding_received: float` - накопленный полученный фандинг
+- `fees_paid: float` - оплаченные комиссии
+
+**Расчет при открытии (3 режима):**
+```python
+# hit_the_bid / stable_spread: maker fees
+fees_paid = 2 × position_value × (maker_fee_ex1 + maker_fee_ex2)
+
+# market: taker fees
+fees_paid = 2 × position_value × (taker_fee_ex1 + taker_fee_ex2)
+
+# funding начинается с 0.0, накапливается с биржи
+```
+
+#### 4. ✅ Income History API Implementation (26 февраля 2026)
+
+**Задача:** Получить точные funding и fees для всех бирж ✅ COMPLETED
+
+**Реализация:**
+
+Добавлен базовый метод `get_income_history()` в `BaseExchange`:
+```python
+async def get_income_history(
+    symbol: str,
+    start_time: Optional[int] = None,  # Timestamp ms
+    end_time: Optional[int] = None,    # Timestamp ms
+    limit: int = 100
+) -> Dict[str, float]:
+    # Returns: {'funding_received': float, 'fees_paid': float}
+```
+
+**Реализовано для всех бирж:**
+
+**BingX:**
+- Endpoint: `GET /openApi/swap/v2/user/income`
+- Два вызова: `incomeType='FUNDING_FEE'` и `'COMMISSION'`
+- Funding: positive income = received
+- Fees: abs(commission income)
+
+**Bybit:**
+- Endpoint: `GET /v5/account/transaction-log`
+- Фильтр: `type='FUNDING_FEE'` для funding, `type='TRADE'` для fees
+- Использует `cashFlow` для расчета (positive = received)
+
+**OKX:**
+- Endpoints: 
+  - `GET /api/v5/account/bills-history` (type='8' для funding)
+  - `GET /api/v5/trade/fills-history` (для trading fees)
+- Funding: `balChg` positive = received
+- Fees: sum of `fee` from fills
+
+**Gate.io:**
+- Endpoint: `GET /api/v4/futures/{settle}/account_book`
+- Два вызова: `type='fund'` и `type='fee'`
+- Funding: `change` positive = received
+- Fees: abs(change) from fee records
+
+**Bitget:**
+- Использует прямое извлечение из `info` field в position data
+- `totalFee`: accumulated funding received
+- `deductedFee`: transaction fees paid
+- Уже работает точно без income history API
+
+**CLI Integration:**
+
+Обновлен `src/cli/commands.py` → `_update_position_prices()`:
+- Проверяет если `funding_received == 0.0` и `fees_paid == 0.0`
+- Автоматически вызывает `get_income_history()` с `start_time=position.entry_time`
+- Суммирует данные от обеих бирж
+- Обновляет позицию с точными накопленными значениями
+
+**Результат:**
+- ✅ Все биржи теперь показывают точный funding и fees
+- ✅ Данные обновляются при каждом refresh позиции
+- ✅ CLI отображает: `Funding: $X.XX | Fees: $Y.YY`
+- ✅ Total PnL корректно учитывает funding и fees
 
 ---

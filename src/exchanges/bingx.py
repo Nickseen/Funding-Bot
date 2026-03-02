@@ -674,6 +674,29 @@ class BingXExchange(BaseExchange):
         symbol = data.get('symbol', '')
         contracts = float(data.get('contracts', 0) or 0)
         side = data.get('side', '')  # 'long' or 'short'
+        entry_price = float(data.get('entryPrice', 0) or 0)
+        notional = float(data.get('notional', 0) or 0)  # Position value in USDT
+        
+        # Extract fees and funding from raw exchange data ('info' field)
+        info = data.get('info', {})
+        
+        # BingX now extracts exact funding and fees from income history API
+        # This is done via get_income_history() which should be called separately
+        # For immediate parsing, we'll use approximation from realisedProfit
+        # The CLI will update with exact values by calling get_income_history()
+        
+        funding_received = 0.0
+        fees_paid = 0.0
+        
+        # Check for realized profit (combined value - approximate)
+        if 'realisedProfit' in info and info['realisedProfit'] is not None:
+            realised = float(info['realisedProfit'])
+            # If negative, it's likely fees > funding (approximate)
+            if realised < 0:
+                fees_paid = abs(realised)
+        
+        # Initial capital (position value at entry)
+        initial_capital = notional if notional > 0 else abs(contracts) * entry_price
         
         return Position(
             id=f"bingx_{symbol}_{int(datetime.utcnow().timestamp())}",
@@ -681,7 +704,7 @@ class BingXExchange(BaseExchange):
             exchange1=self.exchange_name.value,
             exchange1_pos_id=data.get('id', ''),
             exchange1_side=side.upper() if side else 'LONG',
-            exchange1_entry_price=float(data.get('entryPrice', 0) or 0),
+            exchange1_entry_price=entry_price,
             exchange1_current_price=float(data.get('markPrice', 0) or 0),
             exchange1_leverage=int(data.get('leverage', 1) or 1),
             exchange2='',
@@ -698,6 +721,9 @@ class BingXExchange(BaseExchange):
             liquidation_price_ex2=0,
             status='OPEN' if contracts != 0 else 'CLOSED',
             unrealized_pnl=float(data.get('unrealizedPnl', 0) or 0),
+            initial_capital=initial_capital,
+            funding_received=funding_received,
+            fees_paid=fees_paid,
         )
     
     def _parse_order(self, data: Dict[str, Any]) -> Order:
@@ -775,10 +801,12 @@ class BingXExchange(BaseExchange):
     
     def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
         """Convert BingX funding data to FundingRate"""
-        from datetime import timezone
+        from datetime import timezone, timedelta
         
         next_funding_ts = int(data.get('nextFundingTime', 0) or 0)
         rate = float(data.get('fundingRate', 0) or 0)
+        
+        now = datetime.now(timezone.utc)
         
         # Check if timestamp is in seconds or milliseconds
         if next_funding_ts:
@@ -788,8 +816,23 @@ class BingXExchange(BaseExchange):
             else:
                 # Already in seconds
                 next_funding_time = datetime.fromtimestamp(next_funding_ts, tz=timezone.utc)
+            
+            # If funding time is in the past, calculate next occurrence (8h intervals)
+            while next_funding_time < now:
+                next_funding_time += timedelta(hours=8)
         else:
-            next_funding_time = datetime.now(timezone.utc)
+            # No funding time provided - estimate next 00:00, 08:00, or 16:00 UTC
+            current_hour = now.hour
+            if current_hour < 8:
+                next_hour = 8
+            elif current_hour < 16:
+                next_hour = 16
+            else:
+                next_hour = 0  # Next day
+            
+            next_funding_time = now.replace(hour=next_hour, minute=0, second=0, microsecond=0)
+            if next_hour == 0:
+                next_funding_time += timedelta(days=1)
         
         return FundingRate(
             symbol=data.get('symbol', ''),
@@ -799,6 +842,86 @@ class BingXExchange(BaseExchange):
             next_funding_time=next_funding_time,
             timestamp=datetime.now(timezone.utc)
         )
+    
+    async def _api_get_income_history(
+        self, 
+        symbol: str, 
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 100
+    ) -> Dict[str, float]:
+        """BingX: Get income history for funding and fees
+        
+        API: GET /openApi/swap/v2/user/income
+        Docs: https://bingx-api.github.io/docs/#/en-us/swapV2/account-api
+        
+        Returns:
+            Dict with 'funding_received' and 'fees_paid' keys
+        """
+        try:
+            # Convert symbol format: BTCUSDT -> BTC-USDT
+            bingx_symbol = symbol.replace('/', '-').replace(':USDT', '')
+            if 'USDT' in bingx_symbol and '-' not in bingx_symbol:
+                # BTCUSDT -> BTC-USDT
+                bingx_symbol = bingx_symbol.replace('USDT', '-USDT')
+            
+            funding_received = 0.0
+            fees_paid = 0.0
+            
+            # Fetch funding fees (FUNDING_FEE type)
+            # Positive = received, Negative = paid
+            try:
+                funding_params = {
+                    'symbol': bingx_symbol,
+                    'incomeType': 'FUNDING_FEE',
+                    'limit': limit
+                }
+                if start_time:
+                    funding_params['startTime'] = start_time
+                if end_time:
+                    funding_params['endTime'] = end_time
+                
+                funding_response = await self.client.swap_v2_private_get_user_income(funding_params)
+                
+                if funding_response and 'data' in funding_response:
+                    for record in funding_response['data'].get('data', []):
+                        income = float(record.get('income', 0))
+                        # Positive income = funding received, negative = paid
+                        if income > 0:
+                            funding_received += income
+                        # Note: negative funding is paid out, but we track received separately
+            except Exception as e:
+                log.warning(f"BingX: Failed to fetch funding history: {e}")
+            
+            # Fetch commission fees (COMMISSION type)
+            try:
+                commission_params = {
+                    'symbol': bingx_symbol,
+                    'incomeType': 'COMMISSION',
+                    'limit': limit
+                }
+                if start_time:
+                    commission_params['startTime'] = start_time
+                if end_time:
+                    commission_params['endTime'] = end_time
+                
+                commission_response = await self.client.swap_v2_private_get_user_income(commission_params)
+                
+                if commission_response and 'data' in commission_response:
+                    for record in commission_response['data'].get('data', []):
+                        commission = abs(float(record.get('income', 0)))
+                        fees_paid += commission
+            except Exception as e:
+                log.warning(f"BingX: Failed to fetch commission history: {e}")
+            
+            return {
+                'funding_received': funding_received,
+                'fees_paid': fees_paid
+            }
+            
+        except Exception as e:
+            log.error(f"BingX: get_income_history failed: {e}")
+            return {'funding_received': 0.0, 'fees_paid': 0.0}
     
     # ============================================
     # WEBSOCKET (to be implemented)

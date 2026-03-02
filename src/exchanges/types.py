@@ -138,6 +138,9 @@ class Position:
     # Metadata
     notes: str = ""  # Optional notes
     
+    # Funding monitoring (по умолчанию выключен)
+    funding_monitoring_enabled: bool = False  # Включить мониторинг funding spread для автозакрытия
+    
     @property
     def total_pnl(self) -> float:
         """Calculate total PnL including funding and fees"""
