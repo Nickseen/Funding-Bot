@@ -346,6 +346,29 @@ class OpenPositionCommand:
                 # Add to state
                 await self.state.add_position(position)
                 
+                # Fetch actual fees/funding from exchanges (wait for API to register)
+                print(render_info("Fetching actual fees from exchanges..."))
+                await asyncio.sleep(2)  # Wait for exchanges to register fees
+                
+                try:
+                    # Get start time in milliseconds
+                    start_time = int(position.entry_time * 1000)
+                    
+                    # Fetch income history from both exchanges
+                    income1 = await long_exchange.get_income_history(symbol, start_time)
+                    income2 = await short_exchange.get_income_history(symbol, start_time)
+                    
+                    # Update position with actual values
+                    position.fees_paid = income1['fees_paid'] + income2['fees_paid']
+                    position.funding_received = income1['funding_received'] + income2['funding_received']
+                    
+                    # Update position in state
+                    await self.state.update_position(position)
+                    
+                    print(render_success(f"✓ Fees updated: ${position.fees_paid:.4f}"))
+                except Exception as e:
+                    print(render_warning(f"Could not fetch fees: {e}. Will update on next refresh."))
+                
                 print(render_success(f"Position opened: {position.id}"))
                 print(message)
                 await wait_for_keypress()
