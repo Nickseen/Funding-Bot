@@ -21,6 +21,8 @@ class PriceData:
     @property
     def spread(self) -> float:
         """Calculate spread in bps (basis points)"""
+        if self.bid <= 0:
+            return 0.0
         return ((self.ask - self.bid) / self.bid) * 10000
     
     @property
