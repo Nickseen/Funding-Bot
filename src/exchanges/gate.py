@@ -451,7 +451,7 @@ class GateExchange(BaseExchange):
                 raise ExchangeError(f"No position found for {symbol}")
             
             # Get contracts count (Gate uses contracts, not base currency amount)
-            contracts = abs(float(position.get('contracts', 0)))
+            contracts = int(abs(float(position.get('contracts', 0))))  # Gate requires int64
             pos_side = position.get('side', '')  # 'long' or 'short'
             
             # For SL: if LONG, sell when price falls; if SHORT, buy when price rises
@@ -519,7 +519,7 @@ class GateExchange(BaseExchange):
                 raise ExchangeError(f"No position found for {symbol}")
             
             # Get contracts count (Gate uses contracts, not base currency amount)
-            contracts = abs(float(position.get('contracts', 0)))
+            contracts = int(abs(float(position.get('contracts', 0))))  # Gate requires int64
             pos_side = position.get('side', '')  # 'long' or 'short'
             
             # For TP: if LONG, sell when price rises; if SHORT, buy when price falls
