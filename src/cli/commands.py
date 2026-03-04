@@ -289,6 +289,16 @@ class OpenPositionCommand:
             price_long = await long_exchange.get_price_data(symbol)
             price_short = await short_exchange.get_price_data(symbol)
             min_price = min(price_long.mid_price, price_short.mid_price)
+
+            # Fallback to mark price if bid/ask unavailable (some futures tickers return None)
+            if min_price <= 0:
+                mark_long = await long_exchange.get_mark_price(symbol)
+                mark_short = await short_exchange.get_mark_price(symbol)
+                min_price = min(mark_long, mark_short)
+
+            if min_price <= 0:
+                raise ValueError(f"Cannot determine valid price for {symbol}. Check exchange connectivity.")
+
             quantity = position_size / min_price
             
             # Create ExecutionEngine
