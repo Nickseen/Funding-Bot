@@ -461,19 +461,23 @@ class GateExchange(BaseExchange):
             settle = 'usdt'
             contract = ccxt_symbol.split('/')[0].replace('/USDT', '') + '_USDT'
             
+            # Round trigger price to tick size (Gate rejects non-multiples)
+            rounded_price = self.client.price_to_precision(ccxt_symbol, stop_price)
+
             # Use Gate.io native API for price trigger orders (auto orders)
             # This creates proper stop-loss orders visible in the UI
-            response = await self.client.privateFuturesPostFuturesSettlePriceOrders({
+            response = await self.client.privateFuturesPostSettlePriceOrders({
                 'settle': settle,
                 'initial': {
                     'contract': contract,
-                    'size': -contracts if order_side == 'sell' else contracts,  # Negative for sell
+                    'size': -contracts if order_side == 'sell' else contracts,  # Negative for sell, int64
                     'price': '0',  # Market order when triggered
+                    'tif': 'ioc',  # Required for market orders (price=0)
                 },
                 'trigger': {
                     'strategy_type': 0,  # 0 = by price
                     'price_type': 0,  # 0 = last price
-                    'price': str(stop_price),
+                    'price': str(rounded_price),
                     'rule': 2 if order_side == 'sell' else 1,  # 1 = >= (for buy), 2 = <= (for sell)
                 },
             })
@@ -529,19 +533,23 @@ class GateExchange(BaseExchange):
             settle = 'usdt'
             contract = ccxt_symbol.split('/')[0].replace('/USDT', '') + '_USDT'
             
+            # Round trigger price to tick size (Gate rejects non-multiples)
+            rounded_price = self.client.price_to_precision(ccxt_symbol, take_profit_price)
+
             # Use Gate.io native API for price trigger orders (auto orders)
             # This creates proper take-profit orders visible in the UI
-            response = await self.client.privateFuturesPostFuturesSettlePriceOrders({
+            response = await self.client.privateFuturesPostSettlePriceOrders({
                 'settle': settle,
                 'initial': {
                     'contract': contract,
-                    'size': -contracts if order_side == 'sell' else contracts,  # Negative for sell
+                    'size': -contracts if order_side == 'sell' else contracts,  # Negative for sell, int64
                     'price': '0',  # Market order when triggered
+                    'tif': 'ioc',  # Required for market orders (price=0)
                 },
                 'trigger': {
                     'strategy_type': 0,  # 0 = by price
                     'price_type': 0,  # 0 = last price
-                    'price': str(take_profit_price),
+                    'price': str(rounded_price),
                     'rule': 1 if order_side == 'sell' else 2,  # 1 = >= (for sell TP), 2 = <= (for buy TP)
                 },
             })
