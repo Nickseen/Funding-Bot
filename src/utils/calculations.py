@@ -576,6 +576,10 @@ def calculate_unrealized_pnl_from_orderbooks(
         close_price_ex1 = close_price_ex1[0]
     if isinstance(close_price_ex2, tuple):
         close_price_ex2 = close_price_ex2[0]
+
+    # Guard against None (empty orderbook)
+    if close_price_ex1 is None or close_price_ex2 is None:
+        return 0.0
     
     return calculate_unrealized_pnl(
         entry_price_ex1=position.exchange1_entry_price,
@@ -611,12 +615,12 @@ def can_instant_fill(
         best_ask = orderbook.best_ask
         if isinstance(best_ask, tuple):
             best_ask = best_ask[0]
-        return price >= best_ask
+        return best_ask is not None and price >= best_ask
     else:  # SELL
         best_bid = orderbook.best_bid
         if isinstance(best_bid, tuple):
             best_bid = best_bid[0]
-        return price <= best_bid
+        return best_bid is not None and price <= best_bid
 
 
 def get_close_prices_and_sides(
@@ -655,5 +659,11 @@ def get_close_prices_and_sides(
         close_price_ex1 = close_price_ex1[0]
     if isinstance(close_price_ex2, tuple):
         close_price_ex2 = close_price_ex2[0]
+
+    # Guard against None — use entry prices as fallback so caller can still proceed
+    if close_price_ex1 is None:
+        close_price_ex1 = orderbook1.best_bid or orderbook1.best_ask
+    if close_price_ex2 is None:
+        close_price_ex2 = orderbook2.best_ask or orderbook2.best_bid
     
     return (close_price_ex1, close_price_ex2, close_side_ex1, close_side_ex2)
