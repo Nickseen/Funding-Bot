@@ -15,6 +15,7 @@ OKX Testnet:
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 import ccxt.async_support as ccxt
+from loguru import logger as log
 
 from .base import BaseExchange, ExchangeError, RateLimitError, NetworkError
 from .enums import Exchange, PositionSide, OrderSide, OrderType
@@ -183,10 +184,14 @@ class OKXExchange(BaseExchange):
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             ticker = await self.client.fetch_ticker(ccxt_symbol)
+            # For futures tickers bid/ask may be None — fall back to last traded price
+            last_price = ticker.get('last') or 0
+            bid = ticker.get('bid') or last_price
+            ask = ticker.get('ask') or last_price
             return {
                 'symbol': symbol,
-                'bid': ticker['bid'],
-                'ask': ticker['ask'],
+                'bid': bid,
+                'ask': ask,
                 'bid_qty': ticker.get('bidVolume', 0),
                 'ask_qty': ticker.get('askVolume', 0),
                 'timestamp': ticker['timestamp']
@@ -838,13 +843,7 @@ class OKXExchange(BaseExchange):
     ) -> Dict[str, float]:
         """OKX: Get income history for funding and fees
         
-        API: GET /api/v5/account/bills-history
-        Docs: https://www.okx.com/docs-v5/en/#trading-account-rest-api-get-bills-details-last-3-months
-        
-        Bill types:
-        - 8: Funding fee
-        - 2: Transfer
-        - Multiple types for trading fees
+        Uses standard CCXT methods: fetchMyTrades for fees
         
         Returns:
             Dict with 'funding_received' and 'fees_paid' keys
@@ -852,65 +851,42 @@ class OKXExchange(BaseExchange):
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # Convert CCXT symbol to OKX instId format
-            # BTC/USDT:USDT -> BTC-USDT-SWAP
-            inst_id = ccxt_symbol.replace('/', '-').replace(':USDT', '-SWAP')
-            
             funding_received = 0.0
             fees_paid = 0.0
             
-            # Fetch funding fees (type=8)
+            # Fetch trades to calculate fees
             try:
-                params = {
-                    'instType': 'SWAP',
-                    'instId': inst_id,
-                    'type': '8',  # Funding fee
-                    'limit': str(limit)
-                }
+                params = {}
                 if start_time:
-                    params['begin'] = str(start_time)
-                if end_time:
-                    params['end'] = str(end_time)
+                    params['since'] = start_time
+                if limit:
+                    params['limit'] = limit
                 
-                # Use CCXT's private API access
-                response = await self.client.private_get_account_bills_history(params)
+                # Use standard CCXT method
+                trades = await self.client.fetch_my_trades(ccxt_symbol, params.get('since'), params.get('limit'))
                 
-                if response and 'data' in response:
-                    for record in response['data']:
-                        # balChg: balance change (positive = received, negative = paid)
-                        bal_change = float(record.get('balChg', 0))
-                        if bal_change > 0:
-                            funding_received += bal_change
+                if trades:
+                    for trade in trades:
+                        # CCXT normalizes fee structure
+                        if 'fee' in trade and trade['fee']:
+                            fee_cost = float(trade['fee'].get('cost', 0))
+                            if fee_cost > 0:
+                                fees_paid += fee_cost
+                        
+                        # Check for funding in trade info (some exchanges include it)
+                        if 'info' in trade:
+                            info = trade['info']
+                            if isinstance(info, dict):
+                                # OKX might have funding in trade info
+                                funding = float(info.get('fundingFee', 0))
+                                if funding != 0:
+                                    if funding > 0:
+                                        funding_received += funding
+                                    else:
+                                        fees_paid += abs(funding)
                             
             except Exception as e:
-                log.warning(f"OKX: Failed to fetch funding fee history: {e}")
-            
-            # Fetch trading fees
-            # OKX combines fees in the 'fee' field of trades
-            # We'll fetch fills/trades to calculate total fees
-            try:
-                # Get recent fills for accurate fee tracking
-                fills_params = {
-                    'instType': 'SWAP',
-                    'instId': inst_id,
-                    'limit': str(limit)
-                }
-                if start_time:
-                    fills_params['begin'] = str(start_time)
-                if end_time:
-                    fills_params['end'] = str(end_time)
-                
-                fills_response = await self.client.private_get_trade_fills_history(fills_params)
-                
-                if fills_response and 'data' in fills_response:
-                    for fill in fills_response['data']:
-                        # fee: trading fee (negative value)
-                        fee = abs(float(fill.get('fee', 0)))
-                        if fee > 0:
-                            fees_paid += fee
-                            
-            except Exception as e:
-                log.warning(f"OKX: Failed to fetch trading fee history: {e}")
+                log.warning(f"OKX: Failed to fetch trade history: {e}")
             
             return {
                 'funding_received': funding_received,
