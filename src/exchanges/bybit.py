@@ -140,10 +140,12 @@ class BybitExchange(BaseExchange):
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             ticker = await self.client.fetch_ticker(ccxt_symbol)
+            # For futures tickers bid/ask may be None — fall back to last traded price
+            last_price = ticker.get('last') or 0
             return {
                 'symbol': symbol,
-                'bid': ticker['bid'],
-                'ask': ticker['ask'],
+                'bid': ticker.get('bid') or last_price,
+                'ask': ticker.get('ask') or last_price,
                 'bid_qty': ticker.get('bidVolume', 0),
                 'ask_qty': ticker.get('askVolume', 0),
                 'timestamp': ticker['timestamp']
