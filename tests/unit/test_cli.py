@@ -104,7 +104,8 @@ class TestDisplayRendering:
         
         result = render_main_menu(
             active_positions_count=3,
-            total_pnl=1234.56,
+            total_pnl_usd=1234.56,
+            total_pnl_pct=0.25,
             pending_funding=89.00,
             next_funding_str="2h 15m"
         )
