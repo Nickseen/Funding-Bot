@@ -831,7 +831,7 @@ Open position anyway? [Y/n]: """
 ║ ✅ Spread gain on exit: +{entry_spread_bps:.2f} bps (if stable)
 ║ 
 ║ Net per 8h funding: {funding_rate_bps * 8:.2f} bps
-║ Break-even time: {(entry_spread_bps + total_fees_bps) / funding_rate_bps:.1f} hours
+║ Break-even time: {'N/A' if funding_rate_bps == 0 else f'{(entry_spread_bps + total_fees_bps) / funding_rate_bps:.1f} hours'}
 ╠══════════════════════════════════════════════════════════
 ║ 🔒 This position can ONLY be closed with:
 ║    "Close with Stable Spread" option (preserves spread)

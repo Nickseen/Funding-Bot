@@ -165,10 +165,12 @@ class BingXExchange(BaseExchange):
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             ticker = await self.client.fetch_ticker(ccxt_symbol)
+            # For futures tickers bid/ask may be None — fall back to last traded price
+            last_price = ticker.get('last') or 0
             return {
                 'symbol': symbol,
-                'bid': ticker.get('bid') or 0,
-                'ask': ticker.get('ask') or 0,
+                'bid': ticker.get('bid') or last_price,
+                'ask': ticker.get('ask') or last_price,
                 'bid_qty': ticker.get('bidVolume') or 0,
                 'ask_qty': ticker.get('askVolume') or 0,
                 'timestamp': ticker.get('timestamp') or int(datetime.utcnow().timestamp() * 1000)

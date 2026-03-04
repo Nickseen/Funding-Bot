@@ -15,7 +15,8 @@ from datetime import datetime, timezone, timedelta
 
 from src.monitors.funding_tracker import (
     FundingTracker,
-    AUTO_CLOSE_PNL_THRESHOLD_PCT,
+    FUNDING_SPREAD_SMART_PNL_THRESHOLD,
+    FUNDING_SPREAD_MARKET_THRESHOLD,
     DEFAULT_ACTIVE_CHECK_INTERVAL,
     DEFAULT_PASSIVE_THRESHOLD
 )
@@ -113,6 +114,8 @@ def mock_position_closer():
     closer.close_hit_the_bid.return_value = True
     closer.close_stable_spread.return_value = True
     closer.close_flash.return_value = True
+    closer.close_smart_pnl.return_value = True
+    closer.close_market.return_value = True
     return closer
 
 
@@ -205,10 +208,10 @@ async def test_should_auto_close_negative_spread_low_pnl(
 ):
     """
     Test auto-close when:
-    - Spread is NEGATIVE (-10 bps)
-    - PnL is LOW (0.5% < 1% threshold)
+    - Funding spread is NEGATIVE (-10 bps)
+      Ex1 rate = 1 bps, Ex2 rate = 11 bps → spread = 1 - 11 = -10 bps
     
-    Expected: Should AUTO-CLOSE
+    Expected: Should AUTO-CLOSE with mode 'smart_pnl'
     """
     tracker = FundingTracker(
         state=mock_state,
@@ -217,35 +220,22 @@ async def test_should_auto_close_negative_spread_low_pnl(
         test_mode=True
     )
     
-    # Setup: PnL = 0.5% (low)
-    mock_exchange.get_balance.return_value = Balance(
-        exchange="mock",
-        total=1005.0,  # +5 on 1000 initial = +0.5%
-        available=1005.0,
-        margin_used=0.0,
-        unrealized_pnl=0.0,
-        timestamp=datetime.now(timezone.utc).timestamp()
-    )
-    
-    # Setup: Negative spread (-10 bps)
-    # For SHORT on ex1: close with BUY at ask(ex1)
-    # For LONG on ex2: close with SELL at bid(ex2)
-    # Negative spread = ask(ex1) > bid(ex2)
-    mock_exchange.get_orderbook.side_effect = [
-        OrderBook(  # Ex1
+    # Setup: -10 bps spread (ex1 rate lower than ex2)
+    mock_exchange.get_funding_rate.side_effect = [
+        FundingRate(
             exchange="ex1",
             symbol="BTCUSDT",
-            bids=[[50000.0, 1.0]],
-            asks=[[50100.0, 1.0]],  # Ask high
-            timestamp=datetime.now(timezone.utc).timestamp()
+            rate=0.0001,
+            rate_bps=1.0,
+            next_funding_time=datetime.now(timezone.utc) + timedelta(hours=1)
         ),
-        OrderBook(  # Ex2
+        FundingRate(
             exchange="ex2",
             symbol="BTCUSDT",
-            bids=[[50000.0, 1.0]],  # Bid low
-            asks=[[50100.0, 1.0]],
-            timestamp=datetime.now(timezone.utc).timestamp()
-        )
+            rate=0.0011,
+            rate_bps=11.0,  # Higher → we pay more LONG
+            next_funding_time=datetime.now(timezone.utc) + timedelta(hours=1)
+        ),
     ]
     
     should_close = await tracker._should_auto_close(
@@ -254,19 +244,21 @@ async def test_should_auto_close_negative_spread_low_pnl(
         mock_exchange
     )
     
-    assert should_close is True
+    # -10 bps < -3 bps threshold → smart_pnl close
+    assert should_close == "smart_pnl"
 
 
 @pytest.mark.asyncio
-async def test_should_not_auto_close_positive_pnl(
+async def test_should_not_auto_close_mild_negative_spread(
     mock_state, mock_exchange, mock_position
 ):
     """
     Test NO auto-close when:
-    - Spread is NEGATIVE
-    - But PnL is HIGH (1.5% >= 1% threshold)
+    - Funding spread is mildly negative (-1 bps)
+      Ex1 rate = 1 bps, Ex2 rate = 2 bps → spread = 1 - 2 = -1 bps
+    - -1 bps is above the -3 bps smart_pnl threshold
     
-    Expected: Should NOT auto-close (let user decide)
+    Expected: Should NOT auto-close (spread within acceptable range)
     """
     tracker = FundingTracker(
         state=mock_state,
@@ -275,32 +267,22 @@ async def test_should_not_auto_close_positive_pnl(
         test_mode=True
     )
     
-    # Setup: PnL = 1.5% (high, above threshold)
-    mock_exchange.get_balance.return_value = Balance(
-        exchange="mock",
-        total=1015.0,  # +15 on 1000 initial = +1.5%
-        available=1015.0,
-        margin_used=0.0,
-        unrealized_pnl=0.0,
-        timestamp=datetime.now(timezone.utc).timestamp()
-    )
-    
-    # Negative spread (doesn't matter, PnL overrides)
-    mock_exchange.get_orderbook.side_effect = [
-        OrderBook(
+    # Setup: -1 bps spread (above -3 bps threshold)
+    mock_exchange.get_funding_rate.side_effect = [
+        FundingRate(
             exchange="ex1",
             symbol="BTCUSDT",
-            bids=[[50000.0, 1.0]],
-            asks=[[50100.0, 1.0]],
-            timestamp=datetime.now(timezone.utc).timestamp()
+            rate=0.0001,
+            rate_bps=1.0,
+            next_funding_time=datetime.now(timezone.utc) + timedelta(hours=1)
         ),
-        OrderBook(
+        FundingRate(
             exchange="ex2",
             symbol="BTCUSDT",
-            bids=[[50000.0, 1.0]],
-            asks=[[50100.0, 1.0]],
-            timestamp=datetime.now(timezone.utc).timestamp()
-        )
+            rate=0.0002,
+            rate_bps=2.0,
+            next_funding_time=datetime.now(timezone.utc) + timedelta(hours=1)
+        ),
     ]
     
     should_close = await tracker._should_auto_close(
@@ -309,7 +291,8 @@ async def test_should_not_auto_close_positive_pnl(
         mock_exchange
     )
     
-    assert should_close is False
+    # -1 bps > -3 bps threshold → no auto-close
+    assert should_close is None
 
 
 @pytest.mark.asyncio
@@ -318,10 +301,10 @@ async def test_should_not_auto_close_positive_spread(
 ):
     """
     Test NO auto-close when:
-    - Spread is POSITIVE (+20 bps)
-    - PnL is low (0.5%)
+    - Funding spread is POSITIVE (+4 bps)
+      Ex1 rate = 5 bps, Ex2 rate = 1 bps → spread = 5 - 1 = +4 bps
     
-    Expected: Should NOT auto-close (position still profitable)
+    Expected: Should NOT auto-close (position is profitable)
     """
     tracker = FundingTracker(
         state=mock_state,
@@ -330,35 +313,22 @@ async def test_should_not_auto_close_positive_spread(
         test_mode=True
     )
     
-    # Setup: PnL = 0.5% (low)
-    mock_exchange.get_balance.return_value = Balance(
-        exchange="mock",
-        total=1005.0,
-        available=1005.0,
-        margin_used=0.0,
-        unrealized_pnl=0.0,
-        timestamp=datetime.now(timezone.utc).timestamp()
-    )
-    
-    # Setup: Positive spread (+20 bps)
-    # For SHORT on ex1: close at ask(ex1) = 50000
-    # For LONG on ex2: close at bid(ex2) = 50100
-    # Positive spread = ask(ex1) < bid(ex2)
-    mock_exchange.get_orderbook.side_effect = [
-        OrderBook(  # Ex1
+    # Setup: +4 bps spread (positive = profitable)
+    mock_exchange.get_funding_rate.side_effect = [
+        FundingRate(
             exchange="ex1",
             symbol="BTCUSDT",
-            bids=[[49900.0, 1.0]],
-            asks=[[50000.0, 1.0]],  # Ask low
-            timestamp=datetime.now(timezone.utc).timestamp()
+            rate=0.0005,
+            rate_bps=5.0,
+            next_funding_time=datetime.now(timezone.utc) + timedelta(hours=1)
         ),
-        OrderBook(  # Ex2
+        FundingRate(
             exchange="ex2",
             symbol="BTCUSDT",
-            bids=[[50100.0, 1.0]],  # Bid high
-            asks=[[50200.0, 1.0]],
-            timestamp=datetime.now(timezone.utc).timestamp()
-        )
+            rate=0.0001,
+            rate_bps=1.0,
+            next_funding_time=datetime.now(timezone.utc) + timedelta(hours=1)
+        ),
     ]
     
     should_close = await tracker._should_auto_close(
@@ -367,7 +337,8 @@ async def test_should_not_auto_close_positive_spread(
         mock_exchange
     )
     
-    assert should_close is False
+    # +4 bps > 0 → position is earning → no auto-close
+    assert should_close is None
 
 
 # ============================================
@@ -378,7 +349,7 @@ async def test_should_not_auto_close_positive_spread(
 async def test_auto_close_with_position_closer(
     mock_state, mock_exchange, mock_position, mock_position_closer
 ):
-    """Test auto-close using PositionCloser"""
+    """Test auto-close using PositionCloser with smart_pnl mode (default)"""
     tracker = FundingTracker(
         state=mock_state,
         position_closer=mock_position_closer,
@@ -392,18 +363,19 @@ async def test_auto_close_with_position_closer(
     await tracker._auto_close_position(
         mock_position,
         mock_exchange,
-        mock_exchange
+        mock_exchange,
+        close_mode="smart_pnl"
     )
     
-    # Verify PositionCloser was called with correct mode
-    mock_position_closer.close_hit_the_bid.assert_called_once_with(mock_position)
+    # v3.0: FundingTracker calls close_smart_pnl (not close_hit_the_bid)
+    mock_position_closer.close_smart_pnl.assert_called_once_with(mock_position)
 
 
 @pytest.mark.asyncio
-async def test_auto_close_stable_spread_mode(
+async def test_auto_close_market_mode(
     mock_state, mock_exchange, mock_position, mock_position_closer
 ):
-    """Test auto-close with stable_spread mode"""
+    """Test auto-close with market mode (critical spread threshold)"""
     tracker = FundingTracker(
         state=mock_state,
         position_closer=mock_position_closer,
@@ -417,10 +389,12 @@ async def test_auto_close_stable_spread_mode(
     await tracker._auto_close_position(
         mock_position,
         mock_exchange,
-        mock_exchange
+        mock_exchange,
+        close_mode="market"
     )
     
-    mock_position_closer.close_stable_spread.assert_called_once_with(mock_position)
+    # v3.0: market mode triggers close_market
+    mock_position_closer.close_market.assert_called_once_with(mock_position)
 
 
 # ============================================
@@ -450,25 +424,8 @@ async def test_test_mode_forces_active_mode(
         next_funding_time=datetime.now(timezone.utc) + timedelta(hours=8)  # 8 hours away
     )
     
+    mock_position.funding_monitoring_enabled = True  # Required for monitoring
     mock_state.get_positions_by_status.return_value = [mock_position]
-    
-    # Setup mocks for profitability check
-    mock_exchange.get_balance.return_value = Balance(
-        exchange="mock",
-        total=1010.0,  # +1%
-        available=1010.0,
-        margin_used=0.0,
-        unrealized_pnl=0.0,
-        timestamp=datetime.now(timezone.utc).timestamp()
-    )
-    
-    mock_exchange.get_orderbook.return_value = OrderBook(
-        exchange="mock",
-        symbol="BTCUSDT",
-        bids=[[50000.0, 1.0]],
-        asks=[[50100.0, 1.0]],
-        timestamp=datetime.now(timezone.utc).timestamp()
-    )
     
     # Start monitoring with timeout
     await tracker.start_monitoring()
@@ -476,8 +433,8 @@ async def test_test_mode_forces_active_mode(
     # Wait for at least one check cycle
     await asyncio.sleep(2)
     
-    # Verify profitability was checked (balance was queried)
-    assert mock_exchange.get_balance.call_count >= 1
+    # v3.0: profitability is checked via get_funding_rate (not get_balance)
+    assert mock_exchange.get_funding_rate.call_count >= 1
     
     await tracker.stop_monitoring()
 
@@ -568,45 +525,42 @@ async def test_full_monitor_cycle_with_auto_close(
         test_mode=True  # Force active mode
     )
     
-    # Setup position
+    # Setup position with monitoring enabled
+    mock_position.funding_monitoring_enabled = True
     mock_state.get_positions_by_status.return_value = [mock_position]
     
-    # Setup funding time (1 minute away = active mode)
-    mock_exchange.get_funding_rate.return_value = FundingRate(
-        exchange="mock",
-        symbol="BTCUSDT",
-        rate=0.0001,
-        rate_bps=1.0,
-        next_funding_time=datetime.now(timezone.utc) + timedelta(minutes=1)
+    # Setup funding time (1 minute away = triggers active mode check)
+    # AND negative spread (-10 bps): ex1=1 bps, ex2=11 bps → spread = -10 bps
+    #
+    # Call order per cycle (1 position):
+    #   call 1: min_time loop → time check for ex1
+    #   call 2: active loop  → time check for ex1 again
+    #   call 3: _should_auto_close → ex1 funding rate  (we want LOW: 1 bps)
+    #   call 4: _should_auto_close → ex2 funding rate  (we want HIGH: 11 bps)
+    near_funding = datetime.now(timezone.utc) + timedelta(minutes=1)
+    rate_low = FundingRate(
+        exchange="ex1", symbol="BTCUSDT", rate=0.0001, rate_bps=1.0,
+        next_funding_time=near_funding
     )
-    
-    # Setup low PnL (0.5%)
-    mock_exchange.get_balance.return_value = Balance(
-        exchange="mock",
-        total=1005.0,
-        available=1005.0,
-        margin_used=0.0,
-        unrealized_pnl=0.0,
-        timestamp=datetime.now(timezone.utc).timestamp()
+    rate_high = FundingRate(
+        exchange="ex2", symbol="BTCUSDT", rate=0.0011, rate_bps=11.0,
+        next_funding_time=near_funding
     )
-    
-    # Setup negative spread
-    mock_exchange.get_orderbook.side_effect = lambda symbol: OrderBook(
-        exchange="mock",
-        symbol=symbol,
-        bids=[[50000.0, 1.0]],
-        asks=[[50100.0, 1.0]],
-        timestamp=datetime.now(timezone.utc).timestamp()
-    )
+    # Repeat pattern for several cycles
+    mock_exchange.get_funding_rate.side_effect = [
+        rate_low, rate_low, rate_low, rate_high,   # cycle 1
+        rate_low, rate_low, rate_low, rate_high,   # cycle 2
+        rate_low, rate_low, rate_low, rate_high,   # cycle 3
+    ]
     
     # Start monitoring
     await tracker.start_monitoring()
     
     # Wait for check cycle
-    await asyncio.sleep(2)
+    await asyncio.sleep(3)
     
-    # Verify auto-close was triggered
-    assert mock_position_closer.close_hit_the_bid.called
+    # v3.0: auto-close triggers close_smart_pnl (not close_hit_the_bid)
+    assert mock_position_closer.close_smart_pnl.called
     
     await tracker.stop_monitoring()
 

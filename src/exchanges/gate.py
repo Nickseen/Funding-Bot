@@ -16,6 +16,7 @@ Gate.io Testnet:
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 import ccxt.async_support as ccxt
+from loguru import logger as log
 
 from .base import BaseExchange, ExchangeError, RateLimitError, NetworkError
 from .enums import Exchange, PositionSide, OrderSide, OrderType
@@ -462,7 +463,7 @@ class GateExchange(BaseExchange):
             
             # Use Gate.io native API for price trigger orders (auto orders)
             # This creates proper stop-loss orders visible in the UI
-            response = await self.client.private_futures_post_futures_settle_price_orders({
+            response = await self.client.privateFuturesPostFuturesSettlePriceOrders({
                 'settle': settle,
                 'initial': {
                     'contract': contract,
@@ -530,7 +531,7 @@ class GateExchange(BaseExchange):
             
             # Use Gate.io native API for price trigger orders (auto orders)
             # This creates proper take-profit orders visible in the UI
-            response = await self.client.private_futures_post_futures_settle_price_orders({
+            response = await self.client.privateFuturesPostFuturesSettlePriceOrders({
                 'settle': settle,
                 'initial': {
                     'contract': contract,
@@ -843,14 +844,7 @@ class GateExchange(BaseExchange):
     ) -> Dict[str, float]:
         """Gate.io: Get income history for funding and fees
         
-        API: GET /api/v4/futures/{settle}/account_book
-        Docs: https://www.gate.io/docs/developers/apiv4/en/#list-account-book
-        
-        Types:
-        - fund: Funding fee
-        - fee: Trading fee
-        - dnw: Deposit/withdrawal
-        - pnl: Realized PnL
+        Uses standard CCXT methods: fetchMyTrades for fees
         
         Returns:
             Dict with 'funding_received' and 'fees_paid' keys
@@ -858,62 +852,42 @@ class GateExchange(BaseExchange):
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # Convert symbol format: BTC/USDT:USDT -> BTC_USDT
-            contract = ccxt_symbol.split('/')[0].replace('/USDT', '') + '_USDT'
-            settle = 'usdt'
-            
             funding_received = 0.0
             fees_paid = 0.0
             
-            # Fetch funding fees (type='fund')
+            # Fetch trades to calculate fees
             try:
-                params = {
-                    'settle': settle,
-                    'contract': contract,
-                    'type': 'fund',
-                    'limit': limit
-                }
+                params = {}
                 if start_time:
-                    params['from'] = int(start_time / 1000)  # Gate uses seconds
-                if end_time:
-                    params['to'] = int(end_time / 1000)
+                    params['since'] = start_time
+                if limit:
+                    params['limit'] = limit
                 
-                # Use CCXT's private API access
-                response = await self.client.private_futures_get_futures_settle_account_book(params)
+                # Use standard CCXT method
+                trades = await self.client.fetch_my_trades(ccxt_symbol, params.get('since'), params.get('limit'))
                 
-                if response:
-                    for record in response:
-                        # change: balance change (positive = received, negative = paid)
-                        change = float(record.get('change', 0))
-                        if change > 0:
-                            funding_received += change
+                if trades:
+                    for trade in trades:
+                        # CCXT normalizes fee structure
+                        if 'fee' in trade and trade['fee']:
+                            fee_cost = float(trade['fee'].get('cost', 0))
+                            if fee_cost > 0:
+                                fees_paid += fee_cost
+                        
+                        # Check for funding in trade info
+                        if 'info' in trade:
+                            info = trade['info']
+                            if isinstance(info, dict):
+                                # Gate might have funding info
+                                funding = float(info.get('funding', 0))
+                                if funding != 0:
+                                    if funding > 0:
+                                        funding_received += funding
+                                    else:
+                                        fees_paid += abs(funding)
                             
             except Exception as e:
-                log.warning(f"Gate.io: Failed to fetch funding history: {e}")
-            
-            # Fetch trading fees (type='fee')
-            try:
-                fee_params = {
-                    'settle': settle,
-                    'contract': contract,
-                    'type': 'fee',
-                    'limit': limit
-                }
-                if start_time:
-                    fee_params['from'] = int(start_time / 1000)
-                if end_time:
-                    fee_params['to'] = int(end_time / 1000)
-                
-                fee_response = await self.client.private_futures_get_futures_settle_account_book(fee_params)
-                
-                if fee_response:
-                    for record in fee_response:
-                        # fee change is negative, so take absolute value
-                        change = abs(float(record.get('change', 0)))
-                        fees_paid += change
-                        
-            except Exception as e:
-                log.warning(f"Gate.io: Failed to fetch fee history: {e}")
+                log.warning(f"Gate.io: Failed to fetch trade history: {e}")
             
             return {
                 'funding_received': funding_received,
