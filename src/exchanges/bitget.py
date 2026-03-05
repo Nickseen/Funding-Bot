@@ -700,13 +700,13 @@ class BitgetExchange(BaseExchange):
         
         # Funding received (accumulated funding fees - positive if received)
         funding_received = 0.0
-        if 'totalFee' in info and info['totalFee'] is not None:
-            funding_received = abs(float(info['totalFee']))
-        
+        if info.get('totalFee') not in (None, '', '0', 0):
+            funding_received = abs(float(info['totalFee'] or 0))
+
         # Transaction fees paid (opening + closing fees)
         fees_paid = 0.0
-        if 'deductedFee' in info and info['deductedFee'] is not None:
-            fees_paid = abs(float(info['deductedFee']))
+        if info.get('deductedFee') not in (None, '', '0', 0):
+            fees_paid = abs(float(info['deductedFee'] or 0))
         
         # Initial capital (position value at entry)
         initial_capital = notional if notional > 0 else abs(contracts) * entry_price
