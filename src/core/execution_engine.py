@@ -523,7 +523,24 @@ Open position anyway? [Y/n]: """
         # 1. Получить текущие цены
         ob1 = await self.exchange1.get_orderbook(symbol)
         ob2 = await self.exchange2.get_orderbook(symbol)
-        
+
+        # Fallback: if orderbook is empty (e.g. sandbox/VST mode), use ticker prices
+        SYNTHETIC_QTY = 1e9
+        if not ob1.asks or not ob1.bids:
+            pd1 = await self.exchange1.get_price_data(symbol)
+            ask1 = pd1.ask if pd1.ask > 0 else pd1.bid
+            bid1 = pd1.bid if pd1.bid > 0 else pd1.ask
+            log.warning(f"{self.exchange1.get_name()} orderbook empty — using ticker prices")
+            ob1.asks = [(ask1, SYNTHETIC_QTY)]
+            ob1.bids = [(bid1, SYNTHETIC_QTY)]
+        if not ob2.asks or not ob2.bids:
+            pd2 = await self.exchange2.get_price_data(symbol)
+            ask2 = pd2.ask if pd2.ask > 0 else pd2.bid
+            bid2 = pd2.bid if pd2.bid > 0 else pd2.ask
+            log.warning(f"{self.exchange2.get_name()} orderbook empty — using ticker prices")
+            ob2.asks = [(ask2, SYNTHETIC_QTY)]
+            ob2.bids = [(bid2, SYNTHETIC_QTY)]
+
         # Market orders take the opposite side of orderbook
         if side1 == PositionSide.LONG:
             exec_price1 = ob1.best_ask  # Buy takes ask
@@ -766,6 +783,26 @@ Open position anyway? [Y/n]: """
         # 1. Получить текущие стаканы
         ob1 = await self.exchange1.get_orderbook(symbol)
         ob2 = await self.exchange2.get_orderbook(symbol)
+
+        # Fallback: some exchanges (e.g. BingX VST/sandbox) don't serve L2 orderbook.
+        # Build a synthetic single-level book from bid/ask price data so stable_spread
+        # can still compute an aggressive price.  We use a huge synthetic quantity so
+        # calculate_aggressive_fill_price sees "infinite" liquidity at that price.
+        SYNTHETIC_QTY = quantity * 1000
+        if not ob1.asks or not ob1.bids:
+            pd1 = await self.exchange1.get_price_data(symbol)
+            ask1 = pd1.ask if pd1.ask > 0 else pd1.bid
+            bid1 = pd1.bid if pd1.bid > 0 else pd1.ask
+            log.warning(f"{self.exchange1.get_name()} orderbook empty — using ticker bid/ask as synthetic book")
+            ob1.asks = [(ask1, SYNTHETIC_QTY)]
+            ob1.bids = [(bid1, SYNTHETIC_QTY)]
+        if not ob2.asks or not ob2.bids:
+            pd2 = await self.exchange2.get_price_data(symbol)
+            ask2 = pd2.ask if pd2.ask > 0 else pd2.bid
+            bid2 = pd2.bid if pd2.bid > 0 else pd2.ask
+            log.warning(f"{self.exchange2.get_name()} orderbook empty — using ticker bid/ask as synthetic book")
+            ob2.asks = [(ask2, SYNTHETIC_QTY)]
+            ob2.bids = [(bid2, SYNTHETIC_QTY)]
         
         # 2. Calculate AGGRESSIVE execution prices (eat through orderbook levels)
         # This ensures instant fill even with low liquidity at best price

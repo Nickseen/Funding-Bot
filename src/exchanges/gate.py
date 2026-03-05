@@ -282,6 +282,40 @@ class GateExchange(BaseExchange):
         except ccxt.InsufficientFunds as e:
             raise ExchangeError(f"Insufficient balance: {e}")
     
+    async def cancel_all_price_orders(self, symbol: str) -> None:
+        """
+        Gate.io: отменить все условные ордера (SL/TP price_orders) для символа.
+        Вызывается перед закрытием позиции, т.к. Gate.io не отменяет их автоматически.
+        DELETE /api/v4/futures/usdt/price_orders?contract=BTC_USDT
+        """
+        try:
+            ccxt_symbol = self._convert_symbol(symbol)
+            if self.client.markets and ccxt_symbol in self.client.markets:
+                contract = self.client.markets[ccxt_symbol]['id']
+            else:
+                contract = ccxt_symbol.split('/')[0] + '_USDT'
+            await self.client.privateFuturesDeleteSettlePriceOrders({
+                'settle': 'usdt',
+                'contract': contract,
+            })
+            log.info(f"gate: Cancelled all price_orders (SL/TP) for {symbol}")
+        except Exception as e:
+            # Не критично — лишь логируем
+            log.warning(f"gate: Failed to cancel price_orders for {symbol}: {e}")
+
+    async def close_position(
+        self,
+        symbol: str,
+        order_type: OrderType = OrderType.MARKET,
+        price: Optional[float] = None
+    ):
+        """
+        Gate.io override: перед закрытием позиции принудительно отменяем
+        все SL/TP price_orders символа — Gate.io не делает это автоматически.
+        """
+        await self.cancel_all_price_orders(symbol)
+        return await super().close_position(symbol, order_type, price)
+
     async def _api_close_position(
         self,
         symbol: str,
@@ -389,10 +423,25 @@ class GateExchange(BaseExchange):
             raise RateLimitError(str(e))
     
     async def _api_cancel_order(self, order_id: str, symbol: str) -> bool:
-        """Gate.io: DELETE /api/v4/futures/usdt/orders/{order_id}"""
+        """Gate.io: отмена обычного ордера или price_order (SL/TP).
+        Gate.io использует разные endpoints:
+        - Обычные ордера: DELETE /futures/usdt/orders/{order_id}
+        - Условные (price) ордера SL/TP: DELETE /futures/usdt/price_orders/{order_id}
+        """
         try:
             ccxt_symbol = self._convert_symbol(symbol)
-            await self.client.cancel_order(order_id, ccxt_symbol)
+            # Сначала пробуем как обычный ордер
+            try:
+                await self.client.cancel_order(order_id, ccxt_symbol)
+                return True
+            except Exception:
+                pass
+            # Если не вышло — пробуем как price_order (SL/TP conditional order)
+            settle = 'usdt'
+            await self.client.privateFuturesDeleteSettlePriceOrdersOrderId({
+                'settle': settle,
+                'order_id': order_id,
+            })
             return True
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
@@ -433,59 +482,72 @@ class GateExchange(BaseExchange):
         quantity: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Gate.io: Set stop loss using native API price_trigger orders
-        Uses Gate.io's direct API for proper conditional orders
+        Gate.io: Set stop loss using position-bound price trigger order.
+
+        Использует order_type='close-long/short-position' в initial — это именно то,
+        что Gate.io использует для "TP/SL for Entire Position" в UI:
+        - Отображается в панели позиций (поле TP/SL for Entire Position), а НЕ только в Open Orders
+        - Автоматически отменяется Gate.io при закрытии позиции любым способом
         """
         try:
             from .enums import PositionSide
             ccxt_symbol = self._convert_symbol(symbol)
-            
-            # Get position to determine size and side
-            positions = await self.client.fetch_positions([ccxt_symbol])
-            position = next(
-                (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
-                None
-            )
-            
-            if not position:
-                raise ExchangeError(f"No position found for {symbol}")
-            
-            # Get contracts count (Gate uses contracts, not base currency amount)
-            contracts = abs(float(position.get('contracts', 0)))
-            pos_side = position.get('side', '')  # 'long' or 'short'
-            
-            # For SL: if LONG, sell when price falls; if SHORT, buy when price rises
-            order_side = 'sell' if pos_side == 'long' else 'buy'
-            
-            # Convert symbol to Gate.io format (e.g., BTC/USDT:USDT -> BTC_USDT)
+
+            # Use the `side` param directly — no need to fetch position just for direction
+            # SL: LONG → sell to close when price drops, SHORT → buy to close when price rises
+            order_side = 'sell' if side == PositionSide.LONG else 'buy'
+
             settle = 'usdt'
-            contract = ccxt_symbol.split('/')[0].replace('/USDT', '') + '_USDT'
-            
-            # Use Gate.io native API for price trigger orders (auto orders)
-            # This creates proper stop-loss orders visible in the UI
-            response = await self.client.privateFuturesPostFuturesSettlePriceOrders({
+            # Prefer the exchange's own market id (e.g. "BTC_USDT"); fall back manually
+            if self.client.markets and ccxt_symbol in self.client.markets:
+                contract = self.client.markets[ccxt_symbol]['id']
+            else:
+                base = ccxt_symbol.split('/')[0]
+                contract = base + '_USDT'
+
+            # Round trigger price to tick size (Gate rejects non-multiples)
+            rounded_price = self.client.price_to_precision(ccxt_symbol, stop_price)
+
+            # SL trigger rule:
+            #   LONG  → sell when price <= stop_price  → rule=2
+            #   SHORT → buy  when price >= stop_price  → rule=1
+            rule = 2 if order_side == 'sell' else 1
+
+            # Вычислить размер позиции в контрактах Gate.io
+            # quantity передаётся в базовой валюте (BTC), contractSize — размер одного контракта
+            contract_size = 1.0
+            if self.client.markets and ccxt_symbol in self.client.markets:
+                contract_size = float(self.client.markets[ccxt_symbol].get('contractSize') or 1.0)
+            contracts = max(1, round(abs(quantity) / contract_size)) if quantity else 1
+            # LONG закрывается продажей (отрицательный размер), SHORT — покупкой (положительный)
+            size = -contracts if side == PositionSide.LONG else contracts
+            order_type = 'plan-close-long-position' if side == PositionSide.LONG else 'plan-close-short-position'
+
+            response = await self.client.privateFuturesPostSettlePriceOrders({
                 'settle': settle,
                 'initial': {
                     'contract': contract,
-                    'size': -contracts if order_side == 'sell' else contracts,  # Negative for sell
-                    'price': '0',  # Market order when triggered
+                    'size': size,            # отрицательный для LONG (sell), положительный для SHORT (buy)
+                    'price': '0',            # market order on trigger
+                    'tif': 'ioc',
+                    'order_type': order_type,
                 },
                 'trigger': {
                     'strategy_type': 0,  # 0 = by price
-                    'price_type': 0,  # 0 = last price
-                    'price': str(stop_price),
-                    'rule': 2 if order_side == 'sell' else 1,  # 1 = >= (for buy), 2 = <= (for sell)
+                    'price_type': 0,     # 0 = last price
+                    'price': str(rounded_price),
+                    'rule': rule,
                 },
             })
-            
+
             return {
                 'success': True,
-                'order_id': response.get('id', ''),
+                'order_id': str(response.get('id', '')),
                 'type': 'stop_loss',
                 'trigger_price': stop_price,
-                'info': response
+                'info': response,
             }
-            
+
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except ExchangeError:
@@ -501,59 +563,72 @@ class GateExchange(BaseExchange):
         quantity: Optional[float]
     ) -> Dict[str, Any]:
         """
-        Gate.io: Set take profit using native API price_trigger orders
-        Uses Gate.io's direct API for proper conditional orders
+        Gate.io: Set take profit using position-bound price trigger order.
+
+        Использует order_type='close-long/short-position' в initial — это именно то,
+        что Gate.io использует для "TP/SL for Entire Position" в UI:
+        - Отображается в панели позиций (поле TP/SL for Entire Position), а НЕ только в Open Orders
+        - Автоматически отменяется Gate.io при закрытии позиции любым способом
         """
         try:
             from .enums import PositionSide
             ccxt_symbol = self._convert_symbol(symbol)
-            
-            # Get position to determine size and side
-            positions = await self.client.fetch_positions([ccxt_symbol])
-            position = next(
-                (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
-                None
-            )
-            
-            if not position:
-                raise ExchangeError(f"No position found for {symbol}")
-            
-            # Get contracts count (Gate uses contracts, not base currency amount)
-            contracts = abs(float(position.get('contracts', 0)))
-            pos_side = position.get('side', '')  # 'long' or 'short'
-            
-            # For TP: if LONG, sell when price rises; if SHORT, buy when price falls
-            order_side = 'sell' if pos_side == 'long' else 'buy'
-            
-            # Convert symbol to Gate.io format (e.g., BTC/USDT:USDT -> BTC_USDT)
+
+            # Use the `side` param directly — no need to fetch position just for direction
+            # TP: LONG → sell to close when price rises, SHORT → buy to close when price drops
+            order_side = 'sell' if side == PositionSide.LONG else 'buy'
+
             settle = 'usdt'
-            contract = ccxt_symbol.split('/')[0].replace('/USDT', '') + '_USDT'
-            
-            # Use Gate.io native API for price trigger orders (auto orders)
-            # This creates proper take-profit orders visible in the UI
-            response = await self.client.privateFuturesPostFuturesSettlePriceOrders({
+            # Prefer the exchange's own market id (e.g. "BTC_USDT"); fall back manually
+            if self.client.markets and ccxt_symbol in self.client.markets:
+                contract = self.client.markets[ccxt_symbol]['id']
+            else:
+                base = ccxt_symbol.split('/')[0]
+                contract = base + '_USDT'
+
+            # Round trigger price to tick size (Gate rejects non-multiples)
+            rounded_price = self.client.price_to_precision(ccxt_symbol, take_profit_price)
+
+            # TP trigger rule:
+            #   LONG  → sell when price >= tp_price  → rule=1
+            #   SHORT → buy  when price <= tp_price  → rule=2
+            rule = 1 if order_side == 'sell' else 2
+
+            # Вычислить размер позиции в контрактах Gate.io
+            # quantity передаётся в базовой валюте (BTC), contractSize — размер одного контракта
+            contract_size = 1.0
+            if self.client.markets and ccxt_symbol in self.client.markets:
+                contract_size = float(self.client.markets[ccxt_symbol].get('contractSize') or 1.0)
+            contracts = max(1, round(abs(quantity) / contract_size)) if quantity else 1
+            # LONG закрывается продажей (отрицательный размер), SHORT — покупкой (положительный)
+            size = -contracts if side == PositionSide.LONG else contracts
+            order_type = 'plan-close-long-position' if side == PositionSide.LONG else 'plan-close-short-position'
+
+            response = await self.client.privateFuturesPostSettlePriceOrders({
                 'settle': settle,
                 'initial': {
                     'contract': contract,
-                    'size': -contracts if order_side == 'sell' else contracts,  # Negative for sell
-                    'price': '0',  # Market order when triggered
+                    'size': size,            # отрицательный для LONG (sell), положительный для SHORT (buy)
+                    'price': '0',            # market order on trigger
+                    'tif': 'ioc',
+                    'order_type': order_type,
                 },
                 'trigger': {
                     'strategy_type': 0,  # 0 = by price
-                    'price_type': 0,  # 0 = last price
-                    'price': str(take_profit_price),
-                    'rule': 1 if order_side == 'sell' else 2,  # 1 = >= (for sell TP), 2 = <= (for buy TP)
+                    'price_type': 0,     # 0 = last price
+                    'price': str(rounded_price),
+                    'rule': rule,
                 },
             })
-            
+
             return {
                 'success': True,
-                'order_id': response.get('id', ''),
+                'order_id': str(response.get('id', '')),
                 'type': 'take_profit',
                 'trigger_price': take_profit_price,
-                'info': response
+                'info': response,
             }
-            
+
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except ExchangeError:

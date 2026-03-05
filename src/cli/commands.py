@@ -756,6 +756,17 @@ class ClosePositionCommand:
                 # Get current orderbooks
                 ob1 = await ex1.get_orderbook(position.pair)
                 ob2 = await ex2.get_orderbook(position.pair)
+
+                # Fallback: sandbox exchanges may return empty L2 book — use ticker prices
+                _SYNTH = 1e9
+                if not ob1.bids or not ob1.asks:
+                    pd1 = await ex1.get_price_data(position.pair)
+                    ob1.bids = [(pd1.bid or pd1.ask, _SYNTH)]
+                    ob1.asks = [(pd1.ask or pd1.bid, _SYNTH)]
+                if not ob2.bids or not ob2.asks:
+                    pd2 = await ex2.get_price_data(position.pair)
+                    ob2.bids = [(pd2.bid or pd2.ask, _SYNTH)]
+                    ob2.asks = [(pd2.ask or pd2.bid, _SYNTH)]
                 
                 # Calculate PnL using smart_pnl logic
                 from ..utils.calculations import calculate_unrealized_pnl_from_orderbooks, can_instant_fill, get_close_prices_and_sides
