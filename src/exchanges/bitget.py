@@ -200,48 +200,40 @@ class BitgetExchange(BaseExchange):
         Bitget: Open position
         
         Steps:
-        1. Set leverage
-        2. Place order
+        1. Set isolated margin mode (MUST be first!)
+        2. Set leverage
+        3. Place order
         """
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # 1. Set leverage first with proper parameters
+            # 1. Set leverage
             try:
-                # Bitget requires marginCoin parameter
                 await self.client.set_leverage(
                     leverage, 
                     ccxt_symbol,
                     params={
-                        'marginCoin': 'USDT',  # For linear futures
-                    }
-                )
-            except Exception as e:
-                if 'leverage' not in str(e).lower() and 'same' not in str(e).lower():
-                    raise
-            
-            # 2. Set isolated margin mode
-            try:
-                await self.client.set_margin_mode(
-                    'isolated', 
-                    ccxt_symbol,
-                    params={
+                        'productType': 'umcbl',
                         'marginCoin': 'USDT',
                     }
                 )
             except Exception as e:
-                # Ignore if already set or not supported
-                if 'same' not in str(e).lower() and 'not modified' not in str(e).lower():
-                    pass
+                # Only ignore if leverage is already the same
+                if 'leverage' not in str(e).lower() and 'same' not in str(e).lower():
+                    raise ExchangeError(f"Failed to set leverage: {e}")
             
-            # 3. Place order
+            # 2. Place order with isolated margin mode
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = 'buy' if side == PositionSide.LONG else 'sell'
             
+            # IMPORTANT: Include marginMode in order params to force isolated mode
             # For one-way mode use 'oneWayMode': True, for hedge mode use 'hedged': True
             # We'll try one-way mode first (more common for demo accounts)
             try:
-                params = {'oneWayMode': True}
+                params = {
+                    'oneWayMode': True,
+                    'marginMode': 'isolated',  # Force isolated margin
+                }
                 if order_type == OrderType.LIMIT and price:
                     order = await self.client.create_order(
                         symbol=ccxt_symbol,
@@ -264,7 +256,8 @@ class BitgetExchange(BaseExchange):
                 if '40774' in str(e) or 'position' in str(e).lower():
                     params = {
                         'hedged': True,
-                        'positionSide': 'long' if side == PositionSide.LONG else 'short'
+                        'positionSide': 'long' if side == PositionSide.LONG else 'short',
+                        'marginMode': 'isolated',  # Force isolated margin
                     }
                     if order_type == OrderType.LIMIT and price:
                         order = await self.client.create_order(
@@ -412,10 +405,19 @@ class BitgetExchange(BaseExchange):
             raise ExchangeError(f"Failed to cancel order: {e}")
     
     async def _api_set_leverage(self, symbol: str, leverage: int) -> bool:
-        """Bitget: POST /api/mix/v1/account/setLeverage"""
+        """Bitget: POST /api/v2/mix/account/set-leverage"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
-            await self.client.set_leverage(leverage, ccxt_symbol)
+            
+            # CCXT handles symbol conversion and params internally for Bitget
+            await self.client.set_leverage(
+                leverage, 
+                ccxt_symbol,
+                params={
+                    'productType': 'umcbl',  # USDT-margined perpetual
+                    'marginCoin': 'USDT',
+                }
+            )
             return True
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
@@ -426,10 +428,28 @@ class BitgetExchange(BaseExchange):
             raise ExchangeError(f"Failed to set leverage: {e}")
     
     async def _api_set_margin_mode(self, mode: str) -> bool:
-        """Bitget: POST /api/mix/v1/account/setMarginMode"""
+        """Bitget: POST /api/v2/mix/account/set-margin-mode
+        
+        WARNING: This method sets margin mode GLOBALLY for the entire account.
+        For opening positions, margin mode is automatically set per-order in _api_open_position().
+        
+        For this bot, we ALWAYS use ISOLATED mode regardless of the mode parameter.
+        """
         try:
-            margin_mode = 'cross' if mode.upper() == 'CROSS' else 'isolated'
-            await self.client.set_margin_mode(margin_mode)
+            # Force isolated mode for safety (delta-neutral trading requirement)
+            margin_mode = 'isolated'
+            
+            log.warning(f"Bitget: Setting GLOBAL margin mode to {margin_mode}. "
+                       f"This applies to all future positions on all symbols.")
+            
+            # Bitget API v2: set_margin_mode endpoint doesn't accept symbol parameter
+            # It sets the default margin mode for the whole account
+            await self.client.set_margin_mode(
+                margin_mode,
+                params={
+                    'productType': 'umcbl',  # USDT-margined perpetual
+                }
+            )
             return True
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
