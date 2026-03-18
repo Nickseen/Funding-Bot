@@ -223,17 +223,17 @@ async def main_cli():
         except Exception as e:
             log.warning(f"Error initializing Bybit: {e}")
     
-    # KuCoin adapter is incomplete - skip for now
-    # if hasattr(config, 'KUCOIN_API_KEY') and config.KUCOIN_API_KEY:
-    #     try:
-    #         exchanges['kucoin'] = KuCoinExchange(
-    #             api_key=config.KUCOIN_API_KEY,
-    #             secret_key=config.KUCOIN_SECRET_KEY,
-    #             passphrase=config.KUCOIN_PASSPHRASE,
-    #             testnet=config.is_testnet()
-    #         )
-    #     except Exception as e:
-    #         log.warning(f"Error initializing KuCoin: {e}")
+    if hasattr(config, 'KUCOIN_API_KEY') and config.KUCOIN_API_KEY:
+        try:
+            exchanges['kucoin'] = KuCoinExchange(
+                api_key=config.KUCOIN_API_KEY,
+                secret_key=config.KUCOIN_SECRET_KEY,
+                passphrase=config.KUCOIN_PASSPHRASE,
+                testnet=config.is_kucoin_testnet(),
+                api_test_mode=(config.is_kucoin_mainnet() and config.KUCOIN_TEST_ORDERS),
+            )
+        except Exception as e:
+            log.warning(f"Error initializing KuCoin: {e}")
     
     if hasattr(config, 'OKX_API_KEY') and config.OKX_API_KEY:
         try:
