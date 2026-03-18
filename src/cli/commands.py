@@ -207,8 +207,7 @@ class OpenPositionCommand:
         
         # Get position size in USD
         position_size = await get_float_input(
-            "Enter position size per leg in USD: ",
-            min_val=10.0
+            "Enter position size per leg in USD: "
         )
         if position_size is None:
             return False

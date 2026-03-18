@@ -805,27 +805,65 @@ Open position anyway? [Y/n]: """
             ob2.bids = [(bid2, SYNTHETIC_QTY)]
         
         # 2. Calculate AGGRESSIVE execution prices (eat through orderbook levels)
-        # This ensures instant fill even with low liquidity at best price
-        try:
-            if side1 == PositionSide.LONG:
-                # Ex1: BUY (eat asks), Ex2: SELL (eat bids)
+        # This ensures instant fill even with low liquidity at best price.
+        if side1 == PositionSide.LONG:
+            # Ex1: BUY (eat asks), Ex2: SELL (eat bids)
+            try:
                 exec_price1, avg_price1 = calculate_aggressive_fill_price(
                     ob1.asks, quantity, "BUY"
                 )
+            except Exception as e:
+                log.error(
+                    f"Failed aggressive fill on {self.exchange1.get_name()} "
+                    f"(BUY from asks): {e}"
+                )
+                raise Exception(
+                    f"Insufficient orderbook liquidity on {self.exchange1.get_name()} "
+                    f"(BUY/asks): {e}"
+                )
+
+            try:
                 exec_price2, avg_price2 = calculate_aggressive_fill_price(
                     ob2.bids, quantity, "SELL"
                 )
-            else:
-                # Ex1: SELL (eat bids), Ex2: BUY (eat asks)
+            except Exception as e:
+                log.error(
+                    f"Failed aggressive fill on {self.exchange2.get_name()} "
+                    f"(SELL into bids): {e}"
+                )
+                raise Exception(
+                    f"Insufficient orderbook liquidity on {self.exchange2.get_name()} "
+                    f"(SELL/bids): {e}"
+                )
+        else:
+            # Ex1: SELL (eat bids), Ex2: BUY (eat asks)
+            try:
                 exec_price1, avg_price1 = calculate_aggressive_fill_price(
                     ob1.bids, quantity, "SELL"
                 )
+            except Exception as e:
+                log.error(
+                    f"Failed aggressive fill on {self.exchange1.get_name()} "
+                    f"(SELL into bids): {e}"
+                )
+                raise Exception(
+                    f"Insufficient orderbook liquidity on {self.exchange1.get_name()} "
+                    f"(SELL/bids): {e}"
+                )
+
+            try:
                 exec_price2, avg_price2 = calculate_aggressive_fill_price(
                     ob2.asks, quantity, "BUY"
                 )
-        except Exception as e:
-            log.error(f"Failed to calculate aggressive fill price: {e}")
-            raise Exception(f"Insufficient orderbook liquidity: {e}")
+            except Exception as e:
+                log.error(
+                    f"Failed aggressive fill on {self.exchange2.get_name()} "
+                    f"(BUY from asks): {e}"
+                )
+                raise Exception(
+                    f"Insufficient orderbook liquidity on {self.exchange2.get_name()} "
+                    f"(BUY/asks): {e}"
+                )
         
         # 3. Вычислить спред (используем average prices для точного расчета)
         entry_spread_abs = abs(avg_price2 - avg_price1)
