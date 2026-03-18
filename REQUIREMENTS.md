@@ -1367,6 +1367,9 @@ async def funding_monitoring_loop():
 ### Базовая реализация (требует тестирования)
 - **Binance** - REST API адаптер через CCXT
 - **KuCoin** - REST API адаптер через CCXT
+    - Поддержка `KUCOIN_MODE=auto|testnet|mainnet` (можно переопределить глобальный BOT_MODE)
+    - Fallback для sandbox-ограничений: безопасная проверка приватных вызовов через `KUCOIN_TEST_ORDERS=true` (`params.test=True`)
+    - Добавлен `sync_time()` и улучшена обработка sandbox/mainnet сценариев
 
 ### Новые адаптеры (2 февраля 2026)
 - **MEXC** - полная CCXT интеграция
@@ -1385,10 +1388,42 @@ async def funding_monitoring_loop():
 
 ---
 
-**Дата обновления:** 24 февраля 2026  
+**Дата обновления:** 18 марта 2026  
 **Статус:** Phase 1-4 завершены ✅ | Production ready 🚀
 
 ## 📝 Подробный changelog (после 6c57a131cb21d9021c4f079849debb7dd70af0b4)
+
+### 2026-03-18
+- **fix**: OKX SL/TP minimum size error 51020 (`Your order should meet or exceed the minimum order amount`)
+    - Причина: размер `sz` для algo SL/TP округлялся через `int(contracts)`, что обрезало дробные контракты до 0/недопустимого минимума на мелких позициях (например, PEPE)
+    - Решение: добавлены helper-методы форматирования для OKX:
+        - `_to_okx_size_str()` — учитывает precision и min amount инструмента
+        - `_to_okx_trigger_price_str()` — корректный decimal формат trigger price без scientific notation
+    - Также добавлена передача `posSide` для hedge mode и диагностическое логирование payload для SL/TP
+    - Файл: `src/exchanges/okx.py`
+
+- **fix**: OKX transient error 50013 (`Systems are busy`) при открытии позиции
+    - Симптом: API возвращает ошибку, но позиция фактически открывается на бирже (UI показывает OPEN)
+    - Решение: после 50013 добавлен reconciliation-процесс (`fetch_positions()` с retry), который подтверждает фактическое открытие позиции до финального fail
+    - Файл: `src/exchanges/okx.py` (`_recover_position_after_order_error()`)
+
+- **fix**: OKX transient error 50013 при закрытии позиции
+    - Симптом: close бросает ошибку, но позиция уже закрыта на бирже (UI показывает CLOSED)
+    - Решение:
+        - закрытие сделано идемпотентным (если позиция уже отсутствует — считать успехом)
+        - добавлен close reconciliation с retry после 50013 (`_recover_closed_position_after_order_error()`)
+    - Файл: `src/exchanges/okx.py`
+
+- **feat**: KuCoin routing и безопасные режимы API-проверок
+    - Добавлены конфиги: `KUCOIN_MODE` (`auto|testnet|mainnet`) и `KUCOIN_TEST_ORDERS`
+    - В `main.py` подключена инициализация KuCoin с учетом новых режимов
+    - Адаптер KuCoin переработан для sandbox fallback, time sync, и test-order сценариев
+    - Файлы: `config/config.py`, `.env.example`, `src/main.py`, `src/exchanges/kucoin.py`, `tests/unit/exchange/test_kucoin_exchange.py`
+
+- **fix**: Execution stability improvements
+    - В stable spread добавлены более точные ошибки по агрессивному fill (с указанием биржи и стороны стакана)
+    - В CLI убран жесткий минимальный порог `$10` для `position size per leg`, чтобы не блокировать микро-сценарии тестов
+    - Файлы: `src/core/execution_engine.py`, `src/cli/commands.py`
 
 ### 2026-02-24
 - **fix**: Negative funding time display for BingX/Bitget pairs
