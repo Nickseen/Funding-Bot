@@ -13,6 +13,7 @@ OKX Testnet:
 """
 
 from typing import Dict, Any, List, Optional
+import asyncio
 from datetime import datetime
 import ccxt.async_support as ccxt
 from loguru import logger as log
@@ -164,6 +165,93 @@ class OKXExchange(BaseExchange):
         
         # Fallback
         return symbol
+
+    def _to_okx_trigger_price_str(self, ccxt_symbol: str, price: float) -> str:
+        """Format trigger price for OKX algo orders in valid decimal format."""
+        market = self.client.markets.get(ccxt_symbol, {})
+
+        # Respect minimum price when available.
+        min_price = ((market.get('limits') or {}).get('price') or {}).get('min')
+        if isinstance(min_price, (int, float)) and min_price > 0:
+            price = max(float(price), float(min_price))
+
+        try:
+            px = self.client.price_to_precision(ccxt_symbol, price)
+        except Exception:
+            px = f"{float(price):.12f}".rstrip('0').rstrip('.')
+
+        # Avoid scientific notation (OKX rejects it for trigger params).
+        if 'e' in px.lower():
+            px = f"{float(px):.12f}".rstrip('0').rstrip('.')
+
+        if not px or float(px) <= 0:
+            raise ExchangeError(f"Invalid trigger price after precision formatting: {price}")
+
+        return px
+
+    def _to_contract_amount(self, ccxt_symbol: str, quantity: float) -> float:
+        """Convert base-asset quantity to OKX contract amount with min/precision clamp."""
+        market = self.client.markets.get(ccxt_symbol, {})
+        contract_size = float(market.get('contractSize', 1) or 1)
+
+        raw_contracts = float(quantity) / contract_size if contract_size > 0 else float(quantity)
+
+        limits = market.get('limits', {}) or {}
+        amount_limits = limits.get('amount', {}) or {}
+        min_amount = amount_limits.get('min')
+        min_amount = float(min_amount) if isinstance(min_amount, (int, float)) else None
+
+        contracts = raw_contracts
+        if min_amount is not None and contracts < min_amount:
+            contracts = min_amount
+
+        try:
+            contracts = float(self.client.amount_to_precision(ccxt_symbol, contracts))
+        except Exception:
+            # Fallback if precision helper is unavailable: keep raw float.
+            contracts = float(contracts)
+
+        if min_amount is not None and contracts < min_amount:
+            contracts = min_amount
+
+        if contracts <= 0:
+            raise ExchangeError(
+                f"Calculated non-positive contract amount for {ccxt_symbol}: {contracts}"
+            )
+
+        return contracts
+
+    def _to_okx_size_str(self, ccxt_symbol: str, contracts: float) -> str:
+        """Format contract size for OKX APIs with precision and min-size clamp."""
+        market = self.client.markets.get(ccxt_symbol, {})
+        limits = market.get('limits', {}) or {}
+        amount_limits = limits.get('amount', {}) or {}
+        min_amount = amount_limits.get('min')
+        min_amount = float(min_amount) if isinstance(min_amount, (int, float)) else None
+
+        size = float(contracts)
+        if min_amount is not None and size < min_amount:
+            size = min_amount
+
+        try:
+            sz = self.client.amount_to_precision(ccxt_symbol, size)
+        except Exception:
+            sz = f"{size:.12f}".rstrip('0').rstrip('.')
+
+        # OKX rejects scientific notation for string numeric fields.
+        if 'e' in sz.lower():
+            sz = f"{float(sz):.12f}".rstrip('0').rstrip('.')
+
+        if min_amount is not None and float(sz) < min_amount:
+            try:
+                sz = self.client.amount_to_precision(ccxt_symbol, min_amount)
+            except Exception:
+                sz = f"{min_amount:.12f}".rstrip('0').rstrip('.')
+
+        if not sz or float(sz) <= 0:
+            raise ExchangeError(f"Invalid sz after precision formatting: {contracts}")
+
+        return sz
     
     # ============================================
     # API ADAPTERS (pure API calls, no validation!)
@@ -183,17 +271,27 @@ class OKXExchange(BaseExchange):
         """OKX: GET /api/v5/market/ticker"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
+            market = self.client.markets.get(ccxt_symbol, {})
+            contract_size = float(market.get('contractSize', 1) or 1)
             ticker = await self.client.fetch_ticker(ccxt_symbol)
             # For futures tickers bid/ask may be None — fall back to last traded price
             last_price = ticker.get('last') or 0
             bid = ticker.get('bid') or last_price
             ask = ticker.get('ask') or last_price
+
+            bid_volume = float(ticker.get('bidVolume', 0) or 0)
+            ask_volume = float(ticker.get('askVolume', 0) or 0)
+
+            # OKX swap depth volume can be contract-based; normalize to base amount.
+            bid_qty = bid_volume * contract_size
+            ask_qty = ask_volume * contract_size
+
             return {
                 'symbol': symbol,
                 'bid': bid,
                 'ask': ask,
-                'bid_qty': ticker.get('bidVolume', 0),
-                'ask_qty': ticker.get('askVolume', 0),
+                'bid_qty': bid_qty,
+                'ask_qty': ask_qty,
                 'timestamp': ticker['timestamp']
             }
         except ccxt.RateLimitExceeded as e:
@@ -246,15 +344,8 @@ class OKXExchange(BaseExchange):
                 if 'leverage' not in str(e).lower() and 'same' not in str(e).lower():
                     raise
             
-            # 2. Convert quantity to contracts
-            # OKX uses contracts, not base currency amount
-            # Contract size is in market info
-            market = self.client.markets.get(ccxt_symbol, {})
-            contract_size = float(market.get('contractSize', 0.01))
-            # quantity is in base currency (BTC), convert to number of contracts
-            contracts = quantity / contract_size
-            # Round to contract precision
-            contracts = round(contracts)  # OKX contracts are whole numbers
+            # 2. Convert base quantity to exchange-valid contract amount
+            contracts = self._to_contract_amount(ccxt_symbol, quantity)
             
             # 3. Place order
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
@@ -295,6 +386,61 @@ class OKXExchange(BaseExchange):
             raise RateLimitError(str(e))
         except ccxt.InsufficientFunds as e:
             raise ExchangeError(f"Insufficient balance: {e}")
+        except Exception as e:
+            # OKX may return transient errors (e.g. 50013 "Systems are busy")
+            # while the order is actually accepted and position appears moments later.
+            msg = str(e).lower()
+            if "50013" in msg or "systems are busy" in msg:
+                recovered = await self._recover_position_after_order_error(
+                    ccxt_symbol=ccxt_symbol,
+                    expected_side=side,
+                )
+                if recovered:
+                    log.warning(
+                        "OKX returned transient error during open_position, "
+                        "but position was recovered from exchange state"
+                    )
+                    return recovered
+            raise ExchangeError(f"Failed to open position: {e}")
+
+    async def _recover_position_after_order_error(
+        self,
+        ccxt_symbol: str,
+        expected_side: PositionSide,
+        retries: int = 5,
+        delay_sec: float = 0.4,
+    ) -> Optional[Dict[str, Any]]:
+        """Try to recover actual position state after transient order-placement errors."""
+        expected_okx_side = "long" if expected_side == PositionSide.LONG else "short"
+
+        for attempt in range(1, retries + 1):
+            try:
+                positions = await self.client.fetch_positions([ccxt_symbol])
+                candidates = [
+                    p for p in positions
+                    if p.get('symbol') == ccxt_symbol and float(p.get('contracts') or 0) != 0
+                ]
+
+                if candidates:
+                    # Prefer matching side when available.
+                    side_match = next(
+                        (p for p in candidates if (p.get('side') or '').lower() == expected_okx_side),
+                        None
+                    )
+                    recovered = side_match or candidates[0]
+                    log.info(
+                        f"OKX recovery succeeded on attempt {attempt}/{retries}: "
+                        f"symbol={ccxt_symbol}, side={recovered.get('side')}, "
+                        f"contracts={recovered.get('contracts')}"
+                    )
+                    return recovered
+            except Exception as poll_err:
+                log.debug(f"OKX recovery poll {attempt}/{retries} failed: {poll_err}")
+
+            if attempt < retries:
+                await asyncio.sleep(delay_sec)
+
+        return None
     
     async def _api_close_position(
         self,
@@ -318,7 +464,9 @@ class OKXExchange(BaseExchange):
             )
             
             if not position:
-                raise ExchangeError(f"No position found for {symbol}")
+                # Idempotent close: position is already closed.
+                log.warning(f"OKX close_position: no open position found for {symbol}, treating as closed")
+                return {'symbol': ccxt_symbol, 'contracts': 0, 'side': None}
             
             contracts = float(position['contracts'])
             position_side = position['side']  # 'long' or 'short'
@@ -332,33 +480,94 @@ class OKXExchange(BaseExchange):
                 'tdMode': 'isolated',  # Use isolated margin mode for closing
             }
             
-            if order_type == OrderType.LIMIT:
-                await self.client.create_order(
-                    symbol=ccxt_symbol,
-                    type=order_type_str,
-                    side=order_side,
-                    amount=abs(contracts),
-                    price=price,
-                    params=params
-                )
-            else:
-                await self.client.create_order(
-                    symbol=ccxt_symbol,
-                    type=order_type_str,
-                    side=order_side,
-                    amount=abs(contracts),
-                    params=params
-                )
+            try:
+                if order_type == OrderType.LIMIT:
+                    await self.client.create_order(
+                        symbol=ccxt_symbol,
+                        type=order_type_str,
+                        side=order_side,
+                        amount=abs(contracts),
+                        price=price,
+                        params=params
+                    )
+                else:
+                    await self.client.create_order(
+                        symbol=ccxt_symbol,
+                        type=order_type_str,
+                        side=order_side,
+                        amount=abs(contracts),
+                        params=params
+                    )
+            except Exception as e:
+                msg = str(e).lower()
+                if "50013" in msg or "systems are busy" in msg:
+                    closed = await self._recover_closed_position_after_order_error(
+                        ccxt_symbol=ccxt_symbol,
+                        pre_close_side=position_side,
+                    )
+                    if closed:
+                        log.warning(
+                            "OKX returned transient error during close_position, "
+                            "but closure was confirmed from exchange state"
+                        )
+                        return {'symbol': ccxt_symbol, 'contracts': 0, 'side': None}
+                raise
             
             # 3. Return updated position
             positions = await self.client.fetch_positions([ccxt_symbol])
-            return next(
-                (p for p in positions if p['symbol'] == ccxt_symbol),
-                {'symbol': symbol, 'contracts': 0, 'side': None}
+            open_position = next(
+                (p for p in positions if p['symbol'] == ccxt_symbol and float(p.get('contracts') or 0) != 0),
+                None
             )
+            return open_position or {'symbol': ccxt_symbol, 'contracts': 0, 'side': None}
             
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
+        except Exception as e:
+            raise ExchangeError(f"Failed to close position: {e}")
+
+    async def _recover_closed_position_after_order_error(
+        self,
+        ccxt_symbol: str,
+        pre_close_side: Optional[str],
+        retries: int = 6,
+        delay_sec: float = 0.4,
+    ) -> bool:
+        """Confirm position closure after transient close-order errors."""
+        expected_side = (pre_close_side or '').lower()
+
+        for attempt in range(1, retries + 1):
+            try:
+                positions = await self.client.fetch_positions([ccxt_symbol])
+                open_positions = [
+                    p for p in positions
+                    if p.get('symbol') == ccxt_symbol and float(p.get('contracts') or 0) != 0
+                ]
+
+                if not open_positions:
+                    log.info(
+                        f"OKX close recovery succeeded on attempt {attempt}/{retries}: "
+                        f"symbol={ccxt_symbol} fully closed"
+                    )
+                    return True
+
+                if expected_side:
+                    same_side_open = any(
+                        (p.get('side') or '').lower() == expected_side for p in open_positions
+                    )
+                    if not same_side_open:
+                        log.info(
+                            f"OKX close recovery succeeded on attempt {attempt}/{retries}: "
+                            f"symbol={ccxt_symbol}, original side={expected_side} closed"
+                        )
+                        return True
+            except Exception as poll_err:
+                log.debug(f"OKX close recovery poll {attempt}/{retries} failed: {poll_err}")
+
+            if attempt < retries:
+                await asyncio.sleep(delay_sec)
+
+        return False
     
     async def _api_place_order(
         self,
@@ -378,10 +587,8 @@ class OKXExchange(BaseExchange):
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = side.value.lower()
             
-            # Convert quantity (BTC) to contracts
-            market = self.client.markets.get(ccxt_symbol, {})
-            contract_size = float(market.get('contractSize', 0.01))
-            contracts = round(quantity / contract_size)
+            # Convert base quantity to exchange-valid contract amount
+            contracts = self._to_contract_amount(ccxt_symbol, quantity)
             
             params = {
                 'tdMode': 'isolated',  # Use isolated margin mode
@@ -460,7 +667,6 @@ class OKXExchange(BaseExchange):
         Sets stop loss as conditional algo order attached to position
         """
         try:
-            from .enums import PositionSide
             ccxt_symbol = self._convert_symbol(symbol)
             
             # Get position to determine size
@@ -475,25 +681,40 @@ class OKXExchange(BaseExchange):
             
             contracts = abs(float(position.get('contracts', 0)))
             pos_side = position.get('side', '')  # 'long' or 'short'
+            pos_side_mode = ((position.get('info') or {}).get('posSide') or pos_side or '').lower()
             
             # OKX instrument ID format: BTC-USDT-SWAP
             inst_id = ccxt_symbol.replace('/', '-').replace(':USDT', '-SWAP')
+
+            sl_trigger_px = self._to_okx_trigger_price_str(ccxt_symbol, stop_price)
+            sz = self._to_okx_size_str(ccxt_symbol, contracts)
             
             # For SL: if LONG, sell when price falls below SL; if SHORT, buy when price rises above SL
             order_side = 'sell' if pos_side == 'long' else 'buy'
-            
-            # Use OKX algo order API directly
-            response = await self.client.private_post_trade_order_algo({
+
+            payload = {
                 'instId': inst_id,
                 'tdMode': 'isolated',  # Use isolated margin mode
                 'side': order_side,
                 'ordType': 'conditional',  # Conditional order (SL/TP)
-                'sz': str(int(contracts)),
-                'slTriggerPx': str(stop_price),
+                'sz': sz,
+                'slTriggerPx': sl_trigger_px,
                 'slOrdPx': '-1',  # -1 means market price
                 'slTriggerPxType': 'mark',
-                'reduceOnly': 'true',  # OKX requires string 'true', not boolean
-            })
+                'reduceOnly': True,
+            }
+
+            # Required in long/short (hedge) mode for FUTURES/SWAP.
+            if pos_side_mode in ('long', 'short'):
+                payload['posSide'] = pos_side_mode
+
+            log.info(
+                f"OKX SL payload: instId={inst_id}, side={order_side}, "
+                f"posSide={payload.get('posSide', 'net')}, sz={sz}, slTriggerPx={sl_trigger_px}"
+            )
+
+            # Use OKX algo order API directly
+            response = await self.client.private_post_trade_order_algo(payload)
             
             # Check response
             if response.get('code') == '0':
@@ -527,7 +748,6 @@ class OKXExchange(BaseExchange):
         Sets take profit as conditional algo order attached to position
         """
         try:
-            from .enums import PositionSide
             ccxt_symbol = self._convert_symbol(symbol)
             
             # Get position to determine size
@@ -542,25 +762,40 @@ class OKXExchange(BaseExchange):
             
             contracts = abs(float(position.get('contracts', 0)))
             pos_side = position.get('side', '')  # 'long' or 'short'
+            pos_side_mode = ((position.get('info') or {}).get('posSide') or pos_side or '').lower()
             
             # OKX instrument ID format: BTC-USDT-SWAP
             inst_id = ccxt_symbol.replace('/', '-').replace(':USDT', '-SWAP')
+
+            tp_trigger_px = self._to_okx_trigger_price_str(ccxt_symbol, take_profit_price)
+            sz = self._to_okx_size_str(ccxt_symbol, contracts)
             
             # For TP: if LONG, sell when price rises above TP; if SHORT, buy when price falls below TP
             order_side = 'sell' if pos_side == 'long' else 'buy'
-            
-            # Use OKX algo order API directly
-            response = await self.client.private_post_trade_order_algo({
+
+            payload = {
                 'instId': inst_id,
                 'tdMode': 'isolated',  # Use isolated margin mode
                 'side': order_side,
                 'ordType': 'conditional',  # Conditional order (SL/TP)
-                'sz': str(int(contracts)),
-                'tpTriggerPx': str(take_profit_price),
+                'sz': sz,
+                'tpTriggerPx': tp_trigger_px,
                 'tpOrdPx': '-1',  # -1 means market price
                 'tpTriggerPxType': 'mark',
-                'reduceOnly': 'true',  # OKX requires string 'true', not boolean
-            })
+                'reduceOnly': True,
+            }
+
+            # Required in long/short (hedge) mode for FUTURES/SWAP.
+            if pos_side_mode in ('long', 'short'):
+                payload['posSide'] = pos_side_mode
+
+            log.info(
+                f"OKX TP payload: instId={inst_id}, side={order_side}, "
+                f"posSide={payload.get('posSide', 'net')}, sz={sz}, tpTriggerPx={tp_trigger_px}"
+            )
+
+            # Use OKX algo order API directly
+            response = await self.client.private_post_trade_order_algo(payload)
             
             # Check response
             if response.get('code') == '0':
@@ -760,12 +995,19 @@ class OKXExchange(BaseExchange):
     
     def _parse_orderbook(self, data: Dict[str, Any]) -> OrderBook:
         """Convert OKX orderbook to OrderBook object"""
-        # OKX returns [price, qty, numOrders] - take only first 2
+        # OKX returns [price, qty, numOrders] where qty may be in contracts.
+        symbol = data.get('symbol', '')
+        market = self.client.markets.get(symbol, {}) if hasattr(self.client, 'markets') else {}
+        contract_size = float(market.get('contractSize', 1) or 1)
+
+        bids = [(float(item[0]), float(item[1]) * contract_size) for item in data.get('bids', [])]
+        asks = [(float(item[0]), float(item[1]) * contract_size) for item in data.get('asks', [])]
+
         return OrderBook(
-            symbol=data.get('symbol', ''),
+            symbol=symbol,
             exchange=self.exchange_name.value,
-            bids=[(float(item[0]), float(item[1])) for item in data.get('bids', [])],
-            asks=[(float(item[0]), float(item[1])) for item in data.get('asks', [])],
+            bids=bids,
+            asks=asks,
             timestamp=data.get('timestamp', datetime.utcnow().timestamp())
         )
     
