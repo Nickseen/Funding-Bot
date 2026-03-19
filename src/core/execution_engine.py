@@ -10,10 +10,11 @@ NOTE: Flash Funding режим УДАЛЁН - заменён на Stable Spread 
 
 import asyncio
 import time
+import math
 from typing import Optional, Tuple, Dict, List
 from datetime import datetime
 
-from ..exchanges.base import BaseExchange
+from ..exchanges.base import BaseExchange, ExchangeError
 from ..exchanges.types import Position, PriceData, IntersectionOpportunity
 from ..exchanges.enums import (
     PositionSide,
@@ -56,6 +57,130 @@ class ExecutionEngine:
         self.position_verification_max_retries = 3
         self.position_verification_retry_delay = 1.0
         self.position_verification_initial_delay = 0.5
+
+    def _normalize_step_value(self, raw_value: Optional[float]) -> Optional[float]:
+        """Normalize exchange precision/step values for quantity granularity."""
+        if raw_value is None:
+            return None
+
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return None
+
+        if value <= 0:
+            return None
+
+        # Some exchanges expose precision as decimal places (e.g., 3 -> 0.001)
+        if value >= 2 and value.is_integer() and value <= 12:
+            return 10 ** (-int(value))
+
+        return value
+
+    def _normalize_positive_value(self, raw_value: Optional[float]) -> Optional[float]:
+        """Normalize numeric value that must be interpreted as absolute amount."""
+        if raw_value is None:
+            return None
+
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return None
+
+        return value if value > 0 else None
+
+    async def _get_exchange_base_qty_constraints(
+        self,
+        exchange: BaseExchange,
+        symbol: str,
+    ) -> tuple[float, float]:
+        """Get effective base-asset quantity step and minimum quantity for exchange symbol."""
+        try:
+            symbol_info = await exchange.get_symbol_info(symbol)
+        except Exception as e:
+            log.warning(f"{exchange.get_name()}: failed to get symbol info for step sizing: {e}")
+            return 0.0, 0.0
+
+        contract_size = self._normalize_positive_value(symbol_info.get("contract_size")) or 1.0
+        min_qty = self._normalize_positive_value(symbol_info.get("min_quantity"))
+        qty_step_raw = symbol_info.get("quantity_step")
+        qty_step = self._normalize_step_value(qty_step_raw)
+
+        # Some adapters expose precision=1 (1 decimal place) instead of absolute step 0.1.
+        # If minimum quantity is fractional, treat qty_step=1 as 0.1 precision here.
+        if (
+            qty_step_raw is not None
+            and min_qty is not None
+            and 0 < min_qty < 1
+        ):
+            try:
+                qty_raw_num = float(qty_step_raw)
+                if qty_raw_num == 1.0 and (qty_step is None or qty_step == 1.0):
+                    qty_step = 0.1
+            except (TypeError, ValueError):
+                pass
+
+        # IMPORTANT: min quantity is NOT a granularity step. Using min as step
+        # causes oversized quantization (e.g., forcing 38 instead of 30 DOGE).
+        contracts_step = qty_step if qty_step and qty_step > 0 else (min_qty or 0.0)
+        contracts_min = min_qty or 0.0
+
+        return float(contracts_step * contract_size), float(contracts_min * contract_size)
+
+    async def _get_exchange_base_qty_step(self, exchange: BaseExchange, symbol: str) -> float:
+        """Backward-compatible helper returning only base quantity step."""
+        step, _min_qty = await self._get_exchange_base_qty_constraints(exchange, symbol)
+        return step
+
+    async def _align_quantity_for_delta_neutrality(self, symbol: str, requested_quantity: float) -> float:
+        """
+        Align quantity to the coarsest exchange granularity so both legs can match.
+
+        Example: if exchange A supports 0.1-contract steps and exchange B supports finer
+        steps, quantity is quantized by A and then reused for both legs.
+        """
+        if requested_quantity <= 0:
+            raise ExchangeError(f"Requested quantity must be > 0, got: {requested_quantity}")
+
+        step1, min1 = await self._get_exchange_base_qty_constraints(self.exchange1, symbol)
+        step2, min2 = await self._get_exchange_base_qty_constraints(self.exchange2, symbol)
+
+        required_min = max(min1, min2)
+        if required_min > 0 and requested_quantity < required_min:
+            raise ExchangeError(
+                f"Requested quantity {requested_quantity} is below exchange minimum {required_min} "
+                f"for pair {symbol} across {self.exchange1.get_name()}-{self.exchange2.get_name()}"
+            )
+
+        coarsest_step = max(step1, step2)
+        if coarsest_step <= 0:
+            return requested_quantity
+
+        steps_count = math.floor((requested_quantity + (coarsest_step * 1e-9)) / coarsest_step)
+        aligned_quantity = steps_count * coarsest_step
+        aligned_quantity = float(f"{aligned_quantity:.12f}")
+
+        if aligned_quantity <= 0:
+            raise ExchangeError(
+                f"Quantity {requested_quantity} is below minimal tradable step {coarsest_step} "
+                f"for pair {symbol} across {self.exchange1.get_name()}-{self.exchange2.get_name()}"
+            )
+
+        if required_min > 0 and aligned_quantity < required_min:
+            raise ExchangeError(
+                f"Aligned quantity {aligned_quantity} is below exchange minimum {required_min} "
+                f"for pair {symbol} across {self.exchange1.get_name()}-{self.exchange2.get_name()}"
+            )
+
+        if aligned_quantity < requested_quantity:
+            anchor = self.exchange1.get_name() if step1 >= step2 else self.exchange2.get_name()
+            log.warning(
+                "Delta-neutral size alignment: "
+                f"requested={requested_quantity}, aligned={aligned_quantity}, "
+                f"anchor_exchange={anchor}, anchor_step={coarsest_step}"
+            )
+
+        return aligned_quantity
     
     async def _verify_position_exists(
         self,
@@ -344,9 +469,11 @@ Open position anyway? [Y/n]: """
         3. Рассчитать SL/TP (80% до ликвидации)
         4. Установить SL/TP ордера на биржах
         """
+        execution_quantity = await self._align_quantity_for_delta_neutrality(symbol, quantity)
+
         log.info(f"Opening position with limit orders...")
-        log.info(f"  {self.exchange1.get_name()}: {side1.value} {quantity} @ {price1}")
-        log.info(f"  {self.exchange2.get_name()}: {side2.value} {quantity} @ {price2}")
+        log.info(f"  {self.exchange1.get_name()}: {side1.value} {execution_quantity} @ {price1}")
+        log.info(f"  {self.exchange2.get_name()}: {side2.value} {execution_quantity} @ {price2}")
         
         from ..exchanges.enums import OrderType
         
@@ -355,7 +482,7 @@ Open position anyway? [Y/n]: """
             self.exchange1.open_position(
                 symbol=symbol,
                 side=side1,
-                quantity=quantity,
+                quantity=execution_quantity,
                 leverage=leverage,
                 order_type=OrderType.LIMIT,
                 price=price1
@@ -363,7 +490,7 @@ Open position anyway? [Y/n]: """
             self.exchange2.open_position(
                 symbol=symbol,
                 side=side2,
-                quantity=quantity,
+                quantity=execution_quantity,
                 leverage=leverage,
                 order_type=OrderType.LIMIT,
                 price=price2
@@ -387,7 +514,7 @@ Open position anyway? [Y/n]: """
         log.info(f"Liquidation prices: {self.exchange1.get_name()}={liq_price1:.4f}, {self.exchange2.get_name()}={liq_price2:.4f}")
         
         # 3. Рассчитываем SL/TP по ROI (из .env: DEFAULT_STOP_LOSS_PERCENT / DEFAULT_TAKE_PROFIT_PERCENT)
-        position_size_usd = price1 * quantity
+        position_size_usd = price1 * execution_quantity
         sl1, tp1 = calculate_sl_tp_by_roi(
             entry_price=price1,
             position_size_usd=position_size_usd,
@@ -415,8 +542,8 @@ Open position anyway? [Y/n]: """
         try:
             for attempt in range(2):
                 try:
-                    await self.exchange1.set_stop_loss(symbol, side1, sl1, quantity)
-                    await self.exchange1.set_take_profit(symbol, side1, tp1, quantity)
+                    await self.exchange1.set_stop_loss(symbol, side1, sl1, execution_quantity)
+                    await self.exchange1.set_take_profit(symbol, side1, tp1, execution_quantity)
                     break
                 except Exception as e:
                     if attempt == 0:
@@ -426,8 +553,8 @@ Open position anyway? [Y/n]: """
             
             for attempt in range(2):
                 try:
-                    await self.exchange2.set_stop_loss(symbol, side2, sl2, quantity)
-                    await self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
+                    await self.exchange2.set_stop_loss(symbol, side2, sl2, execution_quantity)
+                    await self.exchange2.set_take_profit(symbol, side2, tp2, execution_quantity)
                     break
                 except Exception as e:
                     if attempt == 0:
@@ -448,8 +575,8 @@ Open position anyway? [Y/n]: """
         pair_id = f"pair_{symbol}_{int(asyncio.get_event_loop().time())}_{uuid.uuid4().hex[:8]}"
         
         # Calculate initial capital and fees (hit-the-bid uses limit orders = maker fees)
-        position_value1 = quantity * price1
-        position_value2 = quantity * price2
+        position_value1 = execution_quantity * price1
+        position_value2 = execution_quantity * price2
         initial_capital = position_value1 + position_value2
         
         # Get exchange enums for fee calculation
@@ -476,7 +603,7 @@ Open position anyway? [Y/n]: """
             exchange2_entry_price=price2,
             exchange2_current_price=price2,
             exchange2_leverage=leverage,
-            quantity=quantity,
+            quantity=execution_quantity,
             entry_time=time.time(),
             pair_id=pair_id,  # Link both positions
             stop_loss_price=sl1,  # Используем SL первой биржи как "общий"
@@ -517,6 +644,7 @@ Open position anyway? [Y/n]: """
             Tuple[Position, message] or None if failed
         """
         log.info(f"⚡ Starting MARKET MODE for {symbol}")
+        execution_quantity = await self._align_quantity_for_delta_neutrality(symbol, quantity)
         
         side2 = PositionSide.LONG if side1 == PositionSide.SHORT else PositionSide.SHORT
         
@@ -585,8 +713,8 @@ Open position anyway? [Y/n]: """
             return None
         
         log.info("Opening market position...")
-        log.info(f"  {self.exchange1.get_name()}: {side1.value} {quantity} @ MARKET")
-        log.info(f"  {self.exchange2.get_name()}: {side2.value} {quantity} @ MARKET")
+        log.info(f"  {self.exchange1.get_name()}: {side1.value} {execution_quantity} @ MARKET")
+        log.info(f"  {self.exchange2.get_name()}: {side2.value} {execution_quantity} @ MARKET")
         
         # 4. Установить leverage
         await asyncio.gather(
@@ -600,14 +728,14 @@ Open position anyway? [Y/n]: """
                 self.exchange1.open_position(
                     symbol=symbol,
                     side=side1,
-                    quantity=quantity,
+                    quantity=execution_quantity,
                     leverage=leverage,
                     order_type='market'  # Market order!
                 ),
                 self.exchange2.open_position(
                     symbol=symbol,
                     side=side2,
-                    quantity=quantity,
+                    quantity=execution_quantity,
                     leverage=leverage,
                     order_type='market'  # Market order!
                 )
@@ -638,7 +766,7 @@ Open position anyway? [Y/n]: """
         log.info(f"Liquidation prices: {self.exchange1.get_name()}={liq_price1:.4f}, {self.exchange2.get_name()}={liq_price2:.4f}")
         
         # 8. Calculate and set SL/TP по ROI (из .env)
-        position_size_usd = actual_price1 * quantity
+        position_size_usd = actual_price1 * execution_quantity
         sl1, tp1 = calculate_sl_tp_by_roi(
             entry_price=actual_price1,
             position_size_usd=position_size_usd,
@@ -666,8 +794,8 @@ Open position anyway? [Y/n]: """
         try:
             for attempt in range(2):
                 try:
-                    await self.exchange1.set_stop_loss(symbol, side1, sl1, quantity)
-                    await self.exchange1.set_take_profit(symbol, side1, tp1, quantity)
+                    await self.exchange1.set_stop_loss(symbol, side1, sl1, execution_quantity)
+                    await self.exchange1.set_take_profit(symbol, side1, tp1, execution_quantity)
                     break
                 except Exception as e:
                     if attempt == 0:
@@ -677,8 +805,8 @@ Open position anyway? [Y/n]: """
             
             for attempt in range(2):
                 try:
-                    await self.exchange2.set_stop_loss(symbol, side2, sl2, quantity)
-                    await self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
+                    await self.exchange2.set_stop_loss(symbol, side2, sl2, execution_quantity)
+                    await self.exchange2.set_take_profit(symbol, side2, tp2, execution_quantity)
                     break
                 except Exception as e:
                     if attempt == 0:
@@ -697,8 +825,8 @@ Open position anyway? [Y/n]: """
         pair_id = f"pair_{symbol}_{int(asyncio.get_event_loop().time())}_{uuid.uuid4().hex[:8]}"
         
         # Calculate initial capital and fees (market mode uses taker fees)
-        position_value1 = quantity * actual_price1
-        position_value2 = quantity * actual_price2
+        position_value1 = execution_quantity * actual_price1
+        position_value2 = execution_quantity * actual_price2
         initial_capital = position_value1 + position_value2
         
         # Get exchange enums for fee calculation
@@ -725,7 +853,7 @@ Open position anyway? [Y/n]: """
             exchange2_entry_price=actual_price2,
             exchange2_current_price=actual_price2,
             exchange2_leverage=leverage,
-            quantity=quantity,
+            quantity=execution_quantity,
             entry_time=time.time(),
             pair_id=pair_id,  # Link both positions
             execution_mode="market",
@@ -777,6 +905,7 @@ Open position anyway? [Y/n]: """
             Tuple[Position, analysis_message] or None if rejected
         """
         log.info(f"🔄 Starting STABLE SPREAD MODE for {symbol}")
+        execution_quantity = await self._align_quantity_for_delta_neutrality(symbol, quantity)
         
         side2 = PositionSide.LONG if side1 == PositionSide.SHORT else PositionSide.SHORT
         
@@ -788,7 +917,7 @@ Open position anyway? [Y/n]: """
         # Build a synthetic single-level book from bid/ask price data so stable_spread
         # can still compute an aggressive price.  We use a huge synthetic quantity so
         # calculate_aggressive_fill_price sees "infinite" liquidity at that price.
-        SYNTHETIC_QTY = quantity * 1000
+        SYNTHETIC_QTY = execution_quantity * 1000
         if not ob1.asks or not ob1.bids:
             pd1 = await self.exchange1.get_price_data(symbol)
             ask1 = pd1.ask if pd1.ask > 0 else pd1.bid
@@ -810,7 +939,7 @@ Open position anyway? [Y/n]: """
             # Ex1: BUY (eat asks), Ex2: SELL (eat bids)
             try:
                 exec_price1, avg_price1 = calculate_aggressive_fill_price(
-                    ob1.asks, quantity, "BUY"
+                    ob1.asks, execution_quantity, "BUY"
                 )
             except Exception as e:
                 log.error(
@@ -824,7 +953,7 @@ Open position anyway? [Y/n]: """
 
             try:
                 exec_price2, avg_price2 = calculate_aggressive_fill_price(
-                    ob2.bids, quantity, "SELL"
+                    ob2.bids, execution_quantity, "SELL"
                 )
             except Exception as e:
                 log.error(
@@ -839,7 +968,7 @@ Open position anyway? [Y/n]: """
             # Ex1: SELL (eat bids), Ex2: BUY (eat asks)
             try:
                 exec_price1, avg_price1 = calculate_aggressive_fill_price(
-                    ob1.bids, quantity, "SELL"
+                    ob1.bids, execution_quantity, "SELL"
                 )
             except Exception as e:
                 log.error(
@@ -853,7 +982,7 @@ Open position anyway? [Y/n]: """
 
             try:
                 exec_price2, avg_price2 = calculate_aggressive_fill_price(
-                    ob2.asks, quantity, "BUY"
+                    ob2.asks, execution_quantity, "BUY"
                 )
             except Exception as e:
                 log.error(
@@ -923,8 +1052,8 @@ Open position? [Y/n]: """
         from ..exchanges.enums import OrderType
         
         log.info(f"Opening stable spread position (aggressive LIMIT)...")
-        log.info(f"  {self.exchange1.get_name()}: {side1.value} {quantity} @ {exec_price1:.6f} (aggressive)")
-        log.info(f"  {self.exchange2.get_name()}: {side2.value} {quantity} @ {exec_price2:.6f} (aggressive)")
+        log.info(f"  {self.exchange1.get_name()}: {side1.value} {execution_quantity} @ {exec_price1:.6f} (aggressive)")
+        log.info(f"  {self.exchange2.get_name()}: {side2.value} {execution_quantity} @ {exec_price2:.6f} (aggressive)")
         
         pos1 = None
         pos2 = None
@@ -935,7 +1064,7 @@ Open position? [Y/n]: """
             pos1 = await self.exchange1.open_position(
                 symbol=symbol,
                 side=side1,
-                quantity=quantity,
+                quantity=execution_quantity,
                 leverage=leverage,
                 order_type=OrderType.LIMIT,
                 price=exec_price1
@@ -962,7 +1091,7 @@ Open position? [Y/n]: """
             pos2 = await self.exchange2.open_position(
                 symbol=symbol,
                 side=side2,
-                quantity=quantity,
+                quantity=execution_quantity,
                 leverage=leverage,
                 order_type=OrderType.LIMIT,
                 price=exec_price2
@@ -1017,7 +1146,7 @@ Open position? [Y/n]: """
         log.info(f"Liquidation prices: {self.exchange1.get_name()}={liq_price1:.4f}, {self.exchange2.get_name()}={liq_price2:.4f}")
         
         # 8. Рассчитать SL/TP по ROI (из .env)
-        position_size_usd = avg_price1 * quantity
+        position_size_usd = avg_price1 * execution_quantity
         sl1, tp1 = calculate_sl_tp_by_roi(
             entry_price=avg_price1,
             position_size_usd=position_size_usd,
@@ -1045,8 +1174,8 @@ Open position? [Y/n]: """
             # Set SL/TP sequentially with retry for better reliability
             for attempt in range(2):
                 try:
-                    await self.exchange1.set_stop_loss(symbol, side1, sl1, quantity)
-                    await self.exchange1.set_take_profit(symbol, side1, tp1, quantity)
+                    await self.exchange1.set_stop_loss(symbol, side1, sl1, execution_quantity)
+                    await self.exchange1.set_take_profit(symbol, side1, tp1, execution_quantity)
                     log.success(f"✓ {self.exchange1.get_name()} SL/TP set")
                     break
                 except Exception as e:
@@ -1058,8 +1187,8 @@ Open position? [Y/n]: """
             
             for attempt in range(2):
                 try:
-                    await self.exchange2.set_stop_loss(symbol, side2, sl2, quantity)
-                    await self.exchange2.set_take_profit(symbol, side2, tp2, quantity)
+                    await self.exchange2.set_stop_loss(symbol, side2, sl2, execution_quantity)
+                    await self.exchange2.set_take_profit(symbol, side2, tp2, execution_quantity)
                     log.success(f"✓ {self.exchange2.get_name()} SL/TP set")
                     break
                 except Exception as e:
@@ -1081,8 +1210,8 @@ Open position? [Y/n]: """
         pair_id = f"pair_{symbol}_{int(asyncio.get_event_loop().time())}_{uuid.uuid4().hex[:8]}"
         
         # Calculate initial capital and fees (stable_spread uses limit orders = maker fees)
-        position_value1 = quantity * avg_price1
-        position_value2 = quantity * avg_price2
+        position_value1 = execution_quantity * avg_price1
+        position_value2 = execution_quantity * avg_price2
         initial_capital = position_value1 + position_value2
         
         # Get exchange enums for fee calculation
@@ -1109,7 +1238,7 @@ Open position? [Y/n]: """
             exchange2_entry_price=avg_price2,  # Use avg price as actual entry
             exchange2_current_price=avg_price2,
             exchange2_leverage=leverage,
-            quantity=quantity,
+            quantity=execution_quantity,
             entry_time=time.time(),
             pair_id=pair_id,  # Link both positions
             execution_mode="stable_spread",

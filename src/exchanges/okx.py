@@ -331,15 +331,85 @@ class OKXExchange(BaseExchange):
         """
         try:
             ccxt_symbol = self._convert_symbol(symbol)
+
+            def _is_pos_side_error(exc: Exception) -> bool:
+                msg = str(exc).lower()
+                return ('51000' in msg and 'posside' in msg) or 'parameter posside error' in msg
+
+            async def _set_leverage_with_pos_side_fallback() -> None:
+                base_params = {'mgnMode': 'isolated'}
+                desired_pos_side = 'long' if side == PositionSide.LONG else 'short'
+                attempts = [
+                    base_params,
+                    {**base_params, 'posSide': desired_pos_side},
+                    {**base_params, 'posSide': 'net'},
+                ]
+
+                last_error: Optional[Exception] = None
+                for params in attempts:
+                    try:
+                        await self.client.set_leverage(leverage, ccxt_symbol, params=params)
+                        return
+                    except Exception as e:
+                        msg = str(e).lower()
+                        if 'leverage' in msg and 'same' in msg:
+                            return
+                        if _is_pos_side_error(e):
+                            last_error = e
+                            continue
+                        raise
+
+                if last_error:
+                    raise last_error
+
+            async def _create_order_with_pos_side_fallback(
+                order_type_str: str,
+                order_side: str,
+                amount: float,
+                limit_price: Optional[float],
+            ) -> Dict[str, Any]:
+                base_params = {'tdMode': 'isolated'}
+                open_pos_side = 'long' if side == PositionSide.LONG else 'short'
+                attempts = [
+                    base_params,
+                    {**base_params, 'posSide': open_pos_side},
+                    {**base_params, 'posSide': 'net'},
+                ]
+
+                last_error: Optional[Exception] = None
+                for params in attempts:
+                    try:
+                        if order_type == OrderType.LIMIT:
+                            return await self.client.create_order(
+                                symbol=ccxt_symbol,
+                                type=order_type_str,
+                                side=order_side,
+                                amount=amount,
+                                price=limit_price,
+                                params=params,
+                            )
+
+                        return await self.client.create_order(
+                            symbol=ccxt_symbol,
+                            type=order_type_str,
+                            side=order_side,
+                            amount=amount,
+                            params=params,
+                        )
+                    except Exception as e:
+                        if _is_pos_side_error(e):
+                            last_error = e
+                            continue
+                        raise
+
+                if last_error:
+                    raise last_error
+                raise ExchangeError("Failed to create OKX order with posSide fallback")
             
             # 1. Set leverage for isolated margin mode
-            # OKX requires mgnMode parameter for isolated margin
+            # OKX may require posSide depending on account position mode.
             try:
-                await self.client.set_leverage(
-                    leverage, 
-                    ccxt_symbol,
-                    params={'mgnMode': 'isolated'}
-                )
+                await _set_leverage_with_pos_side_fallback()
             except Exception as e:
                 if 'leverage' not in str(e).lower() and 'same' not in str(e).lower():
                     raise
@@ -350,28 +420,13 @@ class OKXExchange(BaseExchange):
             # 3. Place order
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = 'buy' if side == PositionSide.LONG else 'sell'
-            
-            params = {
-                'tdMode': 'isolated',  # Isolated margin mode
-            }
-            
-            if order_type == OrderType.LIMIT:
-                order = await self.client.create_order(
-                    symbol=ccxt_symbol,
-                    type=order_type_str,
-                    side=order_side,
-                    amount=contracts,  # Use contracts, not quantity
-                    price=price,
-                    params=params
-                )
-            else:
-                order = await self.client.create_order(
-                    symbol=ccxt_symbol,
-                    type=order_type_str,
-                    side=order_side,
-                    amount=contracts,  # Use contracts, not quantity
-                    params=params
-                )
+
+            order = await _create_order_with_pos_side_fallback(
+                order_type_str=order_type_str,
+                order_side=order_side,
+                amount=contracts,
+                limit_price=price,
+            )
             
             # 4. Get position info
             positions = await self.client.fetch_positions([ccxt_symbol])
@@ -455,64 +510,90 @@ class OKXExchange(BaseExchange):
         """
         try:
             ccxt_symbol = self._convert_symbol(symbol)
-            
+
             # 1. Get current position
             positions = await self.client.fetch_positions([ccxt_symbol])
             position = next(
                 (p for p in positions if p['symbol'] == ccxt_symbol and float(p['contracts'] or 0) != 0),
                 None
             )
-            
+
             if not position:
                 # Idempotent close: position is already closed.
                 log.warning(f"OKX close_position: no open position found for {symbol}, treating as closed")
                 return {'symbol': ccxt_symbol, 'contracts': 0, 'side': None}
-            
+
             contracts = float(position['contracts'])
             position_side = position['side']  # 'long' or 'short'
-            
+            pos_side_mode = ((position.get('info') or {}).get('posSide') or position_side or '').lower()
+
             # 2. Place opposite order
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = 'sell' if position_side == 'long' else 'buy'
-            
-            params = {
+
+            def _is_pos_side_error(exc: Exception) -> bool:
+                msg = str(exc).lower()
+                return ('51000' in msg and 'posside' in msg) or 'parameter posside error' in msg
+
+            base_params = {
                 'reduceOnly': True,
                 'tdMode': 'isolated',  # Use isolated margin mode for closing
             }
-            
-            try:
-                if order_type == OrderType.LIMIT:
-                    await self.client.create_order(
-                        symbol=ccxt_symbol,
-                        type=order_type_str,
-                        side=order_side,
-                        amount=abs(contracts),
-                        price=price,
-                        params=params
-                    )
-                else:
-                    await self.client.create_order(
-                        symbol=ccxt_symbol,
-                        type=order_type_str,
-                        side=order_side,
-                        amount=abs(contracts),
-                        params=params
-                    )
-            except Exception as e:
-                msg = str(e).lower()
-                if "50013" in msg or "systems are busy" in msg:
-                    closed = await self._recover_closed_position_after_order_error(
-                        ccxt_symbol=ccxt_symbol,
-                        pre_close_side=position_side,
-                    )
-                    if closed:
-                        log.warning(
-                            "OKX returned transient error during close_position, "
-                            "but closure was confirmed from exchange state"
+
+            desired_pos_side = pos_side_mode if pos_side_mode in {'long', 'short', 'net'} else (
+                'long' if position_side == 'long' else 'short'
+            )
+            attempts = [base_params]
+            if desired_pos_side != 'net':
+                attempts.append({**base_params, 'posSide': desired_pos_side})
+            attempts.append({**base_params, 'posSide': 'net'})
+
+            close_placed = False
+            last_error: Optional[Exception] = None
+            for params in attempts:
+                try:
+                    if order_type == OrderType.LIMIT:
+                        await self.client.create_order(
+                            symbol=ccxt_symbol,
+                            type=order_type_str,
+                            side=order_side,
+                            amount=abs(contracts),
+                            price=price,
+                            params=params,
                         )
-                        return {'symbol': ccxt_symbol, 'contracts': 0, 'side': None}
-                raise
-            
+                    else:
+                        await self.client.create_order(
+                            symbol=ccxt_symbol,
+                            type=order_type_str,
+                            side=order_side,
+                            amount=abs(contracts),
+                            params=params,
+                        )
+                    close_placed = True
+                    break
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "50013" in msg or "systems are busy" in msg:
+                        closed = await self._recover_closed_position_after_order_error(
+                            ccxt_symbol=ccxt_symbol,
+                            pre_close_side=position_side,
+                        )
+                        if closed:
+                            log.warning(
+                                "OKX returned transient error during close_position, "
+                                "but closure was confirmed from exchange state"
+                            )
+                            return {'symbol': ccxt_symbol, 'contracts': 0, 'side': None}
+                        raise
+
+                    if _is_pos_side_error(e):
+                        last_error = e
+                        continue
+                    raise
+
+            if not close_placed and last_error is not None:
+                raise last_error
+
             # 3. Return updated position
             positions = await self.client.fetch_positions([ccxt_symbol])
             open_position = next(
@@ -520,7 +601,7 @@ class OKXExchange(BaseExchange):
                 None
             )
             return open_position or {'symbol': ccxt_symbol, 'contracts': 0, 'side': None}
-            
+
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except Exception as e:
@@ -877,6 +958,7 @@ class OKXExchange(BaseExchange):
                 'quantity_step': market['precision']['amount'],
                 'min_price': market['limits']['price']['min'],
                 'price_tick': market['precision']['price'],
+                'contract_size': market.get('contractSize', 1),
                 'max_leverage': 125,  # OKX max for major pairs
             }
         except ccxt.RateLimitExceeded as e:

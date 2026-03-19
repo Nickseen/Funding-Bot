@@ -241,7 +241,7 @@ async def main_cli():
                 api_key=config.OKX_API_KEY,
                 secret_key=config.OKX_SECRET_KEY,
                 passphrase=config.OKX_PASSPHRASE,
-                testnet=config.is_testnet()
+                testnet=config.is_okx_testnet()
             )
         except Exception as e:
             log.warning(f"Error initializing OKX: {e}")

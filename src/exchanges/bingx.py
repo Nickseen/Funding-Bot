@@ -705,9 +705,11 @@ class BingXExchange(BaseExchange):
             precision = market.get('precision', {})
             info = market.get('info', {})
             
+            # This adapter sends quantity directly in base-asset units to create_order.
+            # Keep contract_size=1 here so execution-engine alignment stays in base units.
             return {
                 'symbol': symbol,
-                'contract_size': float(market.get('contractSize', 1) or 1),
+                'contract_size': 1.0,
                 'min_quantity': float(limits.get('amount', {}).get('min', 0.001) or 0.001),
                 'max_quantity': float(limits.get('amount', {}).get('max', 10000) or 10000),
                 'quantity_step': float(precision.get('amount', 0.001) or 0.001),

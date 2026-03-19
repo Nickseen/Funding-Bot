@@ -42,6 +42,9 @@ class Config:
     OKX_API_KEY: str = os.getenv("OKX_API_KEY", "")
     OKX_SECRET_KEY: str = os.getenv("OKX_SECRET_KEY", "")
     OKX_PASSPHRASE: str = os.getenv("OKX_PASSPHRASE", "")
+    # OKX can run in its own mode independent of BOT_MODE: "mainnet", "testnet", or "auto".
+    # "auto" means follow global BOT_MODE.
+    OKX_MODE: str = os.getenv("OKX_MODE", "auto").lower()
     
     # Gate.io
     GATE_API_KEY: str = os.getenv("GATE_API_KEY", "")
@@ -99,6 +102,20 @@ class Config:
     def is_kucoin_mainnet(cls) -> bool:
         """Check if KuCoin should run in mainnet mode."""
         return not cls.is_kucoin_testnet()
+
+    @classmethod
+    def is_okx_testnet(cls) -> bool:
+        """Check if OKX should run in testnet mode."""
+        if cls.OKX_MODE == "testnet":
+            return True
+        if cls.OKX_MODE == "mainnet":
+            return False
+        return cls.is_testnet()
+
+    @classmethod
+    def is_okx_mainnet(cls) -> bool:
+        """Check if OKX should run in mainnet mode."""
+        return not cls.is_okx_testnet()
     
     @classmethod
     def validate(cls) -> tuple[bool, list[str]]:
@@ -130,6 +147,10 @@ class Config:
         valid_kucoin_modes = ["auto", "testnet", "mainnet"]
         if cls.KUCOIN_MODE not in valid_kucoin_modes:
             errors.append(f"Invalid KUCOIN_MODE: {cls.KUCOIN_MODE}")
+
+        valid_okx_modes = ["auto", "testnet", "mainnet"]
+        if cls.OKX_MODE not in valid_okx_modes:
+            errors.append(f"Invalid OKX_MODE: {cls.OKX_MODE}")
         
         return (len(errors) == 0, errors)
 
