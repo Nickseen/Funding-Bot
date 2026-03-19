@@ -20,6 +20,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 import json
 import ccxt.async_support as ccxt
+from loguru import logger as log
 
 from .base import BaseExchange, ExchangeError, RateLimitError, NetworkError
 from .enums import Exchange, PositionSide, OrderSide, OrderType
@@ -47,10 +48,12 @@ class BingXExchange(BaseExchange):
         self,
         api_key: str,
         secret_key: str,
-        testnet: bool = False
+        testnet: bool = False,
+        settlement_asset: str = "auto",
     ):
         super().__init__(api_key, secret_key, testnet=testnet)
         self.exchange_name = Exchange.BINGX
+        self.settlement_asset = settlement_asset.lower()
         
         # Initialize ccxt client
         self.client = ccxt.bingx({
@@ -68,6 +71,20 @@ class BingXExchange(BaseExchange):
         # BingX has demo trading mode, not traditional testnet
         if testnet:
             self.client.set_sandbox_mode(True)
+
+    def _resolve_settlement_asset(self) -> str:
+        """
+        Resolve settlement token for balance parsing.
+
+        Rules:
+        - auto: VST in demo/testnet, USDT in mainnet
+        - vst/usdt: explicit override from config
+        """
+        if self.settlement_asset == 'vst':
+            return 'VST'
+        if self.settlement_asset == 'usdt':
+            return 'USDT'
+        return 'VST' if self.testnet else 'USDT'
     
     # ============================================
     # CONNECTION
@@ -856,13 +873,21 @@ class BingXExchange(BaseExchange):
     
     def _parse_balance(self, data: Dict[str, Any]) -> Balance:
         """Convert BingX balance to Balance object"""
-        # BingX uses different tokens for mainnet vs demo:
-        # - Mainnet: USDT
-        # - Demo: VST (Virtual Standard Token)
-        token = 'VST' if self.testnet else 'USDT'
+        # BingX can expose either real USDT or demo VST depending on mode/account.
+        token = self._resolve_settlement_asset()
         
         # ccxt normalizes balance - look for the appropriate token
         balance_data = data.get(token, data.get('info', {}).get(token, {}))
+
+        # Fallback to another token if selected token is absent in payload.
+        if not balance_data:
+            fallback_token = 'USDT' if token == 'VST' else 'VST'
+            fallback_data = data.get(fallback_token, data.get('info', {}).get(fallback_token, {}))
+            if fallback_data:
+                log.warning(
+                    f"BingX balance token {token} not found, using {fallback_token} fallback"
+                )
+                balance_data = fallback_data
         
         if isinstance(balance_data, dict):
             total = float(balance_data.get('total', 0) or 0)
