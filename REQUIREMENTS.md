@@ -1691,3 +1691,33 @@ async def get_income_history(
 - ✅ Total PnL корректно учитывает funding и fees
 
 ---
+
+### 2026-03-19
+- **fix(bingx)**: improve TP/SL handling and cleanup residual open orders (commit `2b3323c`)
+    - Добавлен override `close_position()` с post-close cleanup: после закрытия позиции выполняется отмена всех открытых ордеров по символу через native endpoint `swap_v2_private_delete_trade_allopenorders`.
+    - Добавлен helper `_build_bingx_tpsl_json()` для корректной сериализации TP/SL payload (`type`, `stopPrice`, `price`, `workingType`).
+    - В `_api_set_stop_loss()` и `_api_set_take_profit()` приоритетно используется native `swap_v2_private_post_trade_order` с параметрами `closePosition=true` и вложенными `stopLoss`/`takeProfit`; оставлен fallback на unified CCXT `create_stop_loss_order()` / `create_take_profit_order()`.
+    - `_api_close_position()` сделан идемпотентным: при отсутствии позиции возвращает закрытое состояние вместо exception.
+    - Добавлен явный `ccxt.NetworkError -> NetworkError` mapping в `_api_get_ticker()`.
+    - Файл: `src/exchanges/bingx.py`
+
+- **fix(exchanges)**: make close idempotent and clamp contract amounts (commit `9a4fcc4`)
+    - Закрытие позиции сделано идемпотентным в адаптерах Binance/Bybit/Gate/MEXC: если активная позиция уже отсутствует, возвращается `{'contracts': 0}` вместо ошибки `No position found`.
+    - После close во всех 4 адаптерах возвращается только реально открытая позиция (`contracts != 0`) или закрытое состояние, что убирает ложные OPEN статусы из `fetch_positions()`.
+    - Добавлен clamp количества контрактов для ордеров:
+        - Gate: `contracts = max(1, int(round(...)))`
+        - MEXC: minimum 1 contract при конвертации quantity -> contracts
+    - Файлы: `src/exchanges/binance.py`, `src/exchanges/bybit.py`, `src/exchanges/gate.py`, `src/exchanges/mexc.py`
+
+- **fix(execution)**: stabilize quantity alignment and normalize base-unit constraints (commit `911f0f4`)
+    - В `ExecutionEngine` разделены понятия шага и минимума: `min_quantity` больше не используется как шаг квантизации, что устраняет завышение объема (например, DOGE 42.58 -> 42.0 вместо 38.0).
+    - Добавлена проверка минимально допустимого объема после выравнивания (`required_min`) для пары бирж.
+    - Для BingX в `_api_get_symbol_info()` `contract_size` нормализован к `1.0`, так как адаптер отправляет quantity в base units.
+    - Добавлены регрессионные тесты на alignment, BingX symbol info и edge-cases по шагу/precision.
+    - Файлы: `src/core/execution_engine.py`, `src/exchanges/bingx.py`, `tests/unit/test_execution_engine_quantity_alignment.py`, `tests/unit/test_execution_engine_okx_step_parsing.py`, `tests/unit/exchange/test_bingx_exchange.py`
+
+- **fix(okx)**: add posSide fallback for close path in isolated mode (commit `911f0f4`)
+    - В `_api_close_position()` реализованы попытки `create_order` с параметрами: `no posSide -> posSide=long|short -> posSide=net`.
+    - Сохранена recovery-логика для transient ошибки `50013` ("Systems are busy") с подтверждением фактического закрытия по состоянию позиции.
+    - Добавлены тесты на fallback закрытия: retry с `posSide=long` и fallback в `posSide=net` при ошибке `51000 Parameter posSide error`.
+    - Файлы: `src/exchanges/okx.py`, `tests/unit/exchange/test_okx_posside_fallback.py`
