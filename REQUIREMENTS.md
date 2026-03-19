@@ -1328,7 +1328,11 @@ async def funding_monitoring_loop():
   - Hedge mode (positionSide: LONG/SHORT)
   - Leverage control (per-side в hedge mode)
   - Funding rate queries
-  - Demo mode (VST - Virtual Standard Token)
+    - Demo mode (VST - Virtual Standard Token)
+    - Mainnet mode (real USDT for live pairs)
+    - Конфигурируемое переключение через `.env`:
+        - `BINGX_MODE=auto|testnet|mainnet`
+        - `BINGX_SETTLEMENT_ASSET=auto|vst|usdt`
   - Протестировано на demo (100k VST)
 - **Bitget** - полная CCXT интеграция (14 Jan 2026, обновлено 24 Feb 2026)
   - Market/Limit orders
@@ -1693,6 +1697,13 @@ async def get_income_history(
 ---
 
 ### 2026-03-19
+- **feat(config,bingx)**: add env switches for BingX mainnet/demo and settlement asset
+    - Добавлены настройки `BINGX_MODE` (`auto|testnet|mainnet`) и `BINGX_SETTLEMENT_ASSET` (`auto|vst|usdt`) в конфиг.
+    - Инициализация BingX в `main.py` теперь использует `config.is_bingx_testnet()` вместо глобального `BOT_MODE` и передает `settlement_asset` в адаптер.
+    - В `bingx.py` добавлен `settlement_asset` override и fallback логика парсинга баланса (`VST` <-> `USDT`) для сценариев, где биржа возвращает другой токен.
+    - Обновлен `.env.example` с примерами новых переменных.
+    - Файлы: `config/config.py`, `src/main.py`, `src/exchanges/bingx.py`, `.env.example`, `REQUIREMENTS.md`
+
 - **fix(bingx)**: improve TP/SL handling and cleanup residual open orders (commit `2b3323c`)
     - Добавлен override `close_position()` с post-close cleanup: после закрытия позиции выполняется отмена всех открытых ордеров по символу через native endpoint `swap_v2_private_delete_trade_allopenorders`.
     - Добавлен helper `_build_bingx_tpsl_json()` для корректной сериализации TP/SL payload (`type`, `stopPrice`, `price`, `workingType`).
