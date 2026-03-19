@@ -53,6 +53,14 @@ class Config:
     # BingX
     BINGX_API_KEY: str = os.getenv("BINGX_API_KEY", "")
     BINGX_SECRET_KEY: str = os.getenv("BINGX_SECRET_KEY", "")
+    # BingX can run in its own mode independent of BOT_MODE: "mainnet", "testnet", or "auto".
+    # "auto" means follow global BOT_MODE.
+    BINGX_MODE: str = os.getenv("BINGX_MODE", "auto").lower()
+    # Settlement/balance asset switch for BingX:
+    # - auto: VST in testnet, USDT in mainnet
+    # - vst: force Virtual USDT (demo)
+    # - usdt: force real USDT
+    BINGX_SETTLEMENT_ASSET: str = os.getenv("BINGX_SETTLEMENT_ASSET", "auto").lower()
     
     # Bitget
     BITGET_API_KEY: str = os.getenv("BITGET_API_KEY", "")
@@ -116,6 +124,20 @@ class Config:
     def is_okx_mainnet(cls) -> bool:
         """Check if OKX should run in mainnet mode."""
         return not cls.is_okx_testnet()
+
+    @classmethod
+    def is_bingx_testnet(cls) -> bool:
+        """Check if BingX should run in testnet/demo mode."""
+        if cls.BINGX_MODE == "testnet":
+            return True
+        if cls.BINGX_MODE == "mainnet":
+            return False
+        return cls.is_testnet()
+
+    @classmethod
+    def is_bingx_mainnet(cls) -> bool:
+        """Check if BingX should run in mainnet mode."""
+        return not cls.is_bingx_testnet()
     
     @classmethod
     def validate(cls) -> tuple[bool, list[str]]:
@@ -151,6 +173,16 @@ class Config:
         valid_okx_modes = ["auto", "testnet", "mainnet"]
         if cls.OKX_MODE not in valid_okx_modes:
             errors.append(f"Invalid OKX_MODE: {cls.OKX_MODE}")
+
+        valid_bingx_modes = ["auto", "testnet", "mainnet"]
+        if cls.BINGX_MODE not in valid_bingx_modes:
+            errors.append(f"Invalid BINGX_MODE: {cls.BINGX_MODE}")
+
+        valid_bingx_assets = ["auto", "vst", "usdt"]
+        if cls.BINGX_SETTLEMENT_ASSET not in valid_bingx_assets:
+            errors.append(
+                f"Invalid BINGX_SETTLEMENT_ASSET: {cls.BINGX_SETTLEMENT_ASSET}"
+            )
         
         return (len(errors) == 0, errors)
 

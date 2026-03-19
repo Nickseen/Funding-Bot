@@ -261,7 +261,8 @@ async def main_cli():
             exchanges['bingx'] = BingXExchange(
                 api_key=config.BINGX_API_KEY,
                 secret_key=config.BINGX_SECRET_KEY,
-                testnet=config.is_testnet()
+                testnet=config.is_bingx_testnet(),
+                settlement_asset=config.BINGX_SETTLEMENT_ASSET,
             )
         except Exception as e:
             log.warning(f"Error initializing BingX: {e}")
