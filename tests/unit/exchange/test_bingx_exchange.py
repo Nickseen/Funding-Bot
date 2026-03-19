@@ -189,6 +189,29 @@ class TestBingXExchange:
         assert funding.rate_bps == 1.0
         assert funding.next_funding_time.year == 2022
 
+    @pytest.mark.asyncio
+    async def test_api_get_symbol_info_uses_base_quantity_units(self, bingx_exchange):
+        """ExecutionEngine expects BingX quantity constraints already in base units."""
+        ccxt_symbol = "DOGE/USDT:USDT"
+        bingx_exchange.client.markets = {
+            ccxt_symbol: {
+                "contractSize": 0.163,
+                "limits": {
+                    "amount": {"min": 20, "max": 1000000},
+                    "price": {"min": 0.0001},
+                },
+                "precision": {"amount": 1, "price": 0.0001},
+                "info": {"maxLeverage": 50},
+            }
+        }
+
+        symbol_info = await bingx_exchange._api_get_symbol_info("DOGEUSDT")
+
+        # Even if exchange metadata contains contractSize, this adapter trades in base qty.
+        assert symbol_info["contract_size"] == pytest.approx(1.0)
+        assert symbol_info["min_quantity"] == pytest.approx(20.0)
+        assert symbol_info["quantity_step"] == pytest.approx(1.0)
+
     # 3. CCXT Error Handling Tests
     @pytest.mark.asyncio
     async def test_api_get_orderbook_rate_limit(self, bingx_exchange):

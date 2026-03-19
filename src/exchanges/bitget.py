@@ -144,6 +144,49 @@ class BitgetExchange(BaseExchange):
             return f"{symbol}_UMCBL"
         
         return symbol
+
+    def _to_contract_amount(self, ccxt_symbol: str, quantity: float) -> float:
+        """Convert base-asset quantity to Bitget contracts with min/precision clamp."""
+        market = self.client.markets.get(ccxt_symbol, {})
+        contract_size = float(market.get('contractSize', 1) or 1)
+
+        raw_contracts = float(quantity) / contract_size if contract_size > 0 else float(quantity)
+
+        limits = market.get('limits', {}) or {}
+        amount_limits = limits.get('amount', {}) or {}
+        min_amount = amount_limits.get('min')
+        min_amount = float(min_amount) if isinstance(min_amount, (int, float)) else None
+
+        contracts = raw_contracts
+        if min_amount is not None and contracts < min_amount:
+            contracts = min_amount
+
+        try:
+            contracts = float(self.client.amount_to_precision(ccxt_symbol, contracts))
+        except Exception:
+            contracts = float(contracts)
+
+        if min_amount is not None and contracts < min_amount:
+            contracts = min_amount
+
+        if contracts <= 0:
+            raise ExchangeError(
+                f"Calculated non-positive contract amount for {ccxt_symbol}: {contracts}"
+            )
+
+        return contracts
+
+    def _is_already_set_error(self, error: Exception) -> bool:
+        """Detect idempotent leverage/margin errors that are safe to ignore."""
+        msg = str(error).lower()
+        safe_markers = [
+            'already',
+            'same',
+            'not modified',
+            'no need to change',
+            'unchanged',
+        ]
+        return any(marker in msg for marker in safe_markers)
     
     # ============================================
     # API ADAPTERS (pure API calls, no validation!)
@@ -207,22 +250,13 @@ class BitgetExchange(BaseExchange):
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             
-            # 1. Set leverage
-            try:
-                await self.client.set_leverage(
-                    leverage, 
-                    ccxt_symbol,
-                    params={
-                        'productType': 'umcbl',
-                        'marginCoin': 'USDT',
-                    }
-                )
-            except Exception as e:
-                # Only ignore if leverage is already the same
-                if 'leverage' not in str(e).lower() and 'same' not in str(e).lower():
-                    raise ExchangeError(f"Failed to set leverage: {e}")
+            # 1. Set leverage (strict; do not swallow generic errors)
+            await self._api_set_leverage(symbol, leverage)
             
-            # 2. Place order with isolated margin mode
+            # 2. Convert base quantity to contracts
+            contracts = self._to_contract_amount(ccxt_symbol, quantity)
+
+            # 3. Place order with isolated margin mode
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = 'buy' if side == PositionSide.LONG else 'sell'
             
@@ -239,7 +273,7 @@ class BitgetExchange(BaseExchange):
                         symbol=ccxt_symbol,
                         type=order_type_str,
                         side=order_side,
-                        amount=quantity,
+                        amount=contracts,
                         price=price,
                         params=params
                     )
@@ -248,7 +282,7 @@ class BitgetExchange(BaseExchange):
                         symbol=ccxt_symbol,
                         type=order_type_str,
                         side=order_side,
-                        amount=quantity,
+                        amount=contracts,
                         params=params
                     )
             except ccxt.InvalidOrder as e:
@@ -264,7 +298,7 @@ class BitgetExchange(BaseExchange):
                             symbol=ccxt_symbol,
                             type=order_type_str,
                             side=order_side,
-                            amount=quantity,
+                            amount=contracts,
                             price=price,
                             params=params
                         )
@@ -273,18 +307,40 @@ class BitgetExchange(BaseExchange):
                             symbol=ccxt_symbol,
                             type=order_type_str,
                             side=order_side,
-                            amount=quantity,
+                            amount=contracts,
                             params=params
                         )
                 else:
                     raise
             
-            # 3. Get position info
+            # 4. Get position info
             positions = await self.client.fetch_positions([ccxt_symbol])
             position_data = next(
                 (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
                 None
             )
+
+            # Safety check: ensure exchange applied requested leverage.
+            if position_data:
+                try:
+                    actual_leverage = int(float(position_data.get('leverage', 0) or 0))
+                except Exception:
+                    actual_leverage = 0
+
+                if actual_leverage > 0 and actual_leverage != int(leverage):
+                    log.error(
+                        f"Bitget leverage mismatch for {symbol}: requested={leverage}x, "
+                        f"actual={actual_leverage}x. Rolling back position."
+                    )
+                    try:
+                        await self.client.close_position(ccxt_symbol)
+                    except Exception as close_err:
+                        log.critical(
+                            f"Bitget rollback failed for {symbol} after leverage mismatch: {close_err}"
+                        )
+                    raise ExchangeError(
+                        f"Bitget applied unexpected leverage: requested {leverage}x, got {actual_leverage}x"
+                    )
             
             return position_data or order
             
@@ -365,6 +421,9 @@ class BitgetExchange(BaseExchange):
             ccxt_symbol = self._convert_symbol(symbol)
             order_type_str = 'market' if order_type == OrderType.MARKET else 'limit'
             order_side = side.value.lower()
+
+            # Normalize base quantity to exchange contracts.
+            contracts = self._to_contract_amount(ccxt_symbol, quantity)
             
             params = {}
             if reduce_only:
@@ -375,7 +434,7 @@ class BitgetExchange(BaseExchange):
                     symbol=ccxt_symbol,
                     type=order_type_str,
                     side=order_side,
-                    amount=quantity,
+                    amount=contracts,
                     price=price,
                     params=params
                 )
@@ -384,7 +443,7 @@ class BitgetExchange(BaseExchange):
                     symbol=ccxt_symbol,
                     type=order_type_str,
                     side=order_side,
-                    amount=quantity,
+                    amount=contracts,
                     params=params
                 )
             
@@ -422,8 +481,8 @@ class BitgetExchange(BaseExchange):
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except Exception as e:
-            # Bitget may return error if leverage is already set
-            if 'leverage' in str(e).lower() or 'same' in str(e).lower():
+            # Only ignore idempotent responses; everything else must fail loudly.
+            if self._is_already_set_error(e):
                 return True
             raise ExchangeError(f"Failed to set leverage: {e}")
     
@@ -710,6 +769,20 @@ class BitgetExchange(BaseExchange):
         side = data.get('side', '')  # 'long' or 'short'
         entry_price = float(data.get('entryPrice', 0) or 0)
         notional = float(data.get('notional', 0) or 0)  # Position value in USDT
+
+        # Convert contracts to base quantity for consistency across adapters.
+        contract_size = float(data.get('contractSize', 0) or 0)
+        if contract_size == 0 and symbol:
+            try:
+                market = self.client.markets.get(symbol)
+                if market:
+                    contract_size = float(market.get('contractSize', 1) or 1)
+                else:
+                    contract_size = 1
+            except Exception:
+                contract_size = 1
+
+        quantity_base = abs(contracts * contract_size)
         
         # Extract fees and funding from raw exchange data ('info' field)
         info = data.get('info', {})
@@ -747,7 +820,7 @@ class BitgetExchange(BaseExchange):
             exchange2_entry_price=0,
             exchange2_current_price=0,
             exchange2_leverage=1,
-            quantity=abs(contracts),
+            quantity=quantity_base,
             entry_time=datetime.utcnow().timestamp(),
             stop_loss_price=float(data.get('stopLossPrice', 0) or 0),
             take_profit_price=float(data.get('takeProfitPrice', 0) or 0),

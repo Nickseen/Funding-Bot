@@ -259,7 +259,8 @@ class BybitExchange(BaseExchange):
             )
             
             if not position:
-                raise ExchangeError(f"No position found for {symbol}")
+                # Idempotent close: already closed.
+                return {'symbol': ccxt_symbol, 'contracts': 0, 'side': None}
             
             contracts = float(position['contracts'])
             position_side = position['side']  # 'long' or 'short'
@@ -290,10 +291,11 @@ class BybitExchange(BaseExchange):
             
             # 3. Return updated position (should be closed now)
             positions = await self.client.fetch_positions([ccxt_symbol])
-            return next(
-                (p for p in positions if p['symbol'] == ccxt_symbol),
-                {'symbol': symbol, 'contracts': 0, 'side': None}
+            open_position = next(
+                (p for p in positions if p['symbol'] == ccxt_symbol and float(p.get('contracts', 0) or 0) != 0),
+                None
             )
+            return open_position or {'symbol': ccxt_symbol, 'contracts': 0, 'side': None}
             
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))

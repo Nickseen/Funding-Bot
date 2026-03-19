@@ -338,7 +338,8 @@ class GateExchange(BaseExchange):
             )
             
             if not position:
-                raise ExchangeError(f"No position found for {symbol}")
+                # Idempotent close: no active contracts remain.
+                return {'symbol': ccxt_symbol, 'contracts': 0, 'side': None}
             
             contracts = float(position['contracts'])
             position_side = position.get('side', '')  # 'long' or 'short'
@@ -369,10 +370,11 @@ class GateExchange(BaseExchange):
             
             # 3. Return updated position
             positions = await self.client.fetch_positions([ccxt_symbol])
-            return next(
-                (p for p in positions if p['symbol'] == ccxt_symbol),
-                {'symbol': symbol, 'contracts': 0, 'side': None}
+            open_position = next(
+                (p for p in positions if p['symbol'] == ccxt_symbol and float(p.get('contracts', 0) or 0) != 0),
+                None
             )
+            return open_position or {'symbol': ccxt_symbol, 'contracts': 0, 'side': None}
             
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
@@ -396,6 +398,7 @@ class GateExchange(BaseExchange):
             market = self.client.markets.get(ccxt_symbol, {})
             contract_size = float(market.get('contractSize', 1))
             contracts = round(quantity / contract_size) if contract_size else round(quantity)
+            contracts = max(1, int(contracts))
             
             params = {}
             if reduce_only:

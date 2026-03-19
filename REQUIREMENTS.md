@@ -1328,7 +1328,11 @@ async def funding_monitoring_loop():
   - Hedge mode (positionSide: LONG/SHORT)
   - Leverage control (per-side в hedge mode)
   - Funding rate queries
-  - Demo mode (VST - Virtual Standard Token)
+    - Demo mode (VST - Virtual Standard Token)
+    - Mainnet mode (real USDT for live pairs)
+    - Конфигурируемое переключение через `.env`:
+        - `BINGX_MODE=auto|testnet|mainnet`
+        - `BINGX_SETTLEMENT_ASSET=auto|vst|usdt`
   - Протестировано на demo (100k VST)
 - **Bitget** - полная CCXT интеграция (14 Jan 2026, обновлено 24 Feb 2026)
   - Market/Limit orders
@@ -1367,6 +1371,9 @@ async def funding_monitoring_loop():
 ### Базовая реализация (требует тестирования)
 - **Binance** - REST API адаптер через CCXT
 - **KuCoin** - REST API адаптер через CCXT
+    - Поддержка `KUCOIN_MODE=auto|testnet|mainnet` (можно переопределить глобальный BOT_MODE)
+    - Fallback для sandbox-ограничений: безопасная проверка приватных вызовов через `KUCOIN_TEST_ORDERS=true` (`params.test=True`)
+    - Добавлен `sync_time()` и улучшена обработка sandbox/mainnet сценариев
 
 ### Новые адаптеры (2 февраля 2026)
 - **MEXC** - полная CCXT интеграция
@@ -1385,10 +1392,42 @@ async def funding_monitoring_loop():
 
 ---
 
-**Дата обновления:** 24 февраля 2026  
+**Дата обновления:** 18 марта 2026  
 **Статус:** Phase 1-4 завершены ✅ | Production ready 🚀
 
 ## 📝 Подробный changelog (после 6c57a131cb21d9021c4f079849debb7dd70af0b4)
+
+### 2026-03-18
+- **fix**: OKX SL/TP minimum size error 51020 (`Your order should meet or exceed the minimum order amount`)
+    - Причина: размер `sz` для algo SL/TP округлялся через `int(contracts)`, что обрезало дробные контракты до 0/недопустимого минимума на мелких позициях (например, PEPE)
+    - Решение: добавлены helper-методы форматирования для OKX:
+        - `_to_okx_size_str()` — учитывает precision и min amount инструмента
+        - `_to_okx_trigger_price_str()` — корректный decimal формат trigger price без scientific notation
+    - Также добавлена передача `posSide` для hedge mode и диагностическое логирование payload для SL/TP
+    - Файл: `src/exchanges/okx.py`
+
+- **fix**: OKX transient error 50013 (`Systems are busy`) при открытии позиции
+    - Симптом: API возвращает ошибку, но позиция фактически открывается на бирже (UI показывает OPEN)
+    - Решение: после 50013 добавлен reconciliation-процесс (`fetch_positions()` с retry), который подтверждает фактическое открытие позиции до финального fail
+    - Файл: `src/exchanges/okx.py` (`_recover_position_after_order_error()`)
+
+- **fix**: OKX transient error 50013 при закрытии позиции
+    - Симптом: close бросает ошибку, но позиция уже закрыта на бирже (UI показывает CLOSED)
+    - Решение:
+        - закрытие сделано идемпотентным (если позиция уже отсутствует — считать успехом)
+        - добавлен close reconciliation с retry после 50013 (`_recover_closed_position_after_order_error()`)
+    - Файл: `src/exchanges/okx.py`
+
+- **feat**: KuCoin routing и безопасные режимы API-проверок
+    - Добавлены конфиги: `KUCOIN_MODE` (`auto|testnet|mainnet`) и `KUCOIN_TEST_ORDERS`
+    - В `main.py` подключена инициализация KuCoin с учетом новых режимов
+    - Адаптер KuCoin переработан для sandbox fallback, time sync, и test-order сценариев
+    - Файлы: `config/config.py`, `.env.example`, `src/main.py`, `src/exchanges/kucoin.py`, `tests/unit/exchange/test_kucoin_exchange.py`
+
+- **fix**: Execution stability improvements
+    - В stable spread добавлены более точные ошибки по агрессивному fill (с указанием биржи и стороны стакана)
+    - В CLI убран жесткий минимальный порог `$10` для `position size per leg`, чтобы не блокировать микро-сценарии тестов
+    - Файлы: `src/core/execution_engine.py`, `src/cli/commands.py`
 
 ### 2026-02-24
 - **fix**: Negative funding time display for BingX/Bitget pairs
@@ -1656,3 +1695,40 @@ async def get_income_history(
 - ✅ Total PnL корректно учитывает funding и fees
 
 ---
+
+### 2026-03-19
+- **feat(config,bingx)**: add env switches for BingX mainnet/demo and settlement asset
+    - Добавлены настройки `BINGX_MODE` (`auto|testnet|mainnet`) и `BINGX_SETTLEMENT_ASSET` (`auto|vst|usdt`) в конфиг.
+    - Инициализация BingX в `main.py` теперь использует `config.is_bingx_testnet()` вместо глобального `BOT_MODE` и передает `settlement_asset` в адаптер.
+    - В `bingx.py` добавлен `settlement_asset` override и fallback логика парсинга баланса (`VST` <-> `USDT`) для сценариев, где биржа возвращает другой токен.
+    - Обновлен `.env.example` с примерами новых переменных.
+    - Файлы: `config/config.py`, `src/main.py`, `src/exchanges/bingx.py`, `.env.example`, `REQUIREMENTS.md`
+
+- **fix(bingx)**: improve TP/SL handling and cleanup residual open orders (commit `2b3323c`)
+    - Добавлен override `close_position()` с post-close cleanup: после закрытия позиции выполняется отмена всех открытых ордеров по символу через native endpoint `swap_v2_private_delete_trade_allopenorders`.
+    - Добавлен helper `_build_bingx_tpsl_json()` для корректной сериализации TP/SL payload (`type`, `stopPrice`, `price`, `workingType`).
+    - В `_api_set_stop_loss()` и `_api_set_take_profit()` приоритетно используется native `swap_v2_private_post_trade_order` с параметрами `closePosition=true` и вложенными `stopLoss`/`takeProfit`; оставлен fallback на unified CCXT `create_stop_loss_order()` / `create_take_profit_order()`.
+    - `_api_close_position()` сделан идемпотентным: при отсутствии позиции возвращает закрытое состояние вместо exception.
+    - Добавлен явный `ccxt.NetworkError -> NetworkError` mapping в `_api_get_ticker()`.
+    - Файл: `src/exchanges/bingx.py`
+
+- **fix(exchanges)**: make close idempotent and clamp contract amounts (commit `9a4fcc4`)
+    - Закрытие позиции сделано идемпотентным в адаптерах Binance/Bybit/Gate/MEXC: если активная позиция уже отсутствует, возвращается `{'contracts': 0}` вместо ошибки `No position found`.
+    - После close во всех 4 адаптерах возвращается только реально открытая позиция (`contracts != 0`) или закрытое состояние, что убирает ложные OPEN статусы из `fetch_positions()`.
+    - Добавлен clamp количества контрактов для ордеров:
+        - Gate: `contracts = max(1, int(round(...)))`
+        - MEXC: minimum 1 contract при конвертации quantity -> contracts
+    - Файлы: `src/exchanges/binance.py`, `src/exchanges/bybit.py`, `src/exchanges/gate.py`, `src/exchanges/mexc.py`
+
+- **fix(execution)**: stabilize quantity alignment and normalize base-unit constraints (commit `911f0f4`)
+    - В `ExecutionEngine` разделены понятия шага и минимума: `min_quantity` больше не используется как шаг квантизации, что устраняет завышение объема (например, DOGE 42.58 -> 42.0 вместо 38.0).
+    - Добавлена проверка минимально допустимого объема после выравнивания (`required_min`) для пары бирж.
+    - Для BingX в `_api_get_symbol_info()` `contract_size` нормализован к `1.0`, так как адаптер отправляет quantity в base units.
+    - Добавлены регрессионные тесты на alignment, BingX symbol info и edge-cases по шагу/precision.
+    - Файлы: `src/core/execution_engine.py`, `src/exchanges/bingx.py`, `tests/unit/test_execution_engine_quantity_alignment.py`, `tests/unit/test_execution_engine_okx_step_parsing.py`, `tests/unit/exchange/test_bingx_exchange.py`
+
+- **fix(okx)**: add posSide fallback for close path in isolated mode (commit `911f0f4`)
+    - В `_api_close_position()` реализованы попытки `create_order` с параметрами: `no posSide -> posSide=long|short -> posSide=net`.
+    - Сохранена recovery-логика для transient ошибки `50013` ("Systems are busy") с подтверждением фактического закрытия по состоянию позиции.
+    - Добавлены тесты на fallback закрытия: retry с `posSide=long` и fallback в `posSide=net` при ошибке `51000 Parameter posSide error`.
+    - Файлы: `src/exchanges/okx.py`, `tests/unit/exchange/test_okx_posside_fallback.py`

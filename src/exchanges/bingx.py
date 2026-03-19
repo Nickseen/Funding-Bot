@@ -18,7 +18,9 @@ BingX Notes:
 
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+import json
 import ccxt.async_support as ccxt
+from loguru import logger as log
 
 from .base import BaseExchange, ExchangeError, RateLimitError, NetworkError
 from .enums import Exchange, PositionSide, OrderSide, OrderType
@@ -46,10 +48,12 @@ class BingXExchange(BaseExchange):
         self,
         api_key: str,
         secret_key: str,
-        testnet: bool = False
+        testnet: bool = False,
+        settlement_asset: str = "auto",
     ):
         super().__init__(api_key, secret_key, testnet=testnet)
         self.exchange_name = Exchange.BINGX
+        self.settlement_asset = settlement_asset.lower()
         
         # Initialize ccxt client
         self.client = ccxt.bingx({
@@ -67,6 +71,20 @@ class BingXExchange(BaseExchange):
         # BingX has demo trading mode, not traditional testnet
         if testnet:
             self.client.set_sandbox_mode(True)
+
+    def _resolve_settlement_asset(self) -> str:
+        """
+        Resolve settlement token for balance parsing.
+
+        Rules:
+        - auto: VST in demo/testnet, USDT in mainnet
+        - vst/usdt: explicit override from config
+        """
+        if self.settlement_asset == 'vst':
+            return 'VST'
+        if self.settlement_asset == 'usdt':
+            return 'USDT'
+        return 'VST' if self.testnet else 'USDT'
     
     # ============================================
     # CONNECTION
@@ -177,6 +195,8 @@ class BingXExchange(BaseExchange):
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
+        except ccxt.NetworkError as e:
+            raise NetworkError(str(e))
     
     async def _api_get_mark_price(self, symbol: str) -> float:
         """BingX: GET mark price from ticker"""
@@ -294,7 +314,8 @@ class BingXExchange(BaseExchange):
             )
             
             if not position:
-                raise ExchangeError(f"No position found for {symbol}")
+                # Idempotent close: position is already absent.
+                return {'symbol': ccxt_symbol, 'contracts': 0, 'side': None}
             
             contracts = float(position['contracts'])
             position_side = position.get('side', '')  # 'long' or 'short'
@@ -328,10 +349,11 @@ class BingXExchange(BaseExchange):
             
             # 3. Return updated position (should be closed now)
             positions = await self.client.fetch_positions([ccxt_symbol])
-            return next(
-                (p for p in positions if p['symbol'] == ccxt_symbol),
-                {'symbol': symbol, 'contracts': 0, 'side': None}
+            open_position = next(
+                (p for p in positions if p['symbol'] == ccxt_symbol and float(p.get('contracts', 0) or 0) != 0),
+                None
             )
+            return open_position or {'symbol': ccxt_symbol, 'contracts': 0, 'side': None}
             
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
@@ -339,6 +361,56 @@ class BingXExchange(BaseExchange):
             raise
         except Exception as e:
             raise ExchangeError(f"Failed to close position: {e}")
+
+    async def close_position(
+        self,
+        symbol: str,
+        order_type: OrderType = OrderType.MARKET,
+        price: Optional[float] = None,
+    ):
+        """
+        BingX override: after closing position, cancel remaining open orders for symbol.
+
+        BingX may keep conditional TP/SL orders under Open Orders after position
+        is closed, so we clean them up proactively.
+        """
+        result = None
+        close_error = None
+        try:
+            result = await super().close_position(symbol, order_type, price)
+        except Exception as e:
+            close_error = e
+
+        try:
+            await self._cancel_all_open_orders_for_symbol(symbol)
+        except Exception:
+            # Non-fatal cleanup step.
+            pass
+
+        if close_error:
+            raise close_error
+
+        return result
+
+    async def _cancel_all_open_orders_for_symbol(self, symbol: str) -> None:
+        """Cancel all open orders for a symbol via BingX native endpoint."""
+        try:
+            bingx_symbol = self._to_bingx_symbol(symbol)
+            await self.client.swap_v2_private_delete_trade_allopenorders({
+                'symbol': bingx_symbol,
+            })
+        except Exception as e:
+            raise ExchangeError(f"Failed to cancel BingX open orders for {symbol}: {e}")
+
+    def _build_bingx_tpsl_json(self, order_type: str, trigger_price: float) -> str:
+        """Build BingX TP/SL JSON payload expected by /trade/order params."""
+        payload = {
+            'type': order_type,
+            'stopPrice': float(trigger_price),
+            'price': float(trigger_price),
+            'workingType': 'MARK_PRICE',
+        }
+        return json.dumps(payload, separators=(',', ':'))
     
     async def _api_place_order(
         self,
@@ -454,6 +526,7 @@ class BingXExchange(BaseExchange):
         try:
             from .enums import PositionSide
             ccxt_symbol = self._convert_symbol(symbol)
+            bingx_symbol = self._to_bingx_symbol(symbol)
             
             # Get position to determine size and side
             positions = await self.client.fetch_positions([ccxt_symbol])
@@ -474,18 +547,30 @@ class BingXExchange(BaseExchange):
             # BingX hedge mode requires positionSide
             position_side_param = 'LONG' if pos_side == 'long' else 'SHORT'
             
-            # Use CCXT's createStopLossOrder
-            # BingX hedge mode: don't use reduceOnly, positionSide is sufficient
-            response = await self.client.create_stop_loss_order(
-                symbol=ccxt_symbol,
-                type='market',
-                side=order_side,
-                amount=contracts,
-                stopLossPrice=stop_price,
-                params={
+            # Prefer BingX native TP/SL attachment via /trade/order params.
+            # This is closer to exchange-native "position TP/SL" behavior than
+            # plain conditional orders created via unified wrappers.
+            try:
+                response = await self.client.swap_v2_private_post_trade_order({
+                    'symbol': bingx_symbol,
+                    'side': order_side.upper(),
                     'positionSide': position_side_param,
-                }
-            )
+                    'type': 'MARKET',
+                    'closePosition': 'true',
+                    'stopLoss': self._build_bingx_tpsl_json('STOP_MARKET', stop_price),
+                })
+            except Exception:
+                # Fallback to CCXT unified method.
+                response = await self.client.create_stop_loss_order(
+                    symbol=ccxt_symbol,
+                    type='market',
+                    side=order_side,
+                    amount=contracts,
+                    stopLossPrice=stop_price,
+                    params={
+                        'positionSide': position_side_param,
+                    }
+                )
             
             return {
                 'success': True,
@@ -515,6 +600,7 @@ class BingXExchange(BaseExchange):
         try:
             from .enums import PositionSide
             ccxt_symbol = self._convert_symbol(symbol)
+            bingx_symbol = self._to_bingx_symbol(symbol)
             
             # Get position to determine size and side
             positions = await self.client.fetch_positions([ccxt_symbol])
@@ -535,18 +621,28 @@ class BingXExchange(BaseExchange):
             # BingX hedge mode requires positionSide
             position_side_param = 'LONG' if pos_side == 'long' else 'SHORT'
             
-            # Use CCXT's createTakeProfitOrder
-            # BingX hedge mode: don't use reduceOnly, positionSide is sufficient
-            response = await self.client.create_take_profit_order(
-                symbol=ccxt_symbol,
-                type='market',
-                side=order_side,
-                amount=contracts,
-                takeProfitPrice=take_profit_price,
-                params={
+            # Prefer BingX native TP/SL attachment via /trade/order params.
+            try:
+                response = await self.client.swap_v2_private_post_trade_order({
+                    'symbol': bingx_symbol,
+                    'side': order_side.upper(),
                     'positionSide': position_side_param,
-                }
-            )
+                    'type': 'MARKET',
+                    'closePosition': 'true',
+                    'takeProfit': self._build_bingx_tpsl_json('TAKE_PROFIT_MARKET', take_profit_price),
+                })
+            except Exception:
+                # Fallback to CCXT unified method.
+                response = await self.client.create_take_profit_order(
+                    symbol=ccxt_symbol,
+                    type='market',
+                    side=order_side,
+                    amount=contracts,
+                    takeProfitPrice=take_profit_price,
+                    params={
+                        'positionSide': position_side_param,
+                    }
+                )
             
             return {
                 'success': True,
@@ -626,9 +722,11 @@ class BingXExchange(BaseExchange):
             precision = market.get('precision', {})
             info = market.get('info', {})
             
+            # This adapter sends quantity directly in base-asset units to create_order.
+            # Keep contract_size=1 here so execution-engine alignment stays in base units.
             return {
                 'symbol': symbol,
-                'contract_size': float(market.get('contractSize', 1) or 1),
+                'contract_size': 1.0,
                 'min_quantity': float(limits.get('amount', {}).get('min', 0.001) or 0.001),
                 'max_quantity': float(limits.get('amount', {}).get('max', 10000) or 10000),
                 'quantity_step': float(precision.get('amount', 0.001) or 0.001),
@@ -775,13 +873,21 @@ class BingXExchange(BaseExchange):
     
     def _parse_balance(self, data: Dict[str, Any]) -> Balance:
         """Convert BingX balance to Balance object"""
-        # BingX uses different tokens for mainnet vs demo:
-        # - Mainnet: USDT
-        # - Demo: VST (Virtual Standard Token)
-        token = 'VST' if self.testnet else 'USDT'
+        # BingX can expose either real USDT or demo VST depending on mode/account.
+        token = self._resolve_settlement_asset()
         
         # ccxt normalizes balance - look for the appropriate token
         balance_data = data.get(token, data.get('info', {}).get(token, {}))
+
+        # Fallback to another token if selected token is absent in payload.
+        if not balance_data:
+            fallback_token = 'USDT' if token == 'VST' else 'VST'
+            fallback_data = data.get(fallback_token, data.get('info', {}).get(fallback_token, {}))
+            if fallback_data:
+                log.warning(
+                    f"BingX balance token {token} not found, using {fallback_token} fallback"
+                )
+                balance_data = fallback_data
         
         if isinstance(balance_data, dict):
             total = float(balance_data.get('total', 0) or 0)

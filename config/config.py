@@ -28,6 +28,11 @@ class Config:
     KUCOIN_API_KEY: str = os.getenv("KUCOIN_API_KEY", "")
     KUCOIN_SECRET_KEY: str = os.getenv("KUCOIN_SECRET_KEY", "")
     KUCOIN_PASSPHRASE: str = os.getenv("KUCOIN_PASSPHRASE", "")
+    # KuCoin can run in its own mode independent of BOT_MODE: "mainnet", "testnet", or "auto".
+    # "auto" means follow global BOT_MODE.
+    KUCOIN_MODE: str = os.getenv("KUCOIN_MODE", "auto").lower()
+    # Use KuCoin test-order endpoint on mainnet to validate API integration
+    KUCOIN_TEST_ORDERS: bool = os.getenv("KUCOIN_TEST_ORDERS", "true").lower() == "true"
     
     # Bybit
     BYBIT_API_KEY: str = os.getenv("BYBIT_API_KEY", "")
@@ -37,6 +42,9 @@ class Config:
     OKX_API_KEY: str = os.getenv("OKX_API_KEY", "")
     OKX_SECRET_KEY: str = os.getenv("OKX_SECRET_KEY", "")
     OKX_PASSPHRASE: str = os.getenv("OKX_PASSPHRASE", "")
+    # OKX can run in its own mode independent of BOT_MODE: "mainnet", "testnet", or "auto".
+    # "auto" means follow global BOT_MODE.
+    OKX_MODE: str = os.getenv("OKX_MODE", "auto").lower()
     
     # Gate.io
     GATE_API_KEY: str = os.getenv("GATE_API_KEY", "")
@@ -45,6 +53,14 @@ class Config:
     # BingX
     BINGX_API_KEY: str = os.getenv("BINGX_API_KEY", "")
     BINGX_SECRET_KEY: str = os.getenv("BINGX_SECRET_KEY", "")
+    # BingX can run in its own mode independent of BOT_MODE: "mainnet", "testnet", or "auto".
+    # "auto" means follow global BOT_MODE.
+    BINGX_MODE: str = os.getenv("BINGX_MODE", "auto").lower()
+    # Settlement/balance asset switch for BingX:
+    # - auto: VST in testnet, USDT in mainnet
+    # - vst: force Virtual USDT (demo)
+    # - usdt: force real USDT
+    BINGX_SETTLEMENT_ASSET: str = os.getenv("BINGX_SETTLEMENT_ASSET", "auto").lower()
     
     # Bitget
     BITGET_API_KEY: str = os.getenv("BITGET_API_KEY", "")
@@ -80,6 +96,48 @@ class Config:
     def is_mainnet(cls) -> bool:
         """Check if running in mainnet mode"""
         return cls.BOT_MODE.lower() == "mainnet"
+
+    @classmethod
+    def is_kucoin_testnet(cls) -> bool:
+        """Check if KuCoin should run in testnet mode."""
+        if cls.KUCOIN_MODE == "testnet":
+            return True
+        if cls.KUCOIN_MODE == "mainnet":
+            return False
+        return cls.is_testnet()
+
+    @classmethod
+    def is_kucoin_mainnet(cls) -> bool:
+        """Check if KuCoin should run in mainnet mode."""
+        return not cls.is_kucoin_testnet()
+
+    @classmethod
+    def is_okx_testnet(cls) -> bool:
+        """Check if OKX should run in testnet mode."""
+        if cls.OKX_MODE == "testnet":
+            return True
+        if cls.OKX_MODE == "mainnet":
+            return False
+        return cls.is_testnet()
+
+    @classmethod
+    def is_okx_mainnet(cls) -> bool:
+        """Check if OKX should run in mainnet mode."""
+        return not cls.is_okx_testnet()
+
+    @classmethod
+    def is_bingx_testnet(cls) -> bool:
+        """Check if BingX should run in testnet/demo mode."""
+        if cls.BINGX_MODE == "testnet":
+            return True
+        if cls.BINGX_MODE == "mainnet":
+            return False
+        return cls.is_testnet()
+
+    @classmethod
+    def is_bingx_mainnet(cls) -> bool:
+        """Check if BingX should run in mainnet mode."""
+        return not cls.is_bingx_testnet()
     
     @classmethod
     def validate(cls) -> tuple[bool, list[str]]:
@@ -107,6 +165,24 @@ class Config:
         valid_modes = ["testnet", "mainnet"]
         if cls.BOT_MODE.lower() not in valid_modes:
             errors.append(f"Invalid BOT_MODE: {cls.BOT_MODE}")
+
+        valid_kucoin_modes = ["auto", "testnet", "mainnet"]
+        if cls.KUCOIN_MODE not in valid_kucoin_modes:
+            errors.append(f"Invalid KUCOIN_MODE: {cls.KUCOIN_MODE}")
+
+        valid_okx_modes = ["auto", "testnet", "mainnet"]
+        if cls.OKX_MODE not in valid_okx_modes:
+            errors.append(f"Invalid OKX_MODE: {cls.OKX_MODE}")
+
+        valid_bingx_modes = ["auto", "testnet", "mainnet"]
+        if cls.BINGX_MODE not in valid_bingx_modes:
+            errors.append(f"Invalid BINGX_MODE: {cls.BINGX_MODE}")
+
+        valid_bingx_assets = ["auto", "vst", "usdt"]
+        if cls.BINGX_SETTLEMENT_ASSET not in valid_bingx_assets:
+            errors.append(
+                f"Invalid BINGX_SETTLEMENT_ASSET: {cls.BINGX_SETTLEMENT_ASSET}"
+            )
         
         return (len(errors) == 0, errors)
 
