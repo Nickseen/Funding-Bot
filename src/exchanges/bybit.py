@@ -13,6 +13,7 @@ Bybit API Reference:
 
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+import asyncio
 import ccxt.async_support as ccxt
 
 from .base import BaseExchange, ExchangeError, RateLimitError, NetworkError
@@ -55,6 +56,9 @@ class BybitExchange(BaseExchange):
                 'adjustForTimeDifference': True,
                 'recvWindow': 60000,  # Increase receive window to 60 seconds
                 'timeDifference': 0,  # Will be auto-adjusted
+                # Keep market loading on public endpoints; private coin info is
+                # not needed here and can fail when exchange/client time drifts.
+                'fetchCurrencies': False,
             }
         })
         
@@ -68,16 +72,14 @@ class BybitExchange(BaseExchange):
     async def connect(self) -> bool:
         """Connect to Bybit"""
         try:
-            # First, sync time with server
-            server_time = await self.client.fetch_time()
-            local_time = self.client.milliseconds()
-            time_diff = server_time - local_time
+            # First, sync time with server using a small safety margin.
+            await self._sync_time_with_safety_margin()
             
-            # Adjust client time difference
-            self.client.options['timeDifference'] = time_diff
-            
-            # Now load markets
-            await self.client.load_markets()
+            # Load markets with retry on Bybit timestamp errors.
+            await self._with_timestamp_retry(
+                lambda: self.client.load_markets(True),
+                retries=3,
+            )
             self.connected = True
             return True
         except Exception as e:
@@ -466,20 +468,16 @@ class BybitExchange(BaseExchange):
     async def _api_get_positions(self, symbol: Optional[str]) -> List[Dict[str, Any]]:
         """Bybit: GET /v5/position/list"""
         try:
-            # Re-sync time before fetching positions to avoid timestamp errors
-            try:
-                server_time = await self.client.fetch_time()
-                local_time = self.client.milliseconds()
-                time_diff = server_time - local_time
-                self.client.options['timeDifference'] = time_diff
-            except:
-                pass  # Continue even if re-sync fails
-            
-            if symbol:
-                ccxt_symbol = self._convert_symbol(symbol)
-                positions = await self.client.fetch_positions([ccxt_symbol])
-            else:
-                positions = await self.client.fetch_positions()
+            # Re-sync time before fetching positions to reduce timestamp drift.
+            await self._sync_time_with_safety_margin()
+
+            async def _fetch_positions():
+                if symbol:
+                    ccxt_symbol = self._convert_symbol(symbol)
+                    return await self.client.fetch_positions([ccxt_symbol])
+                return await self.client.fetch_positions()
+
+            positions = await self._with_timestamp_retry(_fetch_positions, retries=3)
             
             # Filter out zero positions
             return [p for p in positions if float(p.get('contracts', 0) or 0) != 0]
@@ -489,8 +487,12 @@ class BybitExchange(BaseExchange):
     async def _api_get_position_by_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Bybit: GET /v5/position/list for specific symbol"""
         try:
+            await self._sync_time_with_safety_margin()
             ccxt_symbol = self._convert_symbol(symbol)
-            positions = await self.client.fetch_positions([ccxt_symbol])
+            positions = await self._with_timestamp_retry(
+                lambda: self.client.fetch_positions([ccxt_symbol]),
+                retries=3,
+            )
             position = next(
                 (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
                 None
@@ -822,9 +824,57 @@ class BybitExchange(BaseExchange):
             raise ExchangeError(f"Failed to get server time: {e}")
     
     async def sync_time(self) -> None:
-        """Sync time with Bybit"""
-        # ccxt handles this automatically with adjustForTimeDifference
-        pass
+        """Sync time with Bybit."""
+        await self._sync_time_with_safety_margin()
+
+    async def _sync_time_with_safety_margin(self) -> None:
+        """
+        Sync exchange time and apply a small negative margin.
+
+        Bybit may reject requests that are even slightly ahead of server time,
+        so we intentionally bias client time a bit behind.
+        """
+        try:
+            server_time = await self.client.fetch_time()
+            local_time = self.client.milliseconds()
+            # Keep client timestamp slightly behind server to avoid retCode 10002.
+            safety_margin_ms = 12000
+            # For Bybit/ccxt signing, timestamp path effectively uses local - timeDifference.
+            # So positive timeDifference shifts outgoing timestamp backward.
+            time_diff = (local_time - server_time) + safety_margin_ms
+            self.client.options['timeDifference'] = time_diff
+            # Some ccxt paths read timeDifference from exchange attribute directly.
+            if hasattr(self.client, 'timeDifference'):
+                self.client.timeDifference = time_diff
+        except Exception:
+            # Non-fatal: keep previous timeDifference if sync fails.
+            return
+
+    def _is_timestamp_error(self, error: Exception) -> bool:
+        """Check whether an exception is Bybit timestamp drift error (retCode 10002)."""
+        if isinstance(error, ccxt.InvalidNonce):
+            return True
+        msg = str(error).lower()
+        return 'retcode":10002' in msg or 'server timestamp' in msg or 'invalid request, please check your server timestamp' in msg
+
+    async def _with_timestamp_retry(self, operation, retries: int = 3):
+        """
+        Execute operation with retries when Bybit timestamp drift is detected.
+
+        The operation is an async callable without arguments.
+        """
+        last_error = None
+        for attempt in range(retries):
+            try:
+                return await operation()
+            except Exception as e:
+                if not self._is_timestamp_error(e):
+                    raise
+                last_error = e
+                await self._sync_time_with_safety_margin()
+                # Small delay helps when exchange time window is momentarily strict.
+                await asyncio.sleep(0.2)
+        raise last_error
     
     # ============================================
     # BYBIT-SPECIFIC METHODS

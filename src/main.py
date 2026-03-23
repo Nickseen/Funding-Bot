@@ -218,7 +218,7 @@ async def main_cli():
             exchanges['bybit'] = BybitExchange(
                 api_key=config.BYBIT_API_KEY,
                 secret_key=config.BYBIT_SECRET_KEY,
-                testnet=config.is_testnet()
+                testnet=config.is_bybit_testnet()
             )
         except Exception as e:
             log.warning(f"Error initializing Bybit: {e}")
@@ -251,7 +251,7 @@ async def main_cli():
             exchanges['gate'] = GateExchange(
                 api_key=config.GATE_API_KEY,
                 secret_key=config.GATE_SECRET_KEY,
-                testnet=config.is_testnet()
+                testnet=config.is_gate_testnet()
             )
         except Exception as e:
             log.warning(f"Error initializing Gate.io: {e}")
@@ -273,7 +273,7 @@ async def main_cli():
                 api_key=config.BITGET_API_KEY,
                 secret_key=config.BITGET_SECRET_KEY,
                 passphrase=config.BITGET_PASSPHRASE,
-                testnet=config.is_testnet()
+                testnet=config.is_bitget_testnet()
             )
         except Exception as e:
             log.warning(f"Error initializing Bitget: {e}")
