@@ -37,6 +37,9 @@ class Config:
     # Bybit
     BYBIT_API_KEY: str = os.getenv("BYBIT_API_KEY", "")
     BYBIT_SECRET_KEY: str = os.getenv("BYBIT_SECRET_KEY", "")
+    # Bybit can run in its own mode independent of BOT_MODE: "mainnet", "testnet", or "auto".
+    # "auto" means follow global BOT_MODE.
+    BYBIT_MODE: str = os.getenv("BYBIT_MODE", "auto").lower()
     
     # OKX
     OKX_API_KEY: str = os.getenv("OKX_API_KEY", "")
@@ -49,6 +52,9 @@ class Config:
     # Gate.io
     GATE_API_KEY: str = os.getenv("GATE_API_KEY", "")
     GATE_SECRET_KEY: str = os.getenv("GATE_SECRET_KEY", "")
+    # Gate can run in its own mode independent of BOT_MODE: "mainnet", "testnet", or "auto".
+    # "auto" means follow global BOT_MODE.
+    GATE_MODE: str = os.getenv("GATE_MODE", "auto").lower()
     
     # BingX
     BINGX_API_KEY: str = os.getenv("BINGX_API_KEY", "")
@@ -66,6 +72,9 @@ class Config:
     BITGET_API_KEY: str = os.getenv("BITGET_API_KEY", "")
     BITGET_SECRET_KEY: str = os.getenv("BITGET_SECRET_KEY", "")
     BITGET_PASSPHRASE: str = os.getenv("BITGET_PASSPHRASE", "")
+    # Bitget can run in its own mode independent of BOT_MODE: "mainnet", "testnet", or "auto".
+    # "auto" means follow global BOT_MODE.
+    BITGET_MODE: str = os.getenv("BITGET_MODE", "auto").lower()
     
     # MEXC
     MEXC_API_KEY: str = os.getenv("MEXC_API_KEY", "")
@@ -107,6 +116,20 @@ class Config:
         return cls.is_testnet()
 
     @classmethod
+    def is_bybit_testnet(cls) -> bool:
+        """Check if Bybit should run in testnet mode."""
+        if cls.BYBIT_MODE == "testnet":
+            return True
+        if cls.BYBIT_MODE == "mainnet":
+            return False
+        return cls.is_testnet()
+
+    @classmethod
+    def is_bybit_mainnet(cls) -> bool:
+        """Check if Bybit should run in mainnet mode."""
+        return not cls.is_bybit_testnet()
+
+    @classmethod
     def is_kucoin_mainnet(cls) -> bool:
         """Check if KuCoin should run in mainnet mode."""
         return not cls.is_kucoin_testnet()
@@ -138,6 +161,34 @@ class Config:
     def is_bingx_mainnet(cls) -> bool:
         """Check if BingX should run in mainnet mode."""
         return not cls.is_bingx_testnet()
+
+    @classmethod
+    def is_gate_testnet(cls) -> bool:
+        """Check if Gate should run in testnet mode."""
+        if cls.GATE_MODE == "testnet":
+            return True
+        if cls.GATE_MODE == "mainnet":
+            return False
+        return cls.is_testnet()
+
+    @classmethod
+    def is_gate_mainnet(cls) -> bool:
+        """Check if Gate should run in mainnet mode."""
+        return not cls.is_gate_testnet()
+
+    @classmethod
+    def is_bitget_testnet(cls) -> bool:
+        """Check if Bitget should run in testnet mode."""
+        if cls.BITGET_MODE == "testnet":
+            return True
+        if cls.BITGET_MODE == "mainnet":
+            return False
+        return cls.is_testnet()
+
+    @classmethod
+    def is_bitget_mainnet(cls) -> bool:
+        """Check if Bitget should run in mainnet mode."""
+        return not cls.is_bitget_testnet()
     
     @classmethod
     def validate(cls) -> tuple[bool, list[str]]:
@@ -170,9 +221,21 @@ class Config:
         if cls.KUCOIN_MODE not in valid_kucoin_modes:
             errors.append(f"Invalid KUCOIN_MODE: {cls.KUCOIN_MODE}")
 
+        valid_bybit_modes = ["auto", "testnet", "mainnet"]
+        if cls.BYBIT_MODE not in valid_bybit_modes:
+            errors.append(f"Invalid BYBIT_MODE: {cls.BYBIT_MODE}")
+
         valid_okx_modes = ["auto", "testnet", "mainnet"]
         if cls.OKX_MODE not in valid_okx_modes:
             errors.append(f"Invalid OKX_MODE: {cls.OKX_MODE}")
+
+        valid_gate_modes = ["auto", "testnet", "mainnet"]
+        if cls.GATE_MODE not in valid_gate_modes:
+            errors.append(f"Invalid GATE_MODE: {cls.GATE_MODE}")
+
+        valid_bitget_modes = ["auto", "testnet", "mainnet"]
+        if cls.BITGET_MODE not in valid_bitget_modes:
+            errors.append(f"Invalid BITGET_MODE: {cls.BITGET_MODE}")
 
         valid_bingx_modes = ["auto", "testnet", "mainnet"]
         if cls.BINGX_MODE not in valid_bingx_modes:
