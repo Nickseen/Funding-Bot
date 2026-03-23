@@ -1309,6 +1309,7 @@ async def funding_monitoring_loop():
   - Position management
   - Leverage control
   - Funding rate queries
+    - Конфигурируемый режим через `.env`: `BYBIT_MODE=auto|testnet|mainnet`
   - Протестировано на production
 - **OKX** - полная интеграция через CCXT (12 Jan 2026)
   - Market/Limit orders
@@ -1321,6 +1322,7 @@ async def funding_monitoring_loop():
 - **Gate.io** - полная CCXT интеграция (11 Jan 2026)
   - Market/Limit orders
   - Stop Loss / Take Profit
+    - Конфигурируемый режим через `.env`: `GATE_MODE=auto|testnet|mainnet`
   - Протестировано на testnet
 - **BingX** - полная CCXT интеграция (13 Jan 2026)
   - Market/Limit orders
@@ -1341,6 +1343,7 @@ async def funding_monitoring_loop():
   - Leverage control
   - Funding rate queries
   - Demo mode (sandbox=True, 10,000 USDT)
+    - Конфигурируемый режим через `.env`: `BITGET_MODE=auto|testnet|mainnet`
   - Протестировано на demo
   - **Критическое исправление (24 Feb 2026):** Закрытие позиций через `close_position()` Flash Close API — устраняет ошибку 40774 для всех режимов закрытия
 - **Lighter** - полная CCXT интеграция (18 Jan 2026)
@@ -1392,10 +1395,25 @@ async def funding_monitoring_loop():
 
 ---
 
-**Дата обновления:** 18 марта 2026  
+**Дата обновления:** 23 марта 2026  
 **Статус:** Phase 1-4 завершены ✅ | Production ready 🚀
 
 ## 📝 Подробный changelog (после 6c57a131cb21d9021c4f079849debb7dd70af0b4)
+
+### 2026-03-23
+- **feat(config)**: per-exchange mode overrides for Bybit, Gate, Bitget
+    - Добавлены новые env-переменные: `BYBIT_MODE`, `GATE_MODE`, `BITGET_MODE` со значениями `auto|testnet|mainnet`.
+    - В `main.py` инициализация Bybit/Gate/Bitget переведена на отдельные mode-хелперы вместо глобального `BOT_MODE`.
+    - Обновлен `.env.example` с примерами новых настроек.
+    - Файлы: `config/config.py`, `src/main.py`, `.env.example`
+
+- **fix(bybit)**: harden timestamp sync and retries for retCode `10002`
+    - Добавлен централизованный retry wrapper `_with_timestamp_retry()` для операций с ошибками timestamp.
+    - Добавлен детектор `_is_timestamp_error()` (включая кейсы, где CCXT возвращает не только `InvalidNonce`).
+    - Усилена синхронизация времени `_sync_time_with_safety_margin()` с явной установкой `timeDifference` и safety margin.
+    - В `connect()` и запросах позиций (`_api_get_positions`, `_api_get_position_by_symbol`) добавлены retries после re-sync времени.
+    - Включен `fetchCurrencies=False` в options Bybit, чтобы избежать лишнего приватного запроса при `load_markets()` на старте.
+    - Файл: `src/exchanges/bybit.py`
 
 ### 2026-03-18
 - **fix**: OKX SL/TP minimum size error 51020 (`Your order should meet or exceed the minimum order amount`)
