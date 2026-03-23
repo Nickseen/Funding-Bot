@@ -208,7 +208,7 @@ async def main_cli():
             exchanges['binance'] = BinanceExchange(
                 api_key=config.BINANCE_API_KEY,
                 secret_key=config.BINANCE_SECRET_KEY,
-                testnet=config.is_testnet()
+                testnet=config.is_binance_testnet()
             )
         except Exception as e:
             log.warning(f"Error initializing Binance: {e}")
