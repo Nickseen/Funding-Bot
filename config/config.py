@@ -23,6 +23,9 @@ class Config:
     # Binance
     BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY", "")
     BINANCE_SECRET_KEY: str = os.getenv("BINANCE_SECRET_KEY", "")
+    # Binance can run in its own mode independent of BOT_MODE: "mainnet", "testnet", or "auto".
+    # "auto" means follow global BOT_MODE.
+    BINANCE_MODE: str = os.getenv("BINANCE_MODE", "auto").lower()
     
     # KuCoin
     KUCOIN_API_KEY: str = os.getenv("KUCOIN_API_KEY", "")
@@ -105,6 +108,20 @@ class Config:
     def is_mainnet(cls) -> bool:
         """Check if running in mainnet mode"""
         return cls.BOT_MODE.lower() == "mainnet"
+
+    @classmethod
+    def is_binance_testnet(cls) -> bool:
+        """Check if Binance should run in testnet mode."""
+        if cls.BINANCE_MODE == "testnet":
+            return True
+        if cls.BINANCE_MODE == "mainnet":
+            return False
+        return cls.is_testnet()
+
+    @classmethod
+    def is_binance_mainnet(cls) -> bool:
+        """Check if Binance should run in mainnet mode."""
+        return not cls.is_binance_testnet()
 
     @classmethod
     def is_kucoin_testnet(cls) -> bool:
@@ -220,6 +237,10 @@ class Config:
         valid_kucoin_modes = ["auto", "testnet", "mainnet"]
         if cls.KUCOIN_MODE not in valid_kucoin_modes:
             errors.append(f"Invalid KUCOIN_MODE: {cls.KUCOIN_MODE}")
+
+        valid_binance_modes = ["auto", "testnet", "mainnet"]
+        if cls.BINANCE_MODE not in valid_binance_modes:
+            errors.append(f"Invalid BINANCE_MODE: {cls.BINANCE_MODE}")
 
         valid_bybit_modes = ["auto", "testnet", "mainnet"]
         if cls.BYBIT_MODE not in valid_bybit_modes:
