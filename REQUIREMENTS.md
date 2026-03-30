@@ -1395,10 +1395,34 @@ async def funding_monitoring_loop():
 
 ---
 
-**Дата обновления:** 23 марта 2026  
+**Дата обновления:** 30 марта 2026  
 **Статус:** Phase 1-4 завершены ✅ | Production ready 🚀
 
 ## 📝 Подробный changelog (после 6c57a131cb21d9021c4f079849debb7dd70af0b4)
+
+### 2026-03-30
+- **fix(leverage)**: symbol-specific max leverage в pre-open safety
+    - В `OKXExchange._api_get_symbol_info()` убран hardcoded `125`, теперь используется symbol-level `max_leverage` из market metadata (`limits.leverage.max` и fallback-поля `info`).
+    - В `BingXExchange._api_get_symbol_info()` добавлен многоуровневый fetch плеча по конкретному токену:
+        - market metadata (`limits/info`) →
+        - private endpoint `swap_v2_private_get_trade_leverage` (`maxLongLeverage` / `maxShortLeverage`) →
+        - contracts endpoint fallback →
+        - conservative default `150`.
+    - Это устраняет кейс, когда для пары DOGEUSDT в pre-open отображался общий cap `150` вместо фактического `75`.
+        - Для BingX добавлен приоритетный источник symbol cap: private endpoint `swap_v2_private_get_trade_leverage` (`maxLongLeverage` / `maxShortLeverage`).
+            Причина: `quote/contracts` часто не содержит leverage fields для конкретной пары (например, DOGE-USDT), из-за чего без private endpoint происходил fallback на общий default `150`.
+
+- **fix(okx)**: строгая обработка ошибок установки плеча
+    - Убрано «широкое» подавление ошибок при `set_leverage` на OKX.
+    - Игнорируются только идемпотентные ответы (`already set` / `not modified` / `same leverage`), остальные ошибки пробрасываются как failure.
+
+- **feat(cli-safety)**: расширенные pre-open проверки без жёсткого блокирования на partial data
+    - Перед открытием показываются:
+        - максимальное равное плечо на обеих биржах,
+        - countdown до funding,
+        - максимально допустимая равная сумма позиции на двух биржах при выбранном плече.
+    - Если часть данных (balance/symbol limits) временно недоступна, бот показывает warning и использует доступные ограничения вместо принудительной остановки открытия.
+    - Добавлены/обновлены тесты: `test_open_position_safety_checks.py`, `test_bingx_exchange.py`, `test_okx_exchange.py`.
 
 ### 2026-03-23
 - **feat(config)**: per-exchange mode overrides for Bybit, Gate, Bitget
