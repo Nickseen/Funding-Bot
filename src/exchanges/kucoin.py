@@ -130,6 +130,48 @@ class KuCoinExchange(BaseExchange):
             out["test"] = True
         return out
 
+    def _extract_max_leverage(self, market: Dict[str, Any]) -> int:
+        """Extract symbol-specific max leverage from market metadata."""
+        limits = market.get("limits", {}) or {}
+        leverage_limits = limits.get("leverage", {}) or {}
+        info = market.get("info", {}) or {}
+
+        candidates: List[Any] = [
+            leverage_limits.get("max"),
+            info.get("maxLeverage"),
+            info.get("max_leverage"),
+            info.get("leverageMax"),
+            info.get("maxLever"),
+        ]
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    key_l = str(key).lower()
+                    if "leverage" in key_l and "max" in key_l:
+                        candidates.append(value)
+                    if isinstance(value, (dict, list)):
+                        walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(info)
+
+        parsed_values: List[int] = []
+        for value in candidates:
+            try:
+                parsed = int(float(value))
+                if parsed > 0:
+                    parsed_values.append(parsed)
+            except (TypeError, ValueError):
+                continue
+
+        if parsed_values:
+            return min(parsed_values)
+
+        return 100
+
     # ============================================
     # API ADAPTERS
     # ============================================
@@ -505,7 +547,7 @@ class KuCoinExchange(BaseExchange):
             "min_price": (limits.get("price") or {}).get("min"),
             "price_tick": precision.get("price"),
             "contract_size": market.get("contractSize", 1),
-            "max_leverage": (limits.get("leverage") or {}).get("max", 100),
+            "max_leverage": self._extract_max_leverage(market),
         }
 
     async def _api_get_funding_rate(self, symbol: str) -> Dict[str, Any]:

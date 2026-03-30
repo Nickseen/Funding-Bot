@@ -236,6 +236,59 @@ class BinanceExchange(BaseExchange):
             return symbol.split('/')[0] + symbol.split('/')[1].split(':')[0]
         return symbol
 
+    def _extract_max_leverage(self, market: Dict[str, Any]) -> int:
+        """Extract symbol-specific max leverage from market metadata."""
+        limits = market.get('limits', {}) or {}
+        leverage_limits = limits.get('leverage', {}) or {}
+        info = market.get('info', {}) or {}
+
+        candidates: List[Any] = [
+            leverage_limits.get('max'),
+            info.get('maxLeverage'),
+            info.get('maxleverage'),
+            info.get('leverageMax'),
+            info.get('max_leverage'),
+        ]
+
+        filters = info.get('filters')
+        if isinstance(filters, list):
+            for row in filters:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get('filterType', '')).upper() == 'LEVERAGE':
+                    candidates.extend([
+                        row.get('maxLeverage'),
+                        row.get('max_leverage'),
+                    ])
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    key_l = str(key).lower()
+                    if 'leverage' in key_l and 'max' in key_l:
+                        candidates.append(value)
+                    if isinstance(value, (dict, list)):
+                        walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(info)
+
+        parsed_values: List[int] = []
+        for value in candidates:
+            try:
+                parsed = int(float(value))
+                if parsed > 0:
+                    parsed_values.append(parsed)
+            except (TypeError, ValueError):
+                continue
+
+        if parsed_values:
+            return min(parsed_values)
+
+        return 125
+
     # ============================================
     # API ADAPTERS (pure API calls, no validation!)
     # ============================================
@@ -717,7 +770,7 @@ class BinanceExchange(BaseExchange):
                 'quantity_step': market['precision']['amount'],
                 'min_price': market['limits']['price']['min'],
                 'price_tick': market['precision']['price'],
-                'max_leverage': int(market.get('info', {}).get('maxLeverage', 125)),
+                'max_leverage': self._extract_max_leverage(market),
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
