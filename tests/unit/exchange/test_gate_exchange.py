@@ -186,6 +186,25 @@ class TestGateExchange:
         assert funding.rate_bps == 1.0
         assert funding.next_funding_time.year == 2022
 
+    @pytest.mark.asyncio
+    async def test_api_get_symbol_info_uses_symbol_specific_max_leverage(self, gate_exchange):
+        ccxt_symbol = "DOGE/USDT:USDT"
+        gate_exchange.client.markets = {
+            ccxt_symbol: {
+                "limits": {
+                    "amount": {"min": 1, "max": 1000000},
+                    "price": {"min": 0.0001},
+                    "leverage": {"max": 40},
+                },
+                "precision": {"amount": 1, "price": 0.0001},
+                "contractSize": 1,
+                "info": {"leverage_max": 100},
+            }
+        }
+
+        symbol_info = await gate_exchange._api_get_symbol_info("DOGEUSDT")
+        assert symbol_info["max_leverage"] == 40
+
     # 3. CCXT Error Handling Tests
     @pytest.mark.asyncio
     async def test_api_get_orderbook_rate_limit(self, gate_exchange):

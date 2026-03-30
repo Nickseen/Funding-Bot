@@ -155,6 +155,30 @@ class GateExchange(BaseExchange):
                 return f"{base}_{quote}"
         
         return symbol
+
+    def _extract_max_leverage(self, market: Dict[str, Any]) -> int:
+        """Extract symbol-specific max leverage from market metadata."""
+        limits = market.get('limits', {}) or {}
+        leverage_limits = limits.get('leverage', {}) or {}
+        info = market.get('info', {}) or {}
+
+        candidates = [
+            leverage_limits.get('max'),
+            info.get('maxLeverage'),
+            info.get('maxleverage'),
+            info.get('leverage_max'),
+            info.get('max_leverage'),
+        ]
+
+        for value in candidates:
+            try:
+                parsed = int(float(value))
+                if parsed > 0:
+                    return parsed
+            except (TypeError, ValueError):
+                continue
+
+        return 100
     
     # ============================================
     # API ADAPTERS (pure API calls, no validation!)
@@ -458,8 +482,14 @@ class GateExchange(BaseExchange):
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except Exception as e:
-            # Gate may return error if leverage is already set
-            if 'leverage' in str(e).lower() or 'not changed' in str(e).lower():
+            # Ignore only explicit idempotent responses
+            msg = str(e).lower()
+            if (
+                ('same' in msg and 'leverage' in msg)
+                or 'not changed' in msg
+                or 'already set' in msg
+                or 'not modified' in msg
+            ):
                 return True
             raise ExchangeError(f"Failed to set leverage: {e}")
     
@@ -701,7 +731,7 @@ class GateExchange(BaseExchange):
                 'min_price': market['limits']['price']['min'],
                 'price_tick': market['precision']['price'],
                 'contract_size': market.get('contractSize', 1),
-                'max_leverage': 100,  # Gate.io max for major pairs
+                'max_leverage': self._extract_max_leverage(market),
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
