@@ -1780,3 +1780,11 @@ async def get_income_history(
     - Сохранена recovery-логика для transient ошибки `50013` ("Systems are busy") с подтверждением фактического закрытия по состоянию позиции.
     - Добавлены тесты на fallback закрытия: retry с `posSide=long` и fallback в `posSide=net` при ошибке `51000 Parameter posSide error`.
     - Файлы: `src/exchanges/okx.py`, `tests/unit/exchange/test_okx_posside_fallback.py`
+
+### 2026-03-30
+- **fix(exchanges)**: add symbol-level leverage caps for Binance and KuCoin
+    - В `BinanceExchange` добавлен унифицированный extractor max leverage из `limits.leverage.max`, `info.maxLeverage`, `filters[LEVERAGE]` и вложенных полей `*max*leverage*`.
+    - В `KuCoinExchange` добавлен аналогичный extractor max leverage из `limits.leverage.max`, `info` и вложенных структур risk/limits payload.
+    - `_api_get_symbol_info()` в обоих адаптерах теперь использует extractor вместо прямого default fallback, чтобы возвращать token-specific лимиты плеча.
+    - Добавлены unit-тесты для Binance и KuCoin на приоритет symbol-level лимитов и nested fallback парсинг.
+    - Файлы: `src/exchanges/binance.py`, `src/exchanges/kucoin.py`, `tests/unit/exchange/test_binance_exchange.py`, `tests/unit/exchange/test_kucoin_exchange.py`
