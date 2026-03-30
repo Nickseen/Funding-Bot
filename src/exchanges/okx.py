@@ -221,6 +221,29 @@ class OKXExchange(BaseExchange):
 
         return contracts
 
+    def _extract_max_leverage(self, market: Dict[str, Any]) -> int:
+        """Extract symbol-specific max leverage from market metadata."""
+        limits = market.get('limits', {}) or {}
+        leverage_limits = limits.get('leverage', {}) or {}
+        info = market.get('info', {}) or {}
+
+        candidates = [
+            leverage_limits.get('max'),
+            info.get('maxLeverage'),
+            info.get('leverMax'),
+            info.get('lever'),
+        ]
+
+        for value in candidates:
+            try:
+                parsed = int(float(value))
+                if parsed > 0:
+                    return parsed
+            except (TypeError, ValueError):
+                continue
+
+        return 125
+
     def _to_okx_size_str(self, ccxt_symbol: str, contracts: float) -> str:
         """Format contract size for OKX APIs with precision and min-size clamp."""
         market = self.client.markets.get(ccxt_symbol, {})
@@ -411,7 +434,13 @@ class OKXExchange(BaseExchange):
             try:
                 await _set_leverage_with_pos_side_fallback()
             except Exception as e:
-                if 'leverage' not in str(e).lower() and 'same' not in str(e).lower():
+                msg = str(e).lower()
+                idempotent = (
+                    ('same' in msg and 'leverage' in msg)
+                    or 'not modified' in msg
+                    or 'already set' in msg
+                )
+                if not idempotent:
                     raise
             
             # 2. Convert base quantity to exchange-valid contract amount
@@ -716,8 +745,13 @@ class OKXExchange(BaseExchange):
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except Exception as e:
-            # OKX may return error if leverage is already set
-            if 'leverage' in str(e).lower():
+            # Ignore only explicit idempotent responses
+            msg = str(e).lower()
+            if (
+                ('same' in msg and 'leverage' in msg)
+                or 'not modified' in msg
+                or 'already set' in msg
+            ):
                 return True
             raise ExchangeError(f"Failed to set leverage: {e}")
     
@@ -959,7 +993,7 @@ class OKXExchange(BaseExchange):
                 'min_price': market['limits']['price']['min'],
                 'price_tick': market['precision']['price'],
                 'contract_size': market.get('contractSize', 1),
-                'max_leverage': 125,  # OKX max for major pairs
+                'max_leverage': self._extract_max_leverage(market),
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
