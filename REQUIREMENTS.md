@@ -1416,6 +1416,12 @@ async def funding_monitoring_loop():
     - Убрано «широкое» подавление ошибок при `set_leverage` на OKX.
     - Игнорируются только идемпотентные ответы (`already set` / `not modified` / `same leverage`), остальные ошибки пробрасываются как failure.
 
+- **fix(leverage)**: symbol-specific max leverage для Bitget и Gate.io
+    - В `BitgetExchange._api_get_symbol_info()` убран hardcoded `125`, теперь `max_leverage` извлекается из metadata конкретного символа (`limits.leverage.max` + fallback-поля `info`).
+    - В `GateExchange._api_get_symbol_info()` убран hardcoded `100`, теперь `max_leverage` также извлекается из symbol-level metadata.
+    - В `GateExchange._api_set_leverage()` сужена обработка ошибок: игнорируются только явные идемпотентные ответы (`already set` / `not changed` / `not modified` / `same leverage`), остальные ошибки пробрасываются как failure.
+    - Добавлены регрессионные тесты: `test_bitget_exchange.py`, `test_gate_exchange.py`.
+
 - **feat(cli-safety)**: расширенные pre-open проверки без жёсткого блокирования на partial data
     - Перед открытием показываются:
         - максимальное равное плечо на обеих биржах,
