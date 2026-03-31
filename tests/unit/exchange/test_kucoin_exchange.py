@@ -190,6 +190,37 @@ class TestKuCoinExchange:
         with pytest.raises(NetworkError):
             await kucoin_exchange._api_get_price_data("BTCUSDT")
 
+    @pytest.mark.asyncio
+    async def test_api_get_symbol_info_uses_symbol_specific_max_leverage(self, kucoin_exchange):
+        ccxt_symbol = "DOGE/USDT:USDT"
+        kucoin_exchange.client.markets = {
+            ccxt_symbol: {
+                "limits": {
+                    "amount": {"min": 1, "max": 1000000},
+                    "price": {"min": 0.0001},
+                    "leverage": {"max": 20},
+                },
+                "precision": {"amount": 1, "price": 0.0001},
+                "contractSize": 1,
+                "info": {"maxLeverage": "100"},
+            }
+        }
+
+        symbol_info = await kucoin_exchange._api_get_symbol_info("DOGEUSDT")
+        assert symbol_info["max_leverage"] == 20
+
+    def test_extract_max_leverage_from_nested_info(self, kucoin_exchange):
+        market = {
+            "limits": {},
+            "info": {
+                "riskLimit": {
+                    "maxLeverage": "33"
+                }
+            },
+        }
+
+        assert kucoin_exchange._extract_max_leverage(market) == 33
+
     def test_client_initialization(self, kucoin_exchange):
         assert kucoin_exchange.client.id == "kucoinfutures"
         assert kucoin_exchange.client.password == "test_passphrase"

@@ -257,3 +257,22 @@ class TestOKXExchange:
 
                 assert result['order_id'] == 'tp123'
                 assert result['type'] == 'take_profit'
+
+    @pytest.mark.asyncio
+    async def test_api_get_symbol_info_uses_symbol_specific_max_leverage(self, okx_exchange):
+        ccxt_symbol = "DOGE/USDT:USDT"
+        okx_exchange.client.markets = {
+            ccxt_symbol: {
+                "limits": {
+                    "amount": {"min": 1, "max": 1000000},
+                    "price": {"min": 0.0001},
+                    "leverage": {"max": 50},
+                },
+                "precision": {"amount": 1, "price": 0.0001},
+                "contractSize": 1,
+                "info": {"maxLeverage": 125},
+            }
+        }
+
+        symbol_info = await okx_exchange._api_get_symbol_info("DOGEUSDT")
+        assert symbol_info["max_leverage"] == 50

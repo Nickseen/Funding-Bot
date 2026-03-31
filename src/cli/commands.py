@@ -86,6 +86,8 @@ class OpenPositionCommand:
         """
         self.exchanges = exchanges
         self.state = state
+        self.funding_countdown_warning_seconds = 180  # 3 minutes
+        self.balance_utilization_safety = 0.95  # keep 5% buffer to reduce margin rollbacks
     
     async def execute(self) -> bool:
         """
@@ -179,11 +181,33 @@ class OpenPositionCommand:
             await wait_for_keypress()
             return False
         
-        # Step 3: Enter position size
+        # Step 3: Pre-open safety checks (leverage / funding countdown / max equal size)
+        balance_long = None
+        balance_short = None
+        symbol_info_long: Dict[str, Any] = {}
+        symbol_info_short: Dict[str, Any] = {}
+
         try:
             balance_long = await long_exchange.get_balance()
+        except Exception as e:
+            print(render_warning(f"Could not fetch {long_exchange_name} balance: {e}"))
+
+        try:
             balance_short = await short_exchange.get_balance()
-            
+        except Exception as e:
+            print(render_warning(f"Could not fetch {short_exchange_name} balance: {e}"))
+
+        try:
+            symbol_info_long = await long_exchange.get_symbol_info(symbol)
+        except Exception as e:
+            print(render_warning(f"Could not fetch {long_exchange_name} symbol limits: {e}"))
+
+        try:
+            symbol_info_short = await short_exchange.get_symbol_info(symbol)
+        except Exception as e:
+            print(render_warning(f"Could not fetch {short_exchange_name} symbol limits: {e}"))
+
+        if balance_long and balance_short:
             print(render_position_size_info(
                 balance_ex1=balance_long.available,
                 balance_ex2=balance_short.available,
@@ -191,23 +215,114 @@ class OpenPositionCommand:
                 ex2_name=short_exchange_name,
                 leverage=10  # Default, will ask user
             ))
-        except Exception as e:
-            print(render_warning(f"Could not fetch balances: {e}"))
-            # Continue without balance info
+
+        max_leverage_long = self._get_max_leverage(symbol_info_long)
+        max_leverage_short = self._get_max_leverage(symbol_info_short)
+        common_max_leverage = self._get_common_max_leverage(symbol_info_long, symbol_info_short)
+
+        print(self._render_leverage_guardrail(
+            long_exchange_name=long_exchange_name,
+            short_exchange_name=short_exchange_name,
+            max_leverage_long=max_leverage_long,
+            max_leverage_short=max_leverage_short,
+            common_max_leverage=common_max_leverage,
+        ))
         
         # Get leverage
+        leverage_default = min(10, common_max_leverage)
         leverage = await get_integer_input(
-            "Enter leverage [1-100] (default: 10): ",
+            f"Enter leverage [1-{common_max_leverage}] (default: {leverage_default}): ",
             min_val=1,
-            max_val=100,
-            default=10
+            max_val=common_max_leverage,
+            default=leverage_default
         )
         if leverage is None:
             return False
+
+        if common_max_leverage > 1 and leverage >= max(2, int(common_max_leverage * 0.9)):
+            near_max_confirm = await get_confirmation(
+                "Leverage is near exchange maximum. Continue? [y/N]: ",
+                default=False,
+            )
+            if not near_max_confirm:
+                print(render_info("Position opening cancelled"))
+                return False
+
+        funding_seconds_long = max(0, int(funding_long.time_to_funding_seconds))
+        funding_seconds_short = max(0, int(funding_short.time_to_funding_seconds))
+        print(self._render_funding_countdown_guardrail(
+            long_exchange_name=long_exchange_name,
+            short_exchange_name=short_exchange_name,
+            funding_seconds_long=funding_seconds_long,
+            funding_seconds_short=funding_seconds_short,
+            warning_seconds=self.funding_countdown_warning_seconds,
+        ))
+
+        if min(funding_seconds_long, funding_seconds_short) <= self.funding_countdown_warning_seconds:
+            funding_confirm = await get_confirmation(
+                "Funding is too close (<= 3 min). Continue opening? [y/N]: ",
+                default=False,
+            )
+            if not funding_confirm:
+                print(render_info("Position opening cancelled"))
+                return False
+
+        try:
+            reference_price_long, reference_price_short = await asyncio.gather(
+                self._get_reference_price(long_exchange, symbol),
+                self._get_reference_price(short_exchange, symbol),
+            )
+        except Exception as e:
+            print(render_error(f"Failed to fetch prices for pre-open sizing check: {e}"))
+            await wait_for_keypress()
+            return False
+
+        size_limits = self._calculate_equal_position_limits(
+            leverage=leverage,
+            balance_long_available=balance_long.available if balance_long else 0.0,
+            balance_short_available=balance_short.available if balance_short else 0.0,
+            reference_price_long=reference_price_long,
+            reference_price_short=reference_price_short,
+            symbol_info_long=symbol_info_long,
+            symbol_info_short=symbol_info_short,
+        )
+
+        if not (balance_long and balance_short):
+            size_limits["long_balance_limit"] = float("inf")
+            size_limits["short_balance_limit"] = float("inf")
+            if size_limits["max_equal_usd"] <= 0:
+                size_limits["max_equal_usd"] = min(1_000_000.0, size_limits.get("long_symbol_max_limit", float("inf")), size_limits.get("short_symbol_max_limit", float("inf")))
+            print(render_warning("Balance data incomplete. Max size is estimated from symbol limits only."))
+
+        print(self._render_size_guardrail(
+            long_exchange_name=long_exchange_name,
+            short_exchange_name=short_exchange_name,
+            leverage=leverage,
+            limits=size_limits,
+        ))
+
+        if size_limits["max_equal_usd"] <= 0:
+            print(render_error("Max equal size is 0. Not enough margin to open safely."))
+            await wait_for_keypress()
+            return False
+
+        if size_limits["max_equal_usd"] < size_limits["min_equal_usd"]:
+            print(render_error(
+                "Min required size is higher than max allowed size. Reduce leverage or add balance."
+            ))
+            await wait_for_keypress()
+            return False
         
         # Get position size in USD
+        min_position_size = max(0.0, size_limits["min_equal_usd"])
+        max_position_size = size_limits["max_equal_usd"]
         position_size = await get_float_input(
-            "Enter position size per leg in USD: "
+            (
+                "Enter position size per leg in USD "
+                f"[{min_position_size:.2f} - {max_position_size:.2f}]: "
+            ),
+            min_val=min_position_size,
+            max_val=max_position_size,
         )
         if position_size is None:
             return False
@@ -394,6 +509,186 @@ class OpenPositionCommand:
             })
         
         return exchange_list
+
+    def _to_positive_float(self, value: Any, default: float = 0.0) -> float:
+        """Convert value to positive float with safe fallback."""
+        try:
+            converted = float(value)
+            if converted > 0:
+                return converted
+        except (TypeError, ValueError):
+            pass
+        return default
+
+    def _get_max_leverage(self, symbol_info: Dict[str, Any]) -> int:
+        """Extract max leverage from symbol info with safe default."""
+        try:
+            max_lev = int(float(symbol_info.get("max_leverage", 100) or 100))
+            return max(1, max_lev)
+        except (TypeError, ValueError):
+            return 100
+
+    def _get_common_max_leverage(
+        self,
+        symbol_info_long: Dict[str, Any],
+        symbol_info_short: Dict[str, Any],
+    ) -> int:
+        """Common leverage cap supported by both exchanges for the symbol."""
+        return max(1, min(self._get_max_leverage(symbol_info_long), self._get_max_leverage(symbol_info_short)))
+
+    async def _get_reference_price(self, exchange: BaseExchange, symbol: str) -> float:
+        """Get reliable reference price for notional checks."""
+        price_data = await exchange.get_price_data(symbol)
+        candidates = [price_data.mid_price, price_data.bid, price_data.ask]
+        for candidate in candidates:
+            if candidate is not None and candidate > 0:
+                return float(candidate)
+
+        mark_price = await exchange.get_mark_price(symbol)
+        if mark_price > 0:
+            return float(mark_price)
+
+        raise ValueError(f"{exchange.get_name()}: cannot resolve valid reference price for {symbol}")
+
+    def _calculate_equal_position_limits(
+        self,
+        leverage: int,
+        balance_long_available: float,
+        balance_short_available: float,
+        reference_price_long: float,
+        reference_price_short: float,
+        symbol_info_long: Dict[str, Any],
+        symbol_info_short: Dict[str, Any],
+    ) -> Dict[str, float]:
+        """Calculate min/max equal per-leg notional allowed on both exchanges."""
+        long_balance_limit = self._to_positive_float(balance_long_available) * leverage * self.balance_utilization_safety
+        short_balance_limit = self._to_positive_float(balance_short_available) * leverage * self.balance_utilization_safety
+
+        long_contract_size = self._to_positive_float(symbol_info_long.get("contract_size"), 1.0)
+        short_contract_size = self._to_positive_float(symbol_info_short.get("contract_size"), 1.0)
+
+        long_max_qty = self._to_positive_float(symbol_info_long.get("max_quantity"), 0.0)
+        short_max_qty = self._to_positive_float(symbol_info_short.get("max_quantity"), 0.0)
+
+        long_min_qty = self._to_positive_float(symbol_info_long.get("min_quantity"), 0.0)
+        short_min_qty = self._to_positive_float(symbol_info_short.get("min_quantity"), 0.0)
+
+        long_symbol_max_limit = float("inf")
+        short_symbol_max_limit = float("inf")
+
+        if long_max_qty > 0:
+            long_symbol_max_limit = long_max_qty * long_contract_size * reference_price_long
+        if short_max_qty > 0:
+            short_symbol_max_limit = short_max_qty * short_contract_size * reference_price_short
+
+        long_symbol_min_limit = long_min_qty * long_contract_size * reference_price_long
+        short_symbol_min_limit = short_min_qty * short_contract_size * reference_price_short
+
+        max_equal_usd = min(
+            long_balance_limit,
+            short_balance_limit,
+            long_symbol_max_limit,
+            short_symbol_max_limit,
+        )
+        min_equal_usd = max(long_symbol_min_limit, short_symbol_min_limit)
+
+        if max_equal_usd == float("inf"):
+            max_equal_usd = min(long_balance_limit, short_balance_limit)
+
+        return {
+            "long_balance_limit": max(0.0, long_balance_limit),
+            "short_balance_limit": max(0.0, short_balance_limit),
+            "long_symbol_max_limit": max(0.0, long_symbol_max_limit) if long_symbol_max_limit != float("inf") else float("inf"),
+            "short_symbol_max_limit": max(0.0, short_symbol_max_limit) if short_symbol_max_limit != float("inf") else float("inf"),
+            "max_equal_usd": max(0.0, max_equal_usd),
+            "min_equal_usd": max(0.0, min_equal_usd),
+        }
+
+    def _format_countdown(self, seconds: int) -> str:
+        """Format seconds to compact string."""
+        safe_seconds = max(0, int(seconds))
+        minutes, rem_seconds = divmod(safe_seconds, 60)
+        hours, rem_minutes = divmod(minutes, 60)
+        if hours > 0:
+            return f"{hours}h {rem_minutes}m {rem_seconds}s"
+        return f"{rem_minutes}m {rem_seconds}s"
+
+    def _format_usd_limit(self, value: float) -> str:
+        """Format USD limits with infinity support."""
+        if value == float("inf"):
+            return "unlimited"
+        return f"${value:,.2f}"
+
+    @staticmethod
+    def _box_line(text: str) -> str:
+        """Pad text to fit inside a 60-char-wide double-line box (inner width 58)."""
+        return f"║ {text:<57}║"
+
+    def _render_leverage_guardrail(
+        self,
+        long_exchange_name: str,
+        short_exchange_name: str,
+        max_leverage_long: int,
+        max_leverage_short: int,
+        common_max_leverage: int,
+    ) -> str:
+        W = self._box_line
+        return "\n".join([
+            "",
+            "╔══════════════════════════════════════════════════════════╗",
+            W("PRE-OPEN SAFETY: LEVERAGE LIMITS"),
+            "╠══════════════════════════════════════════════════════════╣",
+            W(f"{long_exchange_name:<18} max: {max_leverage_long:>3}x"),
+            W(f"{short_exchange_name:<18} max: {max_leverage_short:>3}x"),
+            W(f"Common equal max leverage: {common_max_leverage:>3}x"),
+            "╚══════════════════════════════════════════════════════════╝",
+        ])
+
+    def _render_funding_countdown_guardrail(
+        self,
+        long_exchange_name: str,
+        short_exchange_name: str,
+        funding_seconds_long: int,
+        funding_seconds_short: int,
+        warning_seconds: int,
+    ) -> str:
+        min_countdown = min(funding_seconds_long, funding_seconds_short)
+        warning_text = "WARNING" if min_countdown <= warning_seconds else "OK"
+        W = self._box_line
+        return "\n".join([
+            "",
+            "╔══════════════════════════════════════════════════════════╗",
+            W("PRE-OPEN SAFETY: FUNDING COUNTDOWN"),
+            "╠══════════════════════════════════════════════════════════╣",
+            W(f"{long_exchange_name:<18}: {self._format_countdown(funding_seconds_long)}"),
+            W(f"{short_exchange_name:<18}: {self._format_countdown(funding_seconds_short)}"),
+            W(f"Status: {warning_text}"),
+            W(f"Warning threshold: {warning_seconds // 60} minutes"),
+            "╚══════════════════════════════════════════════════════════╝",
+        ])
+
+    def _render_size_guardrail(
+        self,
+        long_exchange_name: str,
+        short_exchange_name: str,
+        leverage: int,
+        limits: Dict[str, float],
+    ) -> str:
+        W = self._box_line
+        return "\n".join([
+            "",
+            "╔══════════════════════════════════════════════════════════╗",
+            W("PRE-OPEN SAFETY: MAX EQUAL SIZE (PER LEG)"),
+            "╠══════════════════════════════════════════════════════════╣",
+            W(f"Leverage: {leverage:>3}x"),
+            W(f"{long_exchange_name:<18} balance cap: {self._format_usd_limit(limits['long_balance_limit'])}"),
+            W(f"{short_exchange_name:<18} balance cap: {self._format_usd_limit(limits['short_balance_limit'])}"),
+            W(f"{long_exchange_name:<18} symbol cap : {self._format_usd_limit(limits['long_symbol_max_limit'])}"),
+            W(f"{short_exchange_name:<18} symbol cap : {self._format_usd_limit(limits['short_symbol_max_limit'])}"),
+            W(f"Max equal size (safe): {self._format_usd_limit(limits['max_equal_usd'])}"),
+            W(f"Min required size    : {self._format_usd_limit(limits['min_equal_usd'])}"),
+            "╚══════════════════════════════════════════════════════════╝",
+        ])
 
 
 class ViewPositionsCommand:

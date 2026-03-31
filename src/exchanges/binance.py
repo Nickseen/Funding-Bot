@@ -236,6 +236,59 @@ class BinanceExchange(BaseExchange):
             return symbol.split('/')[0] + symbol.split('/')[1].split(':')[0]
         return symbol
 
+    def _extract_max_leverage(self, market: Dict[str, Any]) -> int:
+        """Extract symbol-specific max leverage from market metadata."""
+        limits = market.get('limits', {}) or {}
+        leverage_limits = limits.get('leverage', {}) or {}
+        info = market.get('info', {}) or {}
+
+        candidates: List[Any] = [
+            leverage_limits.get('max'),
+            info.get('maxLeverage'),
+            info.get('maxleverage'),
+            info.get('leverageMax'),
+            info.get('max_leverage'),
+        ]
+
+        filters = info.get('filters')
+        if isinstance(filters, list):
+            for row in filters:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get('filterType', '')).upper() == 'LEVERAGE':
+                    candidates.extend([
+                        row.get('maxLeverage'),
+                        row.get('max_leverage'),
+                    ])
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    key_l = str(key).lower()
+                    if 'leverage' in key_l and 'max' in key_l:
+                        candidates.append(value)
+                    if isinstance(value, (dict, list)):
+                        walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(info)
+
+        parsed_values: List[int] = []
+        for value in candidates:
+            try:
+                parsed = int(float(value))
+                if parsed > 0:
+                    parsed_values.append(parsed)
+            except (TypeError, ValueError):
+                continue
+
+        if parsed_values:
+            return min(parsed_values)
+
+        return 125
+
     # ============================================
     # API ADAPTERS (pure API calls, no validation!)
     # ============================================
@@ -698,6 +751,65 @@ class BinanceExchange(BaseExchange):
         except ccxt.NetworkError as e:
             raise NetworkError(str(e))
 
+    async def _fetch_max_leverage_from_bracket_api(self, symbol: str) -> Optional[int]:
+        """
+        Fetch symbol-specific max leverage from /fapi/v1/leverageBracket.
+
+        Binance exchangeInfo only holds a global maxLeverage (125) — it does NOT
+        reflect per-symbol caps.  The leverage bracket endpoint is the authoritative
+        source for the real per-symbol limit (e.g. HYPE=75, DOGE=50, etc.).
+
+        The first bracket always has the highest initialLeverage (max for that symbol)
+        because brackets are ordered from smallest notional to largest.
+
+        Results are cached per raw Binance symbol to avoid repeated API calls.
+        """
+        if not hasattr(self, '_leverage_bracket_cache'):
+            self._leverage_bracket_cache: Dict[str, int] = {}
+
+        binance_symbol = self._to_binance_symbol(symbol)
+
+        if binance_symbol in self._leverage_bracket_cache:
+            return self._leverage_bracket_cache[binance_symbol]
+
+        params = {'symbol': binance_symbol}
+        # Try private endpoint first (authenticated), fall back to public variant.
+        for method_name in ('fapiPrivateGetLeverageBracket', 'fapiPublicGetLeverageBracket'):
+            method = getattr(self.client, method_name, None)
+            if not method:
+                continue
+            try:
+                response = await method(params)
+
+                # Response may be a list of {symbol, brackets:[...]} or a single dict
+                if isinstance(response, list):
+                    items = response
+                elif isinstance(response, dict):
+                    items = [response]
+                else:
+                    continue
+
+                for item in items:
+                    # Match by symbol or take the only entry we got
+                    sym = item.get('symbol', '')
+                    if sym and sym.upper() != binance_symbol.upper():
+                        continue
+                    brackets = item.get('brackets', [])
+                    if brackets:
+                        max_lev = int(brackets[0].get('initialLeverage', 0))
+                        if max_lev > 0:
+                            self._leverage_bracket_cache[binance_symbol] = max_lev
+                            log.debug(
+                                f"Binance {binance_symbol} max leverage={max_lev}x "
+                                f"(from leverageBracket via {method_name})"
+                            )
+                            return max_lev
+                break  # response parsed — stop trying other methods
+            except Exception as e:
+                log.debug(f"Binance leverageBracket via {method_name} failed for {binance_symbol}: {e}")
+
+        return None
+
     async def _api_get_symbol_info(self, symbol: str) -> Dict[str, Any]:
         """Binance: GET /fapi/v1/exchangeInfo - symbol trading rules"""
         try:
@@ -711,13 +823,18 @@ class BinanceExchange(BaseExchange):
             if not market:
                 raise ExchangeError(f"Symbol {symbol} not found")
 
+            # leverageBracket endpoint is authoritative for per-symbol max leverage.
+            # exchangeInfo only carries a global max (125) — useless for specific tokens.
+            bracket_max = await self._fetch_max_leverage_from_bracket_api(symbol)
+            max_leverage = bracket_max if bracket_max else self._extract_max_leverage(market)
+
             return {
                 'min_quantity': market['limits']['amount']['min'],
                 'max_quantity': market['limits']['amount']['max'],
                 'quantity_step': market['precision']['amount'],
                 'min_price': market['limits']['price']['min'],
                 'price_tick': market['precision']['price'],
-                'max_leverage': int(market.get('info', {}).get('maxLeverage', 125)),
+                'max_leverage': max_leverage,
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))

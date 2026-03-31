@@ -14,7 +14,7 @@ This bot automatically opens and manages **delta-neutral positions** across mult
 ### Key Features
 
 - ✅ **Delta-Neutral Strategy**: Simultaneous LONG and SHORT positions on different exchanges
-- ✅ **Multiple Exchanges**: Currently supports Binance (more coming: KuCoin, OKX, Bybit, etc.)
+- ✅ **Multiple Exchanges**: Supports Binance, Bybit, KuCoin, OKX, Gate.io, BingX, Bitget, MEXC
 - ✅ **Real-time Monitoring**: WebSocket price tracking and position management
 - ✅ **Smart Order Execution**: Hit-the-bid strategy and flash funding modes
 - ✅ **Risk Management**: Automatic Stop Loss and Take Profit (±20% to liquidation)
@@ -122,8 +122,30 @@ nano .env
 BINANCE_API_KEY=your_api_key_here
 BINANCE_SECRET_KEY=your_secret_key_here
 
+BYBIT_API_KEY=your_api_key_here
+BYBIT_SECRET_KEY=your_secret_key_here
+
+GATE_API_KEY=your_api_key_here
+GATE_SECRET_KEY=your_secret_key_here
+
+BITGET_API_KEY=your_api_key_here
+BITGET_SECRET_KEY=your_secret_key_here
+BITGET_PASSPHRASE=your_passphrase_here
+
 BOT_MODE=testnet  # or mainnet
 LOG_LEVEL=INFO
+
+# Per-exchange mode overrides (auto|testnet|mainnet)
+BINANCE_MODE=auto
+BYBIT_MODE=auto
+KUCOIN_MODE=auto
+OKX_MODE=auto
+GATE_MODE=auto
+BINGX_MODE=auto
+BITGET_MODE=auto
+
+# BingX settlement asset (auto|vst|usdt)
+BINGX_SETTLEMENT_ASSET=auto
 ```
 
 ### 4. Run Bot
@@ -245,9 +267,13 @@ pytest tests/unit/test_calculations.py
 | Binance | ✅ Implemented | 0.05% | 0.02% |
 | Bybit | ✅ Implemented | 0.055% | 0.02% |
 | KuCoin | ✅ Implemented | 0.06% | 0.02% |
-| OKX | ✅ Implemented | 0.05% | 0.02% |
+| OKX | ✅ Implemented | 0.10% | 0.02% |
+| Gate.io | ✅ Implemented | 0.05% | 0.02% |
+| BingX | ✅ Implemented | 0.05% | 0.02% |
+| Bitget | ✅ Implemented | 0.06% | 0.02% |
+| MEXC | ✅ Implemented | 0.04% | 0.01% |
+| Lighter | ✅ Implemented | 0.00% | 0.00% |
 | Hyperliquid | 🚧 Planned | 0.045% | 0.00% |
-| Lighter | 🚧 Planned | 0.00% | 0.00% |
 | Aster | 🚧 Planned | 0.04% | 0.02% |
 
 ---
@@ -293,26 +319,34 @@ pytest tests/unit/test_calculations.py
 - [x] Bybit adapter (basic REST API)
 - [x] KuCoin adapter (basic REST API)
 - [x] OKX adapter (basic REST API)
-- [x] Unit tests (12/12 passing)
+- [x] Gate.io adapter
+- [x] BingX adapter
+- [x] Bitget adapter
+- [x] Lighter adapter
+- [x] MEXC adapter
+- [x] Per-exchange mode overrides (BINANCE/BYBIT/KUCOIN/OKX/GATE/BINGX/BITGET)
+- [x] Unit tests (core modules passing)
 - [ ] WebSocket price monitoring (skeleton ready, low priority)
-- [ ] Full testing on testnet
+- [ ] Full regression across all exchange adapter tests
 
-### Phase 3: CLI & Integration 🚧 IN PROGRESS
-- [ ] CLI commands (partner working on this)
-- [ ] Interactive menu
-- [ ] Status displays
-- [ ] Integration with Bot class
+### Phase 3: CLI & Integration ✅ COMPLETED
+- [x] CLI commands and interactive menu
+- [x] Position view/status displays
+- [x] Integration with Bot class
+- [x] FundingTracker + EmergencyMonitor integration
+- [x] Multi-exchange initialization from `.env`
 
-### Phase 4: Persistence & Recovery
-- [ ] SQLite database for position history
-- [ ] Recovery system (restore from exchanges)
-- [ ] Financial analytics (detailed PnL breakdown)
+### Phase 4: Persistence & Recovery ✅ COMPLETED
+- [x] JSON persistence for active and closed positions
+- [x] Recovery flow on startup (load + verify with exchanges)
+- [x] Orphan position discovery and handling
+- [x] Financial analytics in CLI (PnL, funding, fees)
 
-### Phase 5: Testing & Production
-- [x] Unit tests (calculations, emergency_monitor)
-- [ ] Integration tests
-- [ ] Testnet validation
-- [ ] Production deployment
+### Phase 5: Testing & Production 🚧 IN PROGRESS
+- [x] Unit tests for core logic (calculations, monitors, persistence, smart close)
+- [x] Production rollout for selected exchanges (Bybit/OKX/Gate/BingX/Bitget flows)
+- [ ] Full integration test suite across all adapters
+- [ ] Final production hardening (monitoring, alerts, runbooks)
 
 ---
 

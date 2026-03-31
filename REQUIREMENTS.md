@@ -1395,10 +1395,40 @@ async def funding_monitoring_loop():
 
 ---
 
-**Дата обновления:** 23 марта 2026  
+**Дата обновления:** 30 марта 2026  
 **Статус:** Phase 1-4 завершены ✅ | Production ready 🚀
 
 ## 📝 Подробный changelog (после 6c57a131cb21d9021c4f079849debb7dd70af0b4)
+
+### 2026-03-30
+- **fix(leverage)**: symbol-specific max leverage в pre-open safety
+    - В `OKXExchange._api_get_symbol_info()` убран hardcoded `125`, теперь используется symbol-level `max_leverage` из market metadata (`limits.leverage.max` и fallback-поля `info`).
+    - В `BingXExchange._api_get_symbol_info()` добавлен многоуровневый fetch плеча по конкретному токену:
+        - market metadata (`limits/info`) →
+        - private endpoint `swap_v2_private_get_trade_leverage` (`maxLongLeverage` / `maxShortLeverage`) →
+        - contracts endpoint fallback →
+        - conservative default `150`.
+    - Это устраняет кейс, когда для пары DOGEUSDT в pre-open отображался общий cap `150` вместо фактического `75`.
+        - Для BingX добавлен приоритетный источник symbol cap: private endpoint `swap_v2_private_get_trade_leverage` (`maxLongLeverage` / `maxShortLeverage`).
+            Причина: `quote/contracts` часто не содержит leverage fields для конкретной пары (например, DOGE-USDT), из-за чего без private endpoint происходил fallback на общий default `150`.
+
+- **fix(okx)**: строгая обработка ошибок установки плеча
+    - Убрано «широкое» подавление ошибок при `set_leverage` на OKX.
+    - Игнорируются только идемпотентные ответы (`already set` / `not modified` / `same leverage`), остальные ошибки пробрасываются как failure.
+
+- **fix(leverage)**: symbol-specific max leverage для Bitget и Gate.io
+    - В `BitgetExchange._api_get_symbol_info()` убран hardcoded `125`, теперь `max_leverage` извлекается из metadata конкретного символа (`limits.leverage.max` + fallback-поля `info`).
+    - В `GateExchange._api_get_symbol_info()` убран hardcoded `100`, теперь `max_leverage` также извлекается из symbol-level metadata.
+    - В `GateExchange._api_set_leverage()` сужена обработка ошибок: игнорируются только явные идемпотентные ответы (`already set` / `not changed` / `not modified` / `same leverage`), остальные ошибки пробрасываются как failure.
+    - Добавлены регрессионные тесты: `test_bitget_exchange.py`, `test_gate_exchange.py`.
+
+- **feat(cli-safety)**: расширенные pre-open проверки без жёсткого блокирования на partial data
+    - Перед открытием показываются:
+        - максимальное равное плечо на обеих биржах,
+        - countdown до funding,
+        - максимально допустимая равная сумма позиции на двух биржах при выбранном плече.
+    - Если часть данных (balance/symbol limits) временно недоступна, бот показывает warning и использует доступные ограничения вместо принудительной остановки открытия.
+    - Добавлены/обновлены тесты: `test_open_position_safety_checks.py`, `test_bingx_exchange.py`, `test_okx_exchange.py`.
 
 ### 2026-03-23
 - **feat(config)**: per-exchange mode overrides for Bybit, Gate, Bitget
@@ -1750,3 +1780,42 @@ async def get_income_history(
     - Сохранена recovery-логика для transient ошибки `50013` ("Systems are busy") с подтверждением фактического закрытия по состоянию позиции.
     - Добавлены тесты на fallback закрытия: retry с `posSide=long` и fallback в `posSide=net` при ошибке `51000 Parameter posSide error`.
     - Файлы: `src/exchanges/okx.py`, `tests/unit/exchange/test_okx_posside_fallback.py`
+
+### 2026-03-30
+- **fix(exchanges)**: add symbol-level leverage caps for Binance and KuCoin (commit `01da7b1`)
+    - В `BinanceExchange` добавлен унифицированный extractor max leverage из `limits.leverage.max`, `info.maxLeverage`, `filters[LEVERAGE]` и вложенных полей `*max*leverage*`.
+    - В `KuCoinExchange` добавлен аналогичный extractor max leverage из `limits.leverage.max`, `info` и вложенных структур risk/limits payload.
+    - `_api_get_symbol_info()` в обоих адаптерах теперь использует extractor вместо прямого default fallback, чтобы возвращать token-specific лимиты плеча.
+    - Добавлены unit-тесты для Binance и KuCoin на приоритет symbol-level лимитов и nested fallback парсинг.
+    - Файлы: `src/exchanges/binance.py`, `src/exchanges/kucoin.py`, `tests/unit/exchange/test_binance_exchange.py`, `tests/unit/exchange/test_kucoin_exchange.py`
+
+### 2026-03-31
+- **fix(binance)**: use leverageBracket API for symbol-specific max leverage (commit `f792781`)
+    - Обнаружено: `exchangeInfo` Binance хранит только глобальный `maxLeverage=125`, не per-symbol.
+    - Добавлен `_fetch_max_leverage_from_bracket_api()` — запрос `/fapi/v1/leverageBracket`; первый bracket содержит `initialLeverage` — это реальный лимит для токена (HYPE=75, DOGE=50 и т.д.).
+    - Результат кэшируется in-memory per-symbol, чтобы не дублировать запросы.
+    - `_api_get_symbol_info()` сначала вызывает bracket API → при ошибке fallback на `limits.leverage.max` из market metadata.
+    - Тесты: bracket overrides generic 125, fallback on API error, filters path.
+    - Файлы: `src/exchanges/binance.py`, `tests/unit/exchange/test_binance_exchange.py`
+
+- **fix(bybit)**: symbol-specific max leverage via leverageFilter metadata (commit `bce887e`)
+    - Заменён хардкод `max_leverage=100` на `_extract_max_leverage()` который читает `limits.leverage.max`, `info.leverageFilter.maxLeverage` и вложенные поля.
+    - Fallback 100 только при отсутствии данных.
+    - Файлы: `src/exchanges/bybit.py`, `tests/unit/exchange/test_bybit_exchange.py`
+
+- **fix(cli)**: align pre-open safety box borders correctly (commit `067ed3c`)
+    - Захардкоженные пробелы в строках рамок сдвигали правую границу `║` при переменной длине имён бирж/значений.
+    - Добавлен `_box_line(text)` helper: паддит контент ровно до 57 символов → каждая строка = 60 visual колонок.
+    - Файл: `src/cli/commands.py`
+
+- **fix(cli)**: switch position sizing from notional to margin basis
+    - Ранее все лимиты и минимальный размер отображались в notional USD (маржа × плечо), что вводило в заблуждение: показывал min=$9.00 когда реальная стоимость кошелька была $0.60.
+    - Теперь все лимиты в USD маржи (то, что реально уходит с баланса):
+        - `balance_cap = available × 0.95` (не × leverage)
+        - `symbol_cap = max_qty × price / leverage`
+        - `min_required = min_qty × price / leverage`
+        - `quantity = margin × leverage / price` (корректная конвертация в токены)
+        - Funding отображается от notional (margin × leverage)
+    - Guardrail переименован: `MAX EQUAL MARGIN (PER LEG)`.
+    - Risk check: показывает "Margin per leg" + "Total notional".
+    - Файлы: `src/cli/commands.py`, `src/cli/display.py`, `tests/unit/test_open_position_safety_checks.py`

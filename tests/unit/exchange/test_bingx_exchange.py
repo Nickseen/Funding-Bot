@@ -212,6 +212,104 @@ class TestBingXExchange:
         assert symbol_info["min_quantity"] == pytest.approx(20.0)
         assert symbol_info["quantity_step"] == pytest.approx(1.0)
 
+    @pytest.mark.asyncio
+    async def test_api_get_symbol_info_uses_symbol_specific_max_leverage(self, bingx_exchange):
+        ccxt_symbol = "DOGE/USDT:USDT"
+        bingx_exchange.client.markets = {
+            ccxt_symbol: {
+                "limits": {
+                    "amount": {"min": 1, "max": 1000000},
+                    "price": {"min": 0.0001},
+                    "leverage": {"max": 75},
+                },
+                "precision": {"amount": 1, "price": 0.0001},
+                "info": {"maxLeverage": 150},
+            }
+        }
+
+        symbol_info = await bingx_exchange._api_get_symbol_info("DOGEUSDT")
+        assert symbol_info["max_leverage"] == 75
+
+    @pytest.mark.asyncio
+    async def test_api_get_symbol_info_uses_min_of_long_short_caps(self, bingx_exchange):
+        ccxt_symbol = "DOGE/USDT:USDT"
+        bingx_exchange.client.markets = {
+            ccxt_symbol: {
+                "limits": {
+                    "amount": {"min": 1, "max": 1000000},
+                    "price": {"min": 0.0001},
+                },
+                "precision": {"amount": 1, "price": 0.0001},
+                "info": {
+                    "maxLongLeverage": "75",
+                    "maxShortLeverage": "50",
+                },
+            }
+        }
+
+        symbol_info = await bingx_exchange._api_get_symbol_info("DOGEUSDT")
+        assert symbol_info["max_leverage"] == 50
+
+    @pytest.mark.asyncio
+    async def test_api_get_symbol_info_fallbacks_to_contracts_endpoint(self, bingx_exchange):
+        ccxt_symbol = "DOGE/USDT:USDT"
+        bingx_exchange.client.markets = {
+            ccxt_symbol: {
+                "limits": {
+                    "amount": {"min": 1, "max": 1000000},
+                    "price": {"min": 0.0001},
+                },
+                "precision": {"amount": 1, "price": 0.0001},
+                "info": {},
+            }
+        }
+
+        bingx_exchange.client.swap_v2_public_get_quote_contracts = AsyncMock(
+            return_value={
+                "code": 0,
+                "data": [
+                    {
+                        "symbol": "DOGE-USDT",
+                        "maxLongLeverage": "75",
+                        "maxShortLeverage": "75",
+                    }
+                ],
+            }
+        )
+
+        symbol_info = await bingx_exchange._api_get_symbol_info("DOGEUSDT")
+        assert symbol_info["max_leverage"] == 75
+
+    @pytest.mark.asyncio
+    async def test_api_get_symbol_info_uses_private_trade_leverage_endpoint(self, bingx_exchange):
+        ccxt_symbol = "DOGE/USDT:USDT"
+        bingx_exchange.client.markets = {
+            ccxt_symbol: {
+                "limits": {
+                    "amount": {"min": 1, "max": 1000000},
+                    "price": {"min": 0.0001},
+                },
+                "precision": {"amount": 1, "price": 0.0001},
+                "info": {},
+            }
+        }
+
+        bingx_exchange.client.swap_v2_private_get_trade_leverage = AsyncMock(
+            return_value={
+                "code": "0",
+                "msg": "",
+                "data": {
+                    "symbol": "DOGE-USDT",
+                    "maxLongLeverage": "75",
+                    "maxShortLeverage": "75",
+                },
+            }
+        )
+        bingx_exchange.client.swap_v2_public_get_quote_contracts = AsyncMock(return_value={"code": 0, "data": []})
+
+        symbol_info = await bingx_exchange._api_get_symbol_info("DOGEUSDT")
+        assert symbol_info["max_leverage"] == 75
+
     # 3. CCXT Error Handling Tests
     @pytest.mark.asyncio
     async def test_api_get_orderbook_rate_limit(self, bingx_exchange):

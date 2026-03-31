@@ -265,6 +265,25 @@ class TestBitgetExchange:
         assert balance.available == 800.0
         assert balance.margin_used == 200.0
 
+    @pytest.mark.asyncio
+    async def test_api_get_symbol_info_uses_symbol_specific_max_leverage(self, bitget_exchange):
+        ccxt_symbol = "DOGE/USDT:USDT"
+        bitget_exchange.client.markets = {
+            ccxt_symbol: {
+                "limits": {
+                    "amount": {"min": 1, "max": 1000000},
+                    "price": {"min": 0.0001},
+                    "leverage": {"max": 60},
+                },
+                "precision": {"amount": 1, "price": 0.0001},
+                "contractSize": 1,
+                "info": {"maxLeverage": 125},
+            }
+        }
+
+        symbol_info = await bitget_exchange._api_get_symbol_info("DOGEUSDT")
+        assert symbol_info["max_leverage"] == 60
+
     def test_parse_balance_fallback(self, bitget_exchange):
         """Test _parse_balance fallback to total/free/used dicts"""
         data = {

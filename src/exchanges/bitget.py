@@ -187,6 +187,37 @@ class BitgetExchange(BaseExchange):
             'unchanged',
         ]
         return any(marker in msg for marker in safe_markers)
+
+    def _extract_max_leverage(self, market: Dict[str, Any]) -> int:
+        """Extract symbol-specific max leverage from market metadata."""
+        limits = market.get('limits', {}) or {}
+        leverage_limits = limits.get('leverage', {}) or {}
+        info = market.get('info', {}) or {}
+
+        candidates = [
+            leverage_limits.get('max'),
+            info.get('maxLeverage'),
+            info.get('maxleverage'),
+            info.get('maxLongLeverage'),
+            info.get('maxShortLeverage'),
+            info.get('leverageMax'),
+            info.get('maxLever'),
+        ]
+
+        parsed_values: List[int] = []
+        for value in candidates:
+            try:
+                parsed = int(float(value))
+                if parsed > 0:
+                    parsed_values.append(parsed)
+            except (TypeError, ValueError):
+                continue
+
+        if parsed_values:
+            # Conservative choice if separate long/short caps are provided.
+            return min(parsed_values)
+
+        return 125
     
     # ============================================
     # API ADAPTERS (pure API calls, no validation!)
@@ -729,7 +760,7 @@ class BitgetExchange(BaseExchange):
                 'min_price': market['limits']['price']['min'],
                 'price_tick': market['precision']['price'],
                 'contract_size': market.get('contractSize', 1),
-                'max_leverage': 125,  # Bitget max for major pairs
+                'max_leverage': self._extract_max_leverage(market),
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))

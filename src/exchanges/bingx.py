@@ -163,6 +163,167 @@ class BingXExchange(BaseExchange):
                 return f"{base}-{quote}"
         
         return symbol
+
+    def _extract_max_leverage(self, market: Dict[str, Any]) -> Optional[int]:
+        """Extract symbol-specific max leverage from BingX market metadata."""
+        limits = market.get('limits', {}) or {}
+        leverage_limits = limits.get('leverage', {}) or {}
+        info = market.get('info', {}) or {}
+
+        candidates = [
+            leverage_limits.get('max'),
+            info.get('maxLeverage'),
+            info.get('maxleverage'),
+            info.get('maxLongLeverage'),
+            info.get('maxShortLeverage'),
+            info.get('longLeverageMax'),
+            info.get('shortLeverageMax'),
+            info.get('leverageMax'),
+        ]
+
+        # Some responses keep limits under nested arrays/dicts.
+        candidates.extend(self._collect_max_leverage_candidates(info))
+
+        parsed_values: List[int] = []
+        for value in candidates:
+            try:
+                parsed = int(float(value))
+                if parsed > 0:
+                    parsed_values.append(parsed)
+            except (TypeError, ValueError):
+                continue
+
+        if parsed_values:
+            # Be conservative if exchange reports separate long/short caps.
+            return min(parsed_values)
+
+        return None
+
+    def _collect_max_leverage_candidates(self, payload: Any) -> List[Any]:
+        """Collect potential max leverage values from nested payloads."""
+        candidates: List[Any] = []
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    key_l = str(key).lower()
+                    if 'leverage' in key_l and 'max' in key_l:
+                        candidates.append(value)
+                    if isinstance(value, (dict, list)):
+                        walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(payload)
+        return candidates
+
+    def _normalize_symbol_id(self, symbol: str) -> str:
+        """Normalize symbol variants (DOGEUSDT, DOGE-USDT, DOGE/USDT:USDT)."""
+        return ''.join(ch for ch in symbol.upper() if ch.isalnum())
+
+    def _extract_contract_rows(self, payload: Any) -> List[Dict[str, Any]]:
+        """Extract list of contract rows from various BingX response shapes."""
+        if isinstance(payload, list):
+            return [row for row in payload if isinstance(row, dict)]
+        if not isinstance(payload, dict):
+            return []
+
+        # Common bingx/ccxt wrappers
+        for key in ('data', 'result'):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [row for row in value if isinstance(row, dict)]
+            if isinstance(value, dict):
+                for nested_key in ('list', 'contracts', 'symbols', 'rows', 'items', 'data'):
+                    nested = value.get(nested_key)
+                    if isinstance(nested, list):
+                        return [row for row in nested if isinstance(row, dict)]
+
+        for key in ('list', 'contracts', 'symbols', 'rows', 'items'):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [row for row in value if isinstance(row, dict)]
+
+        return []
+
+    async def _fetch_max_leverage_from_contracts_api(self, symbol: str) -> Optional[int]:
+        """Try BingX native contracts endpoint to get symbol-specific max leverage."""
+        method = getattr(self.client, 'swap_v2_public_get_quote_contracts', None)
+        if not callable(method):
+            return None
+
+        try:
+            payload = await method()
+        except Exception:
+            return None
+
+        rows = self._extract_contract_rows(payload)
+        if not rows:
+            return None
+
+        target = self._normalize_symbol_id(symbol)
+
+        def row_symbol_matches(row: Dict[str, Any]) -> bool:
+            for key in ('symbol', 'contract', 'pair', 'baseQuote', 'displayName'):
+                value = row.get(key)
+                if isinstance(value, str) and self._normalize_symbol_id(value) == target:
+                    return True
+            return False
+
+        candidates: List[int] = []
+
+        for row in rows:
+            if not row_symbol_matches(row):
+                continue
+            for raw in self._collect_max_leverage_candidates(row):
+                try:
+                    parsed = int(float(raw))
+                    if parsed > 0:
+                        candidates.append(parsed)
+                except (TypeError, ValueError):
+                    continue
+
+        if candidates:
+            return min(candidates)
+
+        return None
+
+    async def _fetch_max_leverage_from_trade_endpoint(self, symbol: str) -> Optional[int]:
+        """Fetch symbol-specific leverage caps from BingX private trade leverage endpoint."""
+        method = getattr(self.client, 'swap_v2_private_get_trade_leverage', None)
+        if not callable(method):
+            return None
+
+        bingx_symbol = self._to_bingx_symbol(symbol)
+
+        try:
+            payload = await method({'symbol': bingx_symbol})
+        except Exception:
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        data = payload.get('data') or {}
+        if not isinstance(data, dict):
+            return None
+
+        candidates: List[int] = []
+        for key in ('maxLongLeverage', 'maxShortLeverage', 'maxLeverage', 'leverageMax'):
+            raw = data.get(key)
+            try:
+                parsed = int(float(raw))
+                if parsed > 0:
+                    candidates.append(parsed)
+            except (TypeError, ValueError):
+                continue
+
+        if candidates:
+            # Use min to stay safe if long/short caps differ.
+            return min(candidates)
+
+        return None
     
     # ============================================
     # API ADAPTERS (pure API calls, no validation!)
@@ -721,6 +882,14 @@ class BingXExchange(BaseExchange):
             limits = market.get('limits', {})
             precision = market.get('precision', {})
             info = market.get('info', {})
+
+            max_leverage = self._extract_max_leverage(market)
+            if max_leverage is None:
+                max_leverage = await self._fetch_max_leverage_from_trade_endpoint(symbol)
+            if max_leverage is None:
+                max_leverage = await self._fetch_max_leverage_from_contracts_api(symbol)
+            if max_leverage is None:
+                max_leverage = 150
             
             # This adapter sends quantity directly in base-asset units to create_order.
             # Keep contract_size=1 here so execution-engine alignment stays in base units.
@@ -732,7 +901,7 @@ class BingXExchange(BaseExchange):
                 'quantity_step': float(precision.get('amount', 0.001) or 0.001),
                 'min_price': float(limits.get('price', {}).get('min', 0) or 0),
                 'price_tick': float(precision.get('price', 0.01) or 0.01),
-                'max_leverage': int(info.get('maxLeverage', 150) or 150),
+                'max_leverage': int(max_leverage),
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
