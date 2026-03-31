@@ -619,6 +619,11 @@ class OpenPositionCommand:
             return "unlimited"
         return f"${value:,.2f}"
 
+    @staticmethod
+    def _box_line(text: str) -> str:
+        """Pad text to fit inside a 60-char-wide double-line box (inner width 58)."""
+        return f"║ {text:<57}║"
+
     def _render_leverage_guardrail(
         self,
         long_exchange_name: str,
@@ -627,16 +632,17 @@ class OpenPositionCommand:
         max_leverage_short: int,
         common_max_leverage: int,
     ) -> str:
-        return (
-            "\n"
-            "╔══════════════════════════════════════════════════════════╗\n"
-            "║ PRE-OPEN SAFETY: LEVERAGE LIMITS                        ║\n"
-            "╠══════════════════════════════════════════════════════════╣\n"
-            f"║ {long_exchange_name:<18} max: {max_leverage_long:>3}x                                ║\n"
-            f"║ {short_exchange_name:<18} max: {max_leverage_short:>3}x                                ║\n"
-            f"║ Common equal max leverage: {common_max_leverage:>3}x                             ║\n"
-            "╚══════════════════════════════════════════════════════════╝"
-        )
+        W = self._box_line
+        return "\n".join([
+            "",
+            "╔══════════════════════════════════════════════════════════╗",
+            W("PRE-OPEN SAFETY: LEVERAGE LIMITS"),
+            "╠══════════════════════════════════════════════════════════╣",
+            W(f"{long_exchange_name:<18} max: {max_leverage_long:>3}x"),
+            W(f"{short_exchange_name:<18} max: {max_leverage_short:>3}x"),
+            W(f"Common equal max leverage: {common_max_leverage:>3}x"),
+            "╚══════════════════════════════════════════════════════════╝",
+        ])
 
     def _render_funding_countdown_guardrail(
         self,
@@ -648,17 +654,18 @@ class OpenPositionCommand:
     ) -> str:
         min_countdown = min(funding_seconds_long, funding_seconds_short)
         warning_text = "WARNING" if min_countdown <= warning_seconds else "OK"
-        return (
-            "\n"
-            "╔══════════════════════════════════════════════════════════╗\n"
-            "║ PRE-OPEN SAFETY: FUNDING COUNTDOWN                      ║\n"
-            "╠══════════════════════════════════════════════════════════╣\n"
-            f"║ {long_exchange_name:<18}: {self._format_countdown(funding_seconds_long):<28} ║\n"
-            f"║ {short_exchange_name:<18}: {self._format_countdown(funding_seconds_short):<28} ║\n"
-            f"║ Status: {warning_text:<50}║\n"
-            f"║ Warning threshold: {warning_seconds // 60} minutes                            ║\n"
-            "╚══════════════════════════════════════════════════════════╝"
-        )
+        W = self._box_line
+        return "\n".join([
+            "",
+            "╔══════════════════════════════════════════════════════════╗",
+            W("PRE-OPEN SAFETY: FUNDING COUNTDOWN"),
+            "╠══════════════════════════════════════════════════════════╣",
+            W(f"{long_exchange_name:<18}: {self._format_countdown(funding_seconds_long)}"),
+            W(f"{short_exchange_name:<18}: {self._format_countdown(funding_seconds_short)}"),
+            W(f"Status: {warning_text}"),
+            W(f"Warning threshold: {warning_seconds // 60} minutes"),
+            "╚══════════════════════════════════════════════════════════╝",
+        ])
 
     def _render_size_guardrail(
         self,
@@ -667,20 +674,21 @@ class OpenPositionCommand:
         leverage: int,
         limits: Dict[str, float],
     ) -> str:
-        return (
-            "\n"
-            "╔══════════════════════════════════════════════════════════╗\n"
-            "║ PRE-OPEN SAFETY: MAX EQUAL SIZE (PER LEG)               ║\n"
-            "╠══════════════════════════════════════════════════════════╣\n"
-            f"║ Leverage: {leverage:>3}x                                              ║\n"
-            f"║ {long_exchange_name:<18} balance cap: {self._format_usd_limit(limits['long_balance_limit']):<17} ║\n"
-            f"║ {short_exchange_name:<18} balance cap: {self._format_usd_limit(limits['short_balance_limit']):<17} ║\n"
-            f"║ {long_exchange_name:<18} symbol cap : {self._format_usd_limit(limits['long_symbol_max_limit']):<17} ║\n"
-            f"║ {short_exchange_name:<18} symbol cap : {self._format_usd_limit(limits['short_symbol_max_limit']):<17} ║\n"
-            f"║ Max equal size (safe): {self._format_usd_limit(limits['max_equal_usd']):<20} ║\n"
-            f"║ Min required size    : {self._format_usd_limit(limits['min_equal_usd']):<20} ║\n"
-            "╚══════════════════════════════════════════════════════════╝"
-        )
+        W = self._box_line
+        return "\n".join([
+            "",
+            "╔══════════════════════════════════════════════════════════╗",
+            W("PRE-OPEN SAFETY: MAX EQUAL SIZE (PER LEG)"),
+            "╠══════════════════════════════════════════════════════════╣",
+            W(f"Leverage: {leverage:>3}x"),
+            W(f"{long_exchange_name:<18} balance cap: {self._format_usd_limit(limits['long_balance_limit'])}"),
+            W(f"{short_exchange_name:<18} balance cap: {self._format_usd_limit(limits['short_balance_limit'])}"),
+            W(f"{long_exchange_name:<18} symbol cap : {self._format_usd_limit(limits['long_symbol_max_limit'])}"),
+            W(f"{short_exchange_name:<18} symbol cap : {self._format_usd_limit(limits['short_symbol_max_limit'])}"),
+            W(f"Max equal size (safe): {self._format_usd_limit(limits['max_equal_usd'])}"),
+            W(f"Min required size    : {self._format_usd_limit(limits['min_equal_usd'])}"),
+            "╚══════════════════════════════════════════════════════════╝",
+        ])
 
 
 class ViewPositionsCommand:
