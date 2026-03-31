@@ -44,8 +44,6 @@ from .display import (
     clear_screen,
     render_balances_view,
     render_close_summary,
-    render_smart_pnl_status,
-    render_smart_pnl_stop_menu,
     render_position_detail_v2,
     render_insufficient_balance_error,
     render_position_confirmation_v2,
@@ -1003,129 +1001,15 @@ class ClosePositionCommand:
         ex2: BaseExchange
     ) -> bool:
         """
-        Execute Smart PnL close with 'q' to stop and 10-sec updates.
-        
-        According to CLI_SPECIFICATION.md:
-        - No timeout (wait indefinitely)
-        - Press 'q' to stop
-        - Show current PnL every 10 seconds
-        """
-        from datetime import datetime
-        import select
-        import sys
-        
-        print("\n[Smart PnL Close] Monitoring... Press 'q' + Enter to stop\n")
-        
-        check_interval = 0.5  # 500ms internal check
-        log_interval = 10.0   # 10 sec display update
-        last_log_time = 0.0
-        
-        while True:
-            try:
-                # Check for 'q' input (non-blocking)
-                if self._check_for_quit():
-                    # User pressed 'q' - show stop menu
-                    current_pnl = position.total_pnl
-                    current_pnl_pct = (current_pnl / position.initial_capital * 100) if position.initial_capital > 0 else 0
-                    
-                    print(render_smart_pnl_stop_menu(current_pnl, current_pnl_pct))
-                    
-                    choice = await get_menu_choice(
-                        "Select [1-3]: ",
-                        valid_choices=["1", "2", "3"]
-                    )
-                    
-                    if choice == "1":
-                        # Resume monitoring
-                        print("\n[Smart PnL Close] Resuming...\n")
-                        continue
-                    elif choice == "2":
-                        # Market close
-                        print(render_loading("Executing market close..."))
-                        return await closer.close_market(position)
-                    else:
-                        # Cancel
-                        return False
-                
-                # Get current orderbooks
-                ob1 = await ex1.get_orderbook(position.pair)
-                ob2 = await ex2.get_orderbook(position.pair)
+        Execute Smart PnL close - delegates entirely to PositionCloser.close_smart_pnl().
 
-                # Fallback: sandbox exchanges may return empty L2 book — use ticker prices
-                _SYNTH = 1e9
-                if not ob1.bids or not ob1.asks:
-                    pd1 = await ex1.get_price_data(position.pair)
-                    ob1.bids = [(pd1.bid or pd1.ask, _SYNTH)]
-                    ob1.asks = [(pd1.ask or pd1.bid, _SYNTH)]
-                if not ob2.bids or not ob2.asks:
-                    pd2 = await ex2.get_price_data(position.pair)
-                    ob2.bids = [(pd2.bid or pd2.ask, _SYNTH)]
-                    ob2.asks = [(pd2.ask or pd2.bid, _SYNTH)]
-                
-                # Calculate PnL using smart_pnl logic
-                from ..utils.calculations import calculate_unrealized_pnl_from_orderbooks, can_instant_fill, get_close_prices_and_sides
-                
-                pnl = calculate_unrealized_pnl_from_orderbooks(position, ob1, ob2)
-                pnl_pct = (pnl / position.initial_capital * 100) if position.initial_capital > 0 else 0
-                
-                # Get close prices and check instant fill
-                # Determine position side on exchange 1
-                from ..exchanges.enums import PositionSide
-                side1 = PositionSide.SHORT if position.exchange1_side == "SHORT" else PositionSide.LONG
-                close_price_ex1, close_price_ex2, close_side_ex1, close_side_ex2 = get_close_prices_and_sides(
-                    ob1, ob2, side1
-                )
-                
-                instant_ex1 = can_instant_fill(ob1, close_side_ex1, close_price_ex1)
-                instant_ex2 = can_instant_fill(ob2, close_side_ex2, close_price_ex2)
-                
-                # Log every 10 seconds
-                current_time = asyncio.get_event_loop().time()
-                if current_time - last_log_time >= log_interval:
-                    timestamp = datetime.now().strftime("%H:%M:%S")
-                    
-                    if pnl >= 0 and instant_ex1 and instant_ex2:
-                        status = "Checking instant fill... ✅"
-                    elif pnl >= 0:
-                        status = "Checking instant fill..."
-                    else:
-                        status = "Waiting..."
-                    
-                    print(render_smart_pnl_status(timestamp, pnl, pnl_pct, status))
-                    last_log_time = current_time
-                
-                # Check close conditions
-                if pnl >= 0 and instant_ex1 and instant_ex2:
-                    timestamp = datetime.now().strftime("%H:%M:%S")
-                    print(f"[{timestamp}] ✅ Both orders instant fill! Closing...")
-                    
-                    # Execute close via PositionCloser
-                    success = await closer.close_smart_pnl(position)
-                    return success
-                
-                await asyncio.sleep(check_interval)
-                
-            except asyncio.CancelledError:
-                return False
-            except Exception as e:
-                print(render_error(f"Error during monitoring: {e}"))
-                return False
-    
-    def _check_for_quit(self) -> bool:
-        """Check if 'q' was pressed (non-blocking)"""
-        import sys
-        import select
-        
-        # Check if running on Unix (has select.select for stdin)
-        try:
-            if select.select([sys.stdin], [], [], 0.0)[0]:
-                line = sys.stdin.readline().strip().lower()
-                return line == 'q'
-        except (ValueError, OSError):
-            pass
-        
-        return False
-    
+        PositionCloser owns the full monitoring loop (500ms checks, box UI, Ctrl+C menu).
+        Having a second monitoring loop here would cause the first detected intersection
+        to be missed: when conditions are found here, close_smart_pnl() restarts from
+        scratch and may not see the same window again.
+        """
+        return await closer.close_smart_pnl(position)
+
     async def _show_close_summary(self, position: Position, close_method: str) -> None:
         """Show close summary according to CLI_SPECIFICATION.md"""
         # Calculate age string
