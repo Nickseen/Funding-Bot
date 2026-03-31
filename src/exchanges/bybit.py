@@ -122,7 +122,40 @@ class BybitExchange(BaseExchange):
         
         # Fallback - return as is
         return symbol
-    
+
+    def _extract_max_leverage(self, market: Dict[str, Any]) -> int:
+        """Extract symbol-specific max leverage from Bybit market metadata.
+
+        Bybit's /v5/market/instruments-info returns leverageFilter.maxLeverage
+        per symbol (e.g. HYPE=75, DOGE=50). ccxt normalises this into
+        limits.leverage.max; info.leverageFilter.maxLeverage is the raw value.
+        """
+        limits = market.get('limits', {}) or {}
+        leverage_limits = limits.get('leverage', {}) or {}
+        info = market.get('info', {}) or {}
+        leverage_filter = info.get('leverageFilter', {}) or {}
+
+        candidates: List[Any] = [
+            leverage_limits.get('max'),
+            leverage_filter.get('maxLeverage'),
+            info.get('maxLeverage'),
+            info.get('maxleverage'),
+        ]
+
+        parsed_values: List[int] = []
+        for value in candidates:
+            try:
+                parsed = int(float(value))
+                if parsed > 0:
+                    parsed_values.append(parsed)
+            except (TypeError, ValueError):
+                continue
+
+        if parsed_values:
+            return min(parsed_values)
+
+        return 100
+
     # ============================================
     # API ADAPTERS (pure API calls, no validation!)
     # ============================================
@@ -531,7 +564,7 @@ class BybitExchange(BaseExchange):
                 'quantity_step': market['precision']['amount'],
                 'min_price': market['limits']['price']['min'],
                 'price_tick': market['precision']['price'],
-                'max_leverage': 100,  # Bybit max for most pairs
+                'max_leverage': self._extract_max_leverage(market),
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))

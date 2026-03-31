@@ -263,3 +263,33 @@ class TestBybitExchange:
 
                 assert result['order_id'] == 'tp123'
                 assert result['type'] == 'take_profit'
+
+    @pytest.mark.asyncio
+    async def test_api_get_symbol_info_uses_symbol_specific_max_leverage(self, bybit_exchange):
+        """limits.leverage.max must override the generic 100 default."""
+        ccxt_symbol = "HYPE/USDT:USDT"
+        bybit_exchange.client.markets = {
+            ccxt_symbol: {
+                "limits": {
+                    "amount": {"min": 1, "max": 1000000},
+                    "price": {"min": 0.0001},
+                    "leverage": {"max": 75},
+                },
+                "precision": {"amount": 1, "price": 0.0001},
+                "info": {"leverageFilter": {"maxLeverage": "125"}},
+            }
+        }
+        symbol_info = await bybit_exchange._api_get_symbol_info("HYPEUSDT")
+        assert symbol_info["max_leverage"] == 75
+
+    def test_extract_max_leverage_from_leverage_filter(self, bybit_exchange):
+        """info.leverageFilter.maxLeverage is used when limits.leverage absent."""
+        market = {
+            "limits": {},
+            "info": {"leverageFilter": {"maxLeverage": "50"}},
+        }
+        assert bybit_exchange._extract_max_leverage(market) == 50
+
+    def test_extract_max_leverage_fallback(self, bybit_exchange):
+        """Falls back to 100 when no leverage info present."""
+        assert bybit_exchange._extract_max_leverage({"limits": {}, "info": {}}) == 100
