@@ -467,6 +467,11 @@ Close position? [Y/n]: """
                         f"PnL=${pnl_usd:+.2f} ({pnl_pct:+.2f}%), both instant fill"
                     )
                     
+                    # Рассчитать и сохранить комиссии для итогового отчёта
+                    mid_price = (ob1.best_bid + ob1.best_ask + ob2.best_bid + ob2.best_ask) / 4
+                    position.fees_paid = self._calculate_total_taker_fees_usd(position, mid_price)
+                    position.unrealized_pnl = pnl_usd
+                    
                     # Выставить лимитки одновременно
                     await self._close_with_limit_orders(position, ob1, ob2)
                     
@@ -659,6 +664,10 @@ Close position? [Y/n]: """
                         f"PnL=${pnl_usd:+.2f}, Fees=${total_fees_usd:.2f}, "
                         f"Net=${net_pnl:+.2f}, both instant fill"
                     )
+                    
+                    # Сохранить расчётные значения для итогового отчёта
+                    position.fees_paid = total_fees_usd
+                    position.unrealized_pnl = pnl_usd
                     
                     # Выставить лимитки одновременно
                     await self._close_with_limit_orders(position, ob1, ob2)
