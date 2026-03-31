@@ -751,6 +751,65 @@ class BinanceExchange(BaseExchange):
         except ccxt.NetworkError as e:
             raise NetworkError(str(e))
 
+    async def _fetch_max_leverage_from_bracket_api(self, symbol: str) -> Optional[int]:
+        """
+        Fetch symbol-specific max leverage from /fapi/v1/leverageBracket.
+
+        Binance exchangeInfo only holds a global maxLeverage (125) — it does NOT
+        reflect per-symbol caps.  The leverage bracket endpoint is the authoritative
+        source for the real per-symbol limit (e.g. HYPE=75, DOGE=50, etc.).
+
+        The first bracket always has the highest initialLeverage (max for that symbol)
+        because brackets are ordered from smallest notional to largest.
+
+        Results are cached per raw Binance symbol to avoid repeated API calls.
+        """
+        if not hasattr(self, '_leverage_bracket_cache'):
+            self._leverage_bracket_cache: Dict[str, int] = {}
+
+        binance_symbol = self._to_binance_symbol(symbol)
+
+        if binance_symbol in self._leverage_bracket_cache:
+            return self._leverage_bracket_cache[binance_symbol]
+
+        params = {'symbol': binance_symbol}
+        # Try private endpoint first (authenticated), fall back to public variant.
+        for method_name in ('fapiPrivateGetLeverageBracket', 'fapiPublicGetLeverageBracket'):
+            method = getattr(self.client, method_name, None)
+            if not method:
+                continue
+            try:
+                response = await method(params)
+
+                # Response may be a list of {symbol, brackets:[...]} or a single dict
+                if isinstance(response, list):
+                    items = response
+                elif isinstance(response, dict):
+                    items = [response]
+                else:
+                    continue
+
+                for item in items:
+                    # Match by symbol or take the only entry we got
+                    sym = item.get('symbol', '')
+                    if sym and sym.upper() != binance_symbol.upper():
+                        continue
+                    brackets = item.get('brackets', [])
+                    if brackets:
+                        max_lev = int(brackets[0].get('initialLeverage', 0))
+                        if max_lev > 0:
+                            self._leverage_bracket_cache[binance_symbol] = max_lev
+                            log.debug(
+                                f"Binance {binance_symbol} max leverage={max_lev}x "
+                                f"(from leverageBracket via {method_name})"
+                            )
+                            return max_lev
+                break  # response parsed — stop trying other methods
+            except Exception as e:
+                log.debug(f"Binance leverageBracket via {method_name} failed for {binance_symbol}: {e}")
+
+        return None
+
     async def _api_get_symbol_info(self, symbol: str) -> Dict[str, Any]:
         """Binance: GET /fapi/v1/exchangeInfo - symbol trading rules"""
         try:
@@ -764,13 +823,18 @@ class BinanceExchange(BaseExchange):
             if not market:
                 raise ExchangeError(f"Symbol {symbol} not found")
 
+            # leverageBracket endpoint is authoritative for per-symbol max leverage.
+            # exchangeInfo only carries a global max (125) — useless for specific tokens.
+            bracket_max = await self._fetch_max_leverage_from_bracket_api(symbol)
+            max_leverage = bracket_max if bracket_max else self._extract_max_leverage(market)
+
             return {
                 'min_quantity': market['limits']['amount']['min'],
                 'max_quantity': market['limits']['amount']['max'],
                 'quantity_step': market['precision']['amount'],
                 'min_price': market['limits']['price']['min'],
                 'price_tick': market['precision']['price'],
-                'max_leverage': self._extract_max_leverage(market),
+                'max_leverage': max_leverage,
             }
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
