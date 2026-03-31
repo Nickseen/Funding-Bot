@@ -374,7 +374,9 @@ class OpenPositionCommand:
             position_size=position_size,
             leverage=leverage,
             execution_mode=execution_mode,
-            funding_rate_bps=net_funding_bps
+            funding_rate_bps=net_funding_bps,
+            funding_bps_ex1=funding_long.rate_bps,
+            funding_bps_ex2=funding_short.rate_bps,
         )
     
     async def _execute_open(
@@ -385,7 +387,9 @@ class OpenPositionCommand:
         position_size: float,
         leverage: int,
         execution_mode: str,
-        funding_rate_bps: float
+        funding_rate_bps: float,
+        funding_bps_ex1: float = 0.0,
+        funding_bps_ex2: float = 0.0,
     ) -> bool:
         """
         Execute the actual position opening using ExecutionEngine.
@@ -454,7 +458,11 @@ class OpenPositionCommand:
                 
                 # Set initial capital for PnL calculations
                 position.initial_capital = position_size * 2  # Both legs
-                
+
+                # Save entry funding bps per exchange (snapshot at open time)
+                position.entry_funding_bps_ex1 = funding_bps_ex1
+                position.entry_funding_bps_ex2 = funding_bps_ex2
+
                 # Add to state
                 await self.state.add_position(position)
                 
@@ -842,6 +850,8 @@ class ViewPositionsCommand:
         
         # Sum accumulated values from both exchanges
         position.funding_received = ex1_funding + ex2_funding
+        position.funding_received_ex1 = ex1_funding
+        position.funding_received_ex2 = ex2_funding
         position.fees_paid = ex1_fees + ex2_fees
         
         # Calculate unrealized PnL based on current prices
@@ -1017,6 +1027,8 @@ class ClosePositionCommand:
 
     async def _show_close_summary(self, position: Position, close_method: str) -> None:
         """Show close summary according to CLI_SPECIFICATION.md"""
+        from ..exchanges.enums import get_taker_fee_bps, Exchange
+        
         # Calculate age string
         age_hours = position.age_hours
         if age_hours < 24:
@@ -1028,23 +1040,37 @@ class ClosePositionCommand:
         
         # Calculate values
         entry_capital = position.initial_capital
-        exit_value = entry_capital + position.total_pnl
+        leg_size = entry_capital / 2
         net_pnl = position.total_pnl
+        exit_value = entry_capital + net_pnl
         net_pnl_pct = (net_pnl / entry_capital * 100) if entry_capital > 0 else 0
+        
+        # Fee bps for display
+        try:
+            ex1_fee = get_taker_fee_bps(Exchange(position.exchange1))
+            ex2_fee = get_taker_fee_bps(Exchange(position.exchange2))
+            total_fee_bps = 2 * (ex1_fee + ex2_fee)  # 4 legs
+        except Exception:
+            total_fee_bps = 0.0
         
         print(render_close_summary(
             symbol=position.pair,
             exchanges=f"{position.exchange1}-{position.exchange2}",
             close_method=close_method,
             time_open=time_open,
+            leg_size=leg_size,
             entry_capital=entry_capital,
             exit_value=exit_value,
             net_pnl=net_pnl,
             net_pnl_pct=net_pnl_pct,
+            gross_pnl=position.unrealized_pnl,
             funding_earned=position.funding_received,
-            spread_pnl=position.unrealized_pnl,
-            entry_fees=position.fees_paid / 2,  # Approximate
-            exit_fees=position.fees_paid / 2
+            funding_earned_ex1=position.funding_received_ex1,
+            funding_earned_ex2=position.funding_received_ex2,
+            entry_funding_bps_ex1=position.entry_funding_bps_ex1,
+            entry_funding_bps_ex2=position.entry_funding_bps_ex2,
+            total_fees=position.fees_paid,
+            total_fee_bps=total_fee_bps,
         ))
 
 
