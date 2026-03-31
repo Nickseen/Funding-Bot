@@ -1782,9 +1782,40 @@ async def get_income_history(
     - Файлы: `src/exchanges/okx.py`, `tests/unit/exchange/test_okx_posside_fallback.py`
 
 ### 2026-03-30
-- **fix(exchanges)**: add symbol-level leverage caps for Binance and KuCoin
+- **fix(exchanges)**: add symbol-level leverage caps for Binance and KuCoin (commit `01da7b1`)
     - В `BinanceExchange` добавлен унифицированный extractor max leverage из `limits.leverage.max`, `info.maxLeverage`, `filters[LEVERAGE]` и вложенных полей `*max*leverage*`.
     - В `KuCoinExchange` добавлен аналогичный extractor max leverage из `limits.leverage.max`, `info` и вложенных структур risk/limits payload.
     - `_api_get_symbol_info()` в обоих адаптерах теперь использует extractor вместо прямого default fallback, чтобы возвращать token-specific лимиты плеча.
     - Добавлены unit-тесты для Binance и KuCoin на приоритет symbol-level лимитов и nested fallback парсинг.
     - Файлы: `src/exchanges/binance.py`, `src/exchanges/kucoin.py`, `tests/unit/exchange/test_binance_exchange.py`, `tests/unit/exchange/test_kucoin_exchange.py`
+
+### 2026-03-31
+- **fix(binance)**: use leverageBracket API for symbol-specific max leverage (commit `f792781`)
+    - Обнаружено: `exchangeInfo` Binance хранит только глобальный `maxLeverage=125`, не per-symbol.
+    - Добавлен `_fetch_max_leverage_from_bracket_api()` — запрос `/fapi/v1/leverageBracket`; первый bracket содержит `initialLeverage` — это реальный лимит для токена (HYPE=75, DOGE=50 и т.д.).
+    - Результат кэшируется in-memory per-symbol, чтобы не дублировать запросы.
+    - `_api_get_symbol_info()` сначала вызывает bracket API → при ошибке fallback на `limits.leverage.max` из market metadata.
+    - Тесты: bracket overrides generic 125, fallback on API error, filters path.
+    - Файлы: `src/exchanges/binance.py`, `tests/unit/exchange/test_binance_exchange.py`
+
+- **fix(bybit)**: symbol-specific max leverage via leverageFilter metadata (commit `bce887e`)
+    - Заменён хардкод `max_leverage=100` на `_extract_max_leverage()` который читает `limits.leverage.max`, `info.leverageFilter.maxLeverage` и вложенные поля.
+    - Fallback 100 только при отсутствии данных.
+    - Файлы: `src/exchanges/bybit.py`, `tests/unit/exchange/test_bybit_exchange.py`
+
+- **fix(cli)**: align pre-open safety box borders correctly (commit `067ed3c`)
+    - Захардкоженные пробелы в строках рамок сдвигали правую границу `║` при переменной длине имён бирж/значений.
+    - Добавлен `_box_line(text)` helper: паддит контент ровно до 57 символов → каждая строка = 60 visual колонок.
+    - Файл: `src/cli/commands.py`
+
+- **fix(cli)**: switch position sizing from notional to margin basis
+    - Ранее все лимиты и минимальный размер отображались в notional USD (маржа × плечо), что вводило в заблуждение: показывал min=$9.00 когда реальная стоимость кошелька была $0.60.
+    - Теперь все лимиты в USD маржи (то, что реально уходит с баланса):
+        - `balance_cap = available × 0.95` (не × leverage)
+        - `symbol_cap = max_qty × price / leverage`
+        - `min_required = min_qty × price / leverage`
+        - `quantity = margin × leverage / price` (корректная конвертация в токены)
+        - Funding отображается от notional (margin × leverage)
+    - Guardrail переименован: `MAX EQUAL MARGIN (PER LEG)`.
+    - Risk check: показывает "Margin per leg" + "Total notional".
+    - Файлы: `src/cli/commands.py`, `src/cli/display.py`, `tests/unit/test_open_position_safety_checks.py`
