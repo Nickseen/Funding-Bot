@@ -562,7 +562,8 @@ def render_close_mode_menu(
         _create_line("2. Stable Spread (Wait until spread matches entry)"),
         _create_line("3. Smart PnL (Close when PnL>=0 + instant fill) *"),
         _create_line("4. Market order (Instant)"),
-        _create_line("5. Cancel"),
+        _create_line("5. Free Fees (PnL covers all maker fees + instant fill)"),
+        _create_line("6. Cancel"),
         _create_footer(),
     ])
     

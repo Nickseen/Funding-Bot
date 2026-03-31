@@ -939,15 +939,15 @@ class ClosePositionCommand:
         # Show close mode menu
         print(render_close_mode_menu(position, current_spread_bps, pnl, pnl_pct))
         
-        # 5 options per CLI_SPECIFICATION.md
-        valid_choices = ["1", "2", "3", "4", "5"]
+        # 6 options
+        valid_choices = ["1", "2", "3", "4", "5", "6"]
         
         mode_choice = await get_menu_choice(
-            "Select mode [1-5]: ",
+            "Select mode [1-6]: ",
             valid_choices
         )
         
-        if mode_choice is None or mode_choice == "5":
+        if mode_choice is None or mode_choice == "6":
             return False
         
         # Create PositionCloser
@@ -978,6 +978,11 @@ class ClosePositionCommand:
                 # Market close
                 close_method = "Market"
                 success = await closer.close_market(position)
+            
+            elif mode_choice == "5":
+                # Free Fees close
+                close_method = "Free Fees"
+                success = await closer.close_free_fees(position)
             
             if success:
                 # Show close summary
