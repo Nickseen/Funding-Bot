@@ -111,7 +111,7 @@ while True:
 **Опции:**
 - Без timeout: ждет бесконечно
 - С timeout: показывает меню после истечения
-- Прерывание (Ctrl+C): меню с выбором (продолжить, установить timeout, отменить)
+- Прерывание (`[q] + Enter`): меню с выбором (продолжить, форс-маркет, отменить)
 
 **Преимущества:**
 - 🎯 Никогда не закрывает с убытком (PnL >= 0)
@@ -350,13 +350,50 @@ Select position to close [1-2]:
 ║ 2. Stable Spread close (Wait for spread to match entry)
 ║ 3. Smart PnL close (Close when PnL ≥ 0 + instant fill) ✅
 ║ 4. Market order (Instant)
+║ 5. Free Fees (PnL covers all taker fees + instant fill) ✅
+║ 6. Cancel
 ╚══════════════════════════════════════════════════════════
-Select mode [1-4]:
+Select mode [1-6]:
 ```
 
----
+### 5. Free Fees Close ✅ IMPLEMENTED (31 Mar 2026)
+**Модуль:** `src/core/position_closer.py` (метод `close_free_fees()`)
 
-## ⚠️ Emergency Close - Проблема и решение
+**Суть:** Расширение Smart PnL Close — закрывает позицию только когда PnL **полностью покрывает все taker-комиссии** (открытие + закрытие, обе биржи).
+
+**Зачем:** Smart PnL закрывает при PnL ≥ 0, но не учитывает уже заплаченные комиссии. Free Fees гарантирует, что заработок — это **чистый funding profit** без каких-либо потерь на комиссиях.
+
+**Пример:**
+```
+OKX (5 bps) + Gate.io (5 bps)
+Плечо: 10x, депозит: $25 на ногу → $250 на ногу
+Notional: $500
+
+Комиссии: 2 × (5 + 5) = 20 bps × $500 / 10000 = $1
+Порог закрытия: PnL >= $1
+→ Чистая прибыль = 100% funding
+```
+
+**Условия закрытия (ОБА должны выполняться):**
+1. ✅ Unrealized PnL ≥ total_taker_fees_usd
+2. ✅ Оба limit ордера исполнятся мгновенно (instant fill)
+
+**Формула расчёта threshold:**
+```
+total_fee_bps = 2 × (taker_ex1_bps + taker_ex2_bps)   # 4 ноги
+total_fees_usd = quantity × mid_price × total_fee_bps / 10000
+```
+
+**Отображение в мониторинге:**
+```
+⏱️  [30s] PnL: $+1.20 | Fees: $1.00 | Net: $+0.20 ✅ | Ex1: ✅ | Ex2: ✅
+```
+
+**Управление:** Нажать `[q] + Enter` для выхода в меню (Continue / Market / Cancel)
+
+**Тесты:** Покрыт логикой `_calculate_total_taker_fees_usd()` в `position_closer.py`
+
+---
 
 ### Проблема
 При срабатывании SL/TP нужно, чтобы на **обеих** биржах закрылись позиции одновременно.
@@ -527,40 +564,42 @@ data/
 
 ## �📊 Комиссии бирж
 
-### Taker Commission (маркет ордера)
+### Taker Commission (маркет ордера / агрессивные лимитки)
+**Обновлено: 31 Mar 2026 — сверено вручную по официальным страницам бирж**
 ```python
 TAKER_COMMISSION_BPS = {
-    "kucoin": 6.0,
+    "kucoin": 6.0,    # ✅ сверено
     "aster": 4.0,
-    "binance": 5.0,
-    "okx": 10.0,
-    "mexc": 4.0,
-    "gate": 5.0,
-    "bitget": 6.0,
-    "bybit": 5.5,
+    "binance": 5.0,   # ✅ сверено
+    "okx": 5.0,       # ✅ сверено (было 10.0 — исправлено)
+    "mexc": 4.0,      # ✅ сверено
+    "gate": 5.0,      # ✅ сверено
+    "bitget": 10.0,   # ✅ сверено (было 6.0 — исправлено)
+    "bybit": 5.5,     # ✅ сверено
     "lighter": 0.0,
     "extended": 2.5,
     "hyperliquid": 4.5,
-    "bingx": 5.0,
+    "bingx": 5.0,     # ✅ сверено
     "ethereal": 3.0,
 }
 ```
 
 ### Maker Commission (лимит ордера)
+**Обновлено: 31 Mar 2026 — сверено вручную по официальным страницам бирж**
 ```python
 MAKER_COMMISSION_BPS = {
-    "kucoin": 2.0,
+    "kucoin": 2.0,    # ✅ сверено
     "aster": 0.5,
-    "binance": 2.0,
-    "okx": 2.0,
-    "mexc": 1.0,
-    "gate": 2.0,
-    "bitget": 2.0,
-    "bybit": 2.0,
+    "binance": 2.0,   # ✅ сверено
+    "okx": 2.0,       # ✅ сверено
+    "mexc": 1.0,      # ✅ сверено
+    "gate": 2.0,      # ✅ сверено
+    "bitget": 3.6,    # ✅ сверено (было 2.0 — исправлено)
+    "bybit": 2.0,     # ✅ сверено
     "lighter": 0.0,
     "extended": 0.0,
     "hyperliquid": 1.5,
-    "bingx": 2.0,
+    "bingx": 2.0,     # ✅ сверено
     "ethereal": 0.0,
 }
 ```
@@ -640,6 +679,19 @@ MAKER_COMMISSION_BPS = {
 - [x] Добавить поддержку новых бирж в CLI (21 Jan 2026)
 - [x] Добавить новые тесты: test_persistence.py, test_smart_pnl_close.py
 - [x] Обновить документацию с новыми изменениями
+
+### Completed ✅ (31 Mar 2026)
+- [x] **Аудит taker-комиссий** по официальным страницам 9 бирж:
+  - OKX: исправлено 10.0 → 5.0 bps
+  - Bitget: исправлено 6.0 → 10.0 bps (taker) и 2.0 → 3.6 bps (maker)
+- [x] **Free Fees Close** — новый режим закрытия (пункт меню 5)
+  - Порог: PnL ≥ суммарные taker-комиссии за 4 ноги (open+close × 2 биржи)
+  - Та же механика instant fill что в Smart PnL
+  - `_calculate_total_taker_fees_usd()` в `position_closer.py`
+- [x] **[q] + Enter для выхода** из Smart PnL и Free Fees мониторинга
+  - `_stdin_quit_watcher()` — асинхронный watcher через `run_in_executor`
+  - Показывает меню (Continue / Market / Cancel)
+  - Исправлен `asyncio.get_running_loop()` вместо deprecated `get_event_loop()`
 
 ### Pending ⬜ (Low Priority / Future)
 - [ ] WebSocket price monitoring (REST sufficient for now)
