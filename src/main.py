@@ -35,6 +35,7 @@ from src.exchanges.okx import OKXExchange
 from src.exchanges.gate import GateExchange
 from src.exchanges.bingx import BingXExchange
 from src.exchanges.bitget import BitgetExchange
+from src.exchanges.mexc import MexcExchange
 
 
 class Bot:
@@ -277,6 +278,15 @@ async def main_cli():
             )
         except Exception as e:
             log.warning(f"Error initializing Bitget: {e}")
+
+    if hasattr(config, 'MEXC_API_KEY') and config.MEXC_API_KEY:
+        try:
+            exchanges['mexc'] = MexcExchange(
+                api_key=config.MEXC_API_KEY,
+                secret_key=config.MEXC_SECRET_KEY,
+            )
+        except Exception as e:
+            log.warning(f"Error initializing MEXC: {e}")
     
     if not exchanges:
         log.warning("No exchanges configured. CLI will run in demo mode.")
