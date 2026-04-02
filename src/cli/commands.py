@@ -785,7 +785,7 @@ class ViewPositionsCommand:
         if ex1:
             try:
                 ex1_position = await ex1.get_position_by_symbol(position.pair)
-                if ex1_position:
+                if ex1_position and ex1_position.exchange1_current_price > 0:
                     position.exchange1_current_price = ex1_position.exchange1_current_price
                     # Exchange returns accumulated values, not incremental
                     ex1_funding = ex1_position.funding_received
@@ -804,7 +804,7 @@ class ViewPositionsCommand:
                         except Exception as e:
                             pass  # Silent fallback - use 0.0
                 else:
-                    # Fallback to just price if position not found
+                    # Fallback to just price if position not found or price is 0
                     price1 = await ex1.get_price_data(position.pair)
                     position.exchange1_current_price = price1.mid_price
             except Exception as e:
@@ -818,7 +818,7 @@ class ViewPositionsCommand:
         if ex2:
             try:
                 ex2_position = await ex2.get_position_by_symbol(position.pair)
-                if ex2_position:
+                if ex2_position and ex2_position.exchange1_current_price > 0:
                     position.exchange2_current_price = ex2_position.exchange1_current_price
                     # Exchange returns accumulated values, not incremental
                     ex2_funding = ex2_position.funding_received
@@ -837,7 +837,7 @@ class ViewPositionsCommand:
                         except Exception as e:
                             pass  # Silent fallback - use 0.0
                 else:
-                    # Fallback to just price if position not found
+                    # Fallback to just price if position not found or price is 0
                     price2 = await ex2.get_price_data(position.pair)
                     position.exchange2_current_price = price2.mid_price
             except Exception as e:
