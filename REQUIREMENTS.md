@@ -384,10 +384,25 @@ total_fee_bps = 2 × (taker_ex1_bps + taker_ex2_bps)   # 4 ноги
 total_fees_usd = quantity × mid_price × total_fee_bps / 10000
 ```
 
+**Расчёт PnL — aggressive цены (fix 02 Apr 2026):**
+
+PnL считается **по реальным ценам исполнения** (aggressive fill price с буфером 0.1%),
+а не по `best_bid`/`best_ask`. Это устраняет систематическое расхождение ~10 центов
+между ожидаемым и реальным результатом при закрытии.
+
+```
+agg_price = calculate_aggressive_fill_price(orderbook_side, qty, side, buffer=0.1%)
+pnl_usd   = calculate_unrealized_pnl(..., close_price_ex1=agg_price1, close_price_ex2=agg_price2)
+```
+
+Условие срабатывает только когда спред достаточно широк, чтобы покрыть и комиссии, и буфер
+исполнения. Если стакан пустой / нет ликвидности — fallback на `best_bid`/`best_ask`.
+
 **Отображение в мониторинге:**
 ```
 ⏱️  [30s] PnL: $+1.20 | Fees: $1.00 | Net: $+0.20 ✅ | Ex1: ✅ | Ex2: ✅
 ```
+(PnL и Net теперь отражают реальную цену исполнения, а не теоретическую)
 
 **Управление:** Нажать `[q] + Enter` для выхода в меню (Continue / Market / Cancel)
 
