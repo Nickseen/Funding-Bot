@@ -553,7 +553,8 @@ async def _trigger_emergency_close(position: Position):
 **Статус тестирования:**  
 ✅ Все баги исправлены и протестированы на production (Bybit + OKX)  
 ✅ Новые биржи протестированы на demo/testnet  
-✅ MEXC API connection, market data, balance - протестировано
+✅ MEXC API connection, market data, balance - протестировано  
+✅ MEXC адаптер полностью переработан и протестирован (02 Apr 2026)
 ✅ 52/52 unit tests passing  
 ✅ Позиции успешно открываются, отслеживаются и закрываются
 ✅ Bitget: Market close и Smart PnL close протестированы и работают (24 Feb 2026)
@@ -694,6 +695,32 @@ MAKER_COMMISSION_BPS = {
 - [x] Добавить поддержку новых бирж в CLI (21 Jan 2026)
 - [x] Добавить новые тесты: test_persistence.py, test_smart_pnl_close.py
 - [x] Обновить документацию с новыми изменениями
+
+### Completed ✅ (02 Apr 2026)
+- [x] **MEXC адаптер — полный рефакторинг** (02 Apr 2026)
+  - Обновлён API домен: `contract.mexc.com` → `api.mexc.com` (миграция 2026-01-19, старый возвращал 403)
+  - Очищен `unavailableContracts` после инициализации: ccxt по умолчанию блокирует BTC/ETH/LTC для MEXC
+  - Исправлен `_api_open_position`: добавлены `marginMode: isolated`, `leverage` в params (ccxt требует явно)
+  - Исправлен `_api_set_stop_loss` и `_api_set_take_profit`: заменены несуществующие MEXC order types на
+    `triggerPrice`/`triggerType`/`trend`/`orderType` params; направление triggerType теперь соответствует стороне
+    (LONG TP → triggerType=1 ≥, SHORT TP → triggerType=2 ≤)
+  - Исправлен `_api_get_symbol_info`: `min_quantity`, `max_quantity`, `quantity_step` теперь в базовой валюте
+    (`volUnit × contractSize`), а не в контрактах
+  - Исправлен `_api_get_single_position`: фильтрация по symbolu (раньше возвращал первую ненулевую позицию)
+  - Исправлен `_parse_position`: contractSize берётся из market-кэша (или `info.contractSize` как fallback),
+    unrealizedPnl читается из `info.unrealized`, positionId включён в position.id
+  - Добавлен `sync_time()` при `connect()` для исключения timestamp-ошибок  
+  - Добавлен `_api_get_income_history()`: получает историю funding payments через
+    `contractPrivateGetPositionFundingRecords`
+- [x] **feat(main): инициализация MexcExchange в CLI** — MEXC подключается при наличии `MEXC_API_KEY` в конфиге
+- [x] **fix(commands): skip zero price** — `_update_position_prices()` теперь игнорирует данные позиции
+  когда `exchange1_current_price == 0` (fallback на `get_price_data()`)
+- [x] **fix(execution_engine): `entry_spread_abs` не определена в `stable_spread`** — после открытия
+  позиции бот падал с `NameError: name 'entry_spread_abs' is not defined`, позиция не сохранялась.
+  Исправлено добавлением `entry_spread_abs = abs(entry_spread_signed_abs)` сразу после вычисления спреда.
+- [x] **fix(persistence): нормализация символов при детекции orphaned-пар** — `discover_orphan_positions()`
+  не мог сопоставить `NTRN/USDT:USDT` (Gate) с `NTRNUSDT` (MEXC); добавлена функция `_norm_sym()` 
+  аналогичная той что используется в других частях persistence.py
 
 ### Completed ✅ (31 Mar 2026)
 - [x] **Аудит taker-комиссий** по официальным страницам 9 бирж:
