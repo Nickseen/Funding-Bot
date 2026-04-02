@@ -21,6 +21,7 @@ from ..exchanges.types import Position, OrderBook
 from ..exchanges.enums import OrderType, PositionSide, PositionStatus, Exchange, get_taker_fee_bps
 from ..utils.calculations import (
     calculate_spread_bps,
+    calculate_unrealized_pnl,
     calculate_unrealized_pnl_from_orderbooks,
     can_instant_fill,
     get_close_prices_and_sides,
@@ -609,23 +610,51 @@ Close position? [Y/n]: """
                 # 1. Получить текущие стаканы
                 ob1 = await self.exchange1.get_orderbook(position.pair)
                 ob2 = await self.exchange2.get_orderbook(position.pair)
-                
-                # 2. Рассчитать unrealized PnL
-                pnl_usd = calculate_unrealized_pnl_from_orderbooks(position, ob1, ob2)
+
+                # 2. Определить стороны закрытия и рассчитать aggressive цены
+                if position.exchange1_side == "LONG":
+                    ob_side1, ob_side2 = ob1.bids, ob2.asks
+                    close_side_ex1, close_side_ex2 = "SELL", "BUY"
+                else:
+                    ob_side1, ob_side2 = ob1.asks, ob2.bids
+                    close_side_ex1, close_side_ex2 = "BUY", "SELL"
+
+                try:
+                    agg_price1, _ = calculate_aggressive_fill_price(
+                        ob_side1, position.quantity, close_side_ex1
+                    )
+                    agg_price2, _ = calculate_aggressive_fill_price(
+                        ob_side2, position.quantity, close_side_ex2
+                    )
+                    # PnL по реальным ценам исполнения (с буфером 0.1%)
+                    pnl_usd = calculate_unrealized_pnl(
+                        entry_price_ex1=position.exchange1_entry_price,
+                        entry_price_ex2=position.exchange2_entry_price,
+                        close_price_ex1=agg_price1,
+                        close_price_ex2=agg_price2,
+                        quantity=position.quantity,
+                        side1=side1,
+                    )
+                except Exception:
+                    # fallback: best bid/ask если стакан пустой/нет ликвидности
+                    pnl_usd = calculate_unrealized_pnl_from_orderbooks(position, ob1, ob2)
+                    agg_price1 = ob1.best_bid if close_side_ex1 == "SELL" else ob1.best_ask
+                    agg_price2 = ob2.best_ask if close_side_ex2 == "BUY" else ob2.best_bid
+
                 pnl_pct = (pnl_usd / position.initial_capital) * 100 if position.initial_capital > 0 else 0
-                
+
                 # 3. Рассчитать total taker fees в USD
                 mid_price = (ob1.best_bid + ob1.best_ask + ob2.best_bid + ob2.best_ask) / 4
                 total_fees_usd = self._calculate_total_taker_fees_usd(position, mid_price)
-                
-                # 4. Получить цены закрытия и стороны
-                close_price_ex1, close_price_ex2, close_side_ex1, close_side_ex2 = \
-                    get_close_prices_and_sides(ob1, ob2, side1)
-                
-                # 5. Проверить instant fill на обеих биржах
+
+                # 4. Цены закрытия уже рассчитаны (agg_price1/2)
+                close_price_ex1 = agg_price1
+                close_price_ex2 = agg_price2
+
+                # 5. Проверить instant fill на обеих биржах  
                 instant_ex1 = can_instant_fill(ob1, close_side_ex1, close_price_ex1)
                 instant_ex2 = can_instant_fill(ob2, close_side_ex2, close_price_ex2)
-                
+
                 # Net PnL после вычета всех комиссий
                 net_pnl = pnl_usd - total_fees_usd
                 
