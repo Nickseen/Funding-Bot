@@ -562,7 +562,8 @@ def render_close_mode_menu(
         _create_line("2. Stable Spread (Wait until spread matches entry)"),
         _create_line("3. Smart PnL (Close when PnL>=0 + instant fill) *"),
         _create_line("4. Market order (Instant)"),
-        _create_line("5. Cancel"),
+        _create_line("5. Free Fees (PnL covers all maker fees + instant fill)"),
+        _create_line("6. Cancel"),
         _create_footer(),
     ])
     
@@ -727,33 +728,39 @@ def render_close_summary(
     exit_value: float,
     net_pnl: float,
     net_pnl_pct: float,
+    leg_size: float = 0.0,
+    gross_pnl: float = 0.0,
     funding_earned: float = 0.0,
+    funding_earned_ex1: float = 0.0,
+    funding_earned_ex2: float = 0.0,
+    entry_funding_bps_ex1: float = 0.0,
+    entry_funding_bps_ex2: float = 0.0,
+    total_fees: float = 0.0,
+    total_fee_bps: float = 0.0,
+    # legacy params kept for compat
     spread_pnl: float = 0.0,
     entry_fees: float = 0.0,
-    exit_fees: float = 0.0
+    exit_fees: float = 0.0,
 ) -> str:
     """
-    Render close position summary according to CLI_SPECIFICATION.md
-    
-    Args:
-        symbol: Trading pair
-        exchanges: Exchange pair string (e.g., "BINANCE-BYBIT")
-        close_method: Method used to close (e.g., "Smart PnL")
-        time_open: Duration position was open
-        entry_capital: Initial capital invested
-        exit_value: Value at exit
-        net_pnl: Net profit/loss in USD
-        net_pnl_pct: Net PnL percentage
-        funding_earned: Total funding received
-        spread_pnl: PnL from spread changes
-        entry_fees: Fees paid on entry
-        exit_fees: Fees paid on exit
+    Render close position summary.
     """
     pnl_sign = "+" if net_pnl >= 0 else ""
+    gross_sign = "+" if gross_pnl >= 0 else ""
     funding_sign = "+" if funding_earned >= 0 else ""
-    spread_sign = "+" if spread_pnl >= 0 else ""
-    total_fees = entry_fees + exit_fees
-    
+
+    # If legacy path: total_fees from entry_fees+exit_fees
+    if total_fees == 0.0 and (entry_fees + exit_fees) > 0:
+        total_fees = entry_fees + exit_fees
+
+    # Fee bps string
+    fee_bps_str = f" ({total_fee_bps:.1f} bps)" if total_fee_bps > 0 else ""
+
+    # Derive exchange names from exchanges string ("kucoin-gate" → ["kucoin", "gate"])
+    ex_parts = exchanges.split("-", 1) if "-" in exchanges else [exchanges, ""]
+    ex1_name = ex_parts[0].capitalize()
+    ex2_name = ex_parts[1].capitalize() if ex_parts[1] else ""
+
     lines = [
         _create_header(),
         _create_line("POSITION CLOSED"),
@@ -762,23 +769,42 @@ def render_close_summary(
         _create_line(f"Close method: {close_method}"),
         _create_line(f"Time open: {time_open}"),
         _create_line(""),
-        _create_line("Financial Results:"),
+        _create_line("Capital:"),
         _create_line(f"  Entry capital: ${entry_capital:,.2f}"),
+    ]
+
+    if leg_size > 0:
+        lines.append(_create_line(f"  Per leg:       ${leg_size:,.2f}"))
+
+    lines += [
         _create_line(f"  Exit value:    ${exit_value:,.2f}"),
+        _create_line(""),
+        _create_line("P&L:"),
+    ]
+
+    if gross_pnl != 0.0:
+        lines.append(_create_line(f"  Gross PnL:     {gross_sign}${gross_pnl:.2f}"))
+
+    if funding_earned != 0.0:
+        lines.append(_create_line(f"  Funding total: {funding_sign}${funding_earned:.2f}"))
+        # Per-exchange funding breakdown
+        if funding_earned_ex1 != 0.0 or funding_earned_ex2 != 0.0:
+            sign1 = "+" if funding_earned_ex1 >= 0 else ""
+            sign2 = "+" if funding_earned_ex2 >= 0 else ""
+            lines.append(_create_line(f"    {ex1_name}: {sign1}${funding_earned_ex1:.2f}  {ex2_name}: {sign2}${funding_earned_ex2:.2f}"))
+        # Entry funding bps snapshot
+        if entry_funding_bps_ex1 != 0.0 or entry_funding_bps_ex2 != 0.0:
+            net_bps = abs(entry_funding_bps_ex1) + abs(entry_funding_bps_ex2)
+            lines.append(_create_line(f"    At open: {ex1_name} {entry_funding_bps_ex1:+.2f} bps / {ex2_name} {entry_funding_bps_ex2:+.2f} bps (net {net_bps:.2f} bps/8h)"))
+
+    if total_fees > 0:
+        lines.append(_create_line(f"  Fees (4 legs): -${total_fees:.2f}{fee_bps_str}"))
+
+    lines += [
         _create_line(f"  Net PnL:       {pnl_sign}${net_pnl:.2f} ({pnl_sign}{net_pnl_pct:.2f}%)"),
-        _create_line(""),
-        _create_line("Breakdown:"),
-        _create_line(f"  Funding earned: {funding_sign}${funding_earned:.2f}"),
-        _create_line(f"  Spread PnL:     {spread_sign}${spread_pnl:.2f}"),
-        _create_line(f"  Total:          {pnl_sign}${net_pnl:.2f}"),
-        _create_line(""),
-        _create_line("Fees:"),
-        _create_line(f"  Entry fees:  ${entry_fees:.2f}"),
-        _create_line(f"  Exit fees:   ${exit_fees:.2f}"),
-        _create_line(f"  Total fees:  ${total_fees:.2f}"),
         _create_footer(),
     ]
-    
+
     return "\n".join(lines)
 
 

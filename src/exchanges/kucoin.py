@@ -3,6 +3,7 @@
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone, timedelta
 import ccxt.async_support as ccxt
+from loguru import logger as log
 
 from .base import BaseExchange, ExchangeError, RateLimitError, NetworkError
 from .enums import Exchange, PositionSide, OrderSide, OrderType
@@ -233,6 +234,16 @@ class KuCoinExchange(BaseExchange):
         try:
             ccxt_symbol = self._convert_symbol(symbol)
             contracts = await self._to_contracts(symbol, quantity)
+
+            # Force ISOLATED margin mode for this symbol before placing order.
+            # KuCoin error 330005 is raised when order marginMode != account marginMode.
+            try:
+                await self.client.set_margin_mode("isolated", ccxt_symbol)
+            except Exception as e:
+                msg = str(e).lower()
+                # Ignore if already set or not supported for this symbol
+                if "not modified" not in msg and "same" not in msg and "already" not in msg:
+                    log.warning(f"kucoin: set_margin_mode isolated warning for {symbol}: {e}")
 
             # Best effort leverage setup (ignore idempotent errors)
             try:

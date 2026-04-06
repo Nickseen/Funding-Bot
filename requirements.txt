@@ -26,3 +26,6 @@ pytest-cov>=4.1.0
 
 # Type hints
 typing-extensions>=4.8.0
+
+# Aster Pro API — EIP-712 wallet signing
+eth-account>=0.10.0

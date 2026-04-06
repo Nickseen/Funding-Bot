@@ -995,8 +995,19 @@ Open position anyway? [Y/n]: """
                 )
         
         # 3. Вычислить спред (используем average prices для точного расчета)
-        entry_spread_abs = abs(avg_price2 - avg_price1)
-        entry_spread_bps = (entry_spread_abs / min(avg_price1, avg_price2)) * 10000
+        #    Подписной спред: short_price - long_price
+        #    > 0 → шортируем дороже чем лонгуем (выгодный вход, прибыль сразу)
+        #    < 0 → шортируем дешевле чем лонгуем (невыгодный вход, потеря на входе)
+        if side1 == PositionSide.LONG:
+            long_avg_price = avg_price1
+            short_avg_price = avg_price2
+        else:
+            long_avg_price = avg_price2
+            short_avg_price = avg_price1
+
+        entry_spread_signed_abs = short_avg_price - long_avg_price  # signed, in quote
+        entry_spread_abs = abs(entry_spread_signed_abs)
+        entry_spread_bps = (entry_spread_signed_abs / ((long_avg_price + short_avg_price) / 2)) * 10000
         
         # 4. Рассчитать комиссии (taker, так как aggressive limit orders)
         from ..exchanges.enums import get_total_fees_bps, Exchange
@@ -1007,6 +1018,26 @@ Open position anyway? [Y/n]: """
         )
         
         # 5. Показать анализ
+        entry_spread_abs_display = abs(entry_spread_bps)
+        # Знак спреда: положительный = SHORT дороже LONG = выгодно на входе
+        if entry_spread_bps >= 0:
+            spread_entry_line   = f"║ ✅ Spread gain on entry: +{entry_spread_abs_display:.2f} bps (SHORT > LONG)"
+            spread_exit_line    = f"║ ⚠️  Spread cost on exit:  -{entry_spread_abs_display:.2f} bps (if stable)"
+            breakeven_spread    = -entry_spread_bps  # уже в плюсе на входе; безубыточность только по комиссиям
+        else:
+            spread_entry_line   = f"║ ⚠️  Spread loss on entry: {entry_spread_bps:.2f} bps (SHORT < LONG)"
+            spread_exit_line    = f"║ ✅ Spread gain on exit:  +{entry_spread_abs_display:.2f} bps (if stable)"
+            breakeven_spread    = entry_spread_abs_display  # нужно отыграть потерю + комиссии
+
+        if funding_rate_bps == 0:
+            breakeven_str = "N/A"
+        else:
+            breakeven_hours = (breakeven_spread + total_fees_bps) / funding_rate_bps
+            if breakeven_hours <= 0:
+                breakeven_str = "immediately (profitable at entry)"
+            else:
+                breakeven_str = f"{breakeven_hours:.1f} hours"
+
         message = f"""
 ╔══════════════════════════════════════════════════════════
 ║ STABLE SPREAD MODE - Entry Analysis
@@ -1022,20 +1053,20 @@ Open position anyway? [Y/n]: """
 ║   {self.exchange1.get_name()}: {avg_price1:.6f}
 ║   {self.exchange2.get_name()}: {avg_price2:.6f}
 ║ 
-║ Entry Spread (based on avg prices):
-║   Absolute: {entry_spread_abs:.6f}
-║   Basis Points: {entry_spread_bps:.2f} bps
+║ Entry Spread (SHORT price − LONG price):
+║   Absolute: {entry_spread_signed_abs:+.6f}
+║   Basis Points: {entry_spread_bps:+.2f} bps
 ╠══════════════════════════════════════════════════════════
 ║ Cost Analysis:
 ║   Entry fees (taker): {total_fees_bps:.2f} bps
 ║   Funding rate: {funding_rate_bps:.2f} bps/hour
 ║   Order type: AGGRESSIVE LIMIT (instant fill)
 ║   
-║ ⚠️  Spread loss on entry: -{entry_spread_bps:.2f} bps
-║ ✅ Spread gain on exit: +{entry_spread_bps:.2f} bps (if stable)
+{spread_entry_line}
+{spread_exit_line}
 ║ 
 ║ Net per 8h funding: {funding_rate_bps * 8:.2f} bps
-║ Break-even time: {'N/A' if funding_rate_bps == 0 else f'{(entry_spread_bps + total_fees_bps) / funding_rate_bps:.1f} hours'}
+║ Break-even time: {breakeven_str}
 ╠══════════════════════════════════════════════════════════
 ║ 🔒 This position can ONLY be closed with:
 ║    "Close with Stable Spread" option (preserves spread)

@@ -10,6 +10,7 @@ Position Closer - Управление закрытием позиций в ра
 """
 
 import asyncio
+import sys
 import time
 from typing import Optional, Callable
 from datetime import datetime, timezone
@@ -17,9 +18,10 @@ from loguru import logger as log
 
 from ..exchanges.base import BaseExchange
 from ..exchanges.types import Position, OrderBook
-from ..exchanges.enums import OrderType, PositionSide, PositionStatus
+from ..exchanges.enums import OrderType, PositionSide, PositionStatus, Exchange, get_taker_fee_bps
 from ..utils.calculations import (
     calculate_spread_bps,
+    calculate_unrealized_pnl,
     calculate_unrealized_pnl_from_orderbooks,
     can_instant_fill,
     get_close_prices_and_sides,
@@ -338,6 +340,25 @@ Close position? [Y/n]: """
     # 5. SMART PNL CLOSE
     # ============================================
     
+    async def _stdin_quit_watcher(self, quit_event: asyncio.Event) -> None:
+        """
+        Фоновая задача: ждёт ввода 'q' + Enter и выставляет quit_event.
+        Запускается параллельно с мониторинговым циклом.
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            while not quit_event.is_set():
+                line = await loop.run_in_executor(None, sys.stdin.readline)
+                if line.strip().lower() == 'q':
+                    quit_event.set()
+                    return
+        except Exception:
+            pass
+
+    # ============================================
+    # 5. SMART PNL CLOSE
+    # ============================================
+
     async def close_smart_pnl(
         self,
         position: Position,
@@ -385,12 +406,15 @@ Close position? [Y/n]: """
 ║   2. Limit orders execute INSTANTLY on both exchanges
 ║ 
 ║ Monitoring every 0.5 seconds...
-║ Press Ctrl+C to force menu
+║ Press [q] + Enter to stop
 ╚══════════════════════════════════════════════════════════
 """)
         
+        quit_event = asyncio.Event()
+        quit_task = asyncio.create_task(self._stdin_quit_watcher(quit_event))
+        
         try:
-            while True:
+            while not quit_event.is_set():
                 # Check timeout
                 if timeout and (time.time() - start_time) > timeout:
                     log.warning(f"⏰ Smart PnL close timeout after {timeout}s")
@@ -444,6 +468,11 @@ Close position? [Y/n]: """
                         f"PnL=${pnl_usd:+.2f} ({pnl_pct:+.2f}%), both instant fill"
                     )
                     
+                    # Рассчитать и сохранить комиссии для итогового отчёта
+                    mid_price = (ob1.best_bid + ob1.best_ask + ob2.best_bid + ob2.best_ask) / 4
+                    position.fees_paid = self._calculate_total_taker_fees_usd(position, mid_price)
+                    position.unrealized_pnl = pnl_usd
+                    
                     # Выставить лимитки одновременно
                     await self._close_with_limit_orders(position, ob1, ob2)
                     
@@ -466,6 +495,288 @@ Close position? [Y/n]: """
         except KeyboardInterrupt:
             log.info("🛑 Smart PnL close interrupted by user")
             return await self._show_smart_pnl_timeout_menu(position)
+        finally:
+            quit_task.cancel()
+        
+        # quit_event was set — show menu
+        log.info("🛑 Smart PnL close stopped by user (q)")
+        return await self._show_smart_pnl_timeout_menu(position)
+    
+    # ============================================
+    # 6. FREE FEES CLOSE
+    # ============================================
+    
+    def _calculate_total_taker_fees_usd(self, position: Position, mid_price: float) -> float:
+        """
+        Рассчитать суммарные taker-комиссии за открытие + закрытие (4 ноги)
+        
+        Формула: 2 × (taker_fee_ex1 + taker_fee_ex2) × notional_value / 10000
+          - 2× потому что комиссия берётся и при открытии, и при закрытии
+          - На каждом шаге по 2 ноги (ex1 + ex2)
+        
+        Args:
+            position: Позиция
+            mid_price: Средняя цена актива (для расчёта notional)
+        
+        Returns:
+            Суммарная комиссия в USD
+        """
+        ex1_enum = Exchange(position.exchange1)
+        ex2_enum = Exchange(position.exchange2)
+        
+        taker_fee_ex1_bps = get_taker_fee_bps(ex1_enum)
+        taker_fee_ex2_bps = get_taker_fee_bps(ex2_enum)
+        
+        # Notional value одной ноги
+        notional = position.quantity * mid_price
+        
+        # 4 ноги: open_ex1 + open_ex2 + close_ex1 + close_ex2
+        total_fee_bps = 2 * (taker_fee_ex1_bps + taker_fee_ex2_bps)
+        total_fee_usd = notional * total_fee_bps / 10000
+        
+        return total_fee_usd
+    
+    async def close_free_fees(
+        self,
+        position: Position,
+        timeout: Optional[int] = None,
+        progress_callback: Optional[Callable] = None
+    ) -> bool:
+        """
+        Free Fees close - закрытие ТОЛЬКО когда PnL покрывает ВСЕ maker-комиссии
+        
+        Принцип: тот же что Smart PnL (лимитки + instant fill), но порог не PnL >= 0,
+        а PnL >= total_taker_fees (open + close, обе биржи).
+        
+        Это гарантирует чистый заработок исключительно на funding rate,
+        без убытков на комиссиях.
+        
+        Args:
+            position: Позиция для закрытия
+            timeout: Таймаут в секундах (None = бесконечно)
+            progress_callback: Callback для обновления UI
+        
+        Returns:
+            True если закрыта, False если отменено/timeout
+        """
+        log.info(f"💰 Free Fees close for {position.id}")
+        
+        start_time = time.time()
+        check_interval = 0.5  # 500ms
+        last_log_time = 0
+        
+        # Определяем side для расчётов
+        side1 = PositionSide.SHORT if position.exchange1_side == "SHORT" else PositionSide.LONG
+        
+        # Получить enum бирж и комиссии для UI
+        ex1_enum = Exchange(position.exchange1)
+        ex2_enum = Exchange(position.exchange2)
+        taker_fee_ex1 = get_taker_fee_bps(ex1_enum)
+        taker_fee_ex2 = get_taker_fee_bps(ex2_enum)
+        total_fee_bps = 2 * (taker_fee_ex1 + taker_fee_ex2)
+        
+        print(f"""
+╔══════════════════════════════════════════════════════════
+║ FREE FEES CLOSE - Waiting until PnL covers all fees...
+╠══════════════════════════════════════════════════════════
+║ Position: {position.id}
+║ Pair: {position.pair}
+║ Exchanges: {position.exchange1} ({position.exchange1_side}) / {position.exchange2} ({position.exchange2_side})
+╠══════════════════════════════════════════════════════════
+║ Taker fees:
+║   {position.exchange1}: {taker_fee_ex1:.1f} bps  ×2 (open+close)
+║   {position.exchange2}: {taker_fee_ex2:.1f} bps  ×2 (open+close)
+║   Total: {total_fee_bps:.1f} bps (4 legs)
+╠══════════════════════════════════════════════════════════
+║ Strategy: Close ONLY when:
+║   1. PnL >= total taker fees (pure funding profit)
+║   2. Limit orders execute INSTANTLY on both exchanges
+║ 
+║ Monitoring every 0.5 seconds...
+║ Press [q] + Enter to stop
+╚══════════════════════════════════════════════════════════
+""")
+        
+        quit_event = asyncio.Event()
+        quit_task = asyncio.create_task(self._stdin_quit_watcher(quit_event))
+        
+        try:
+            while not quit_event.is_set():
+                # Check timeout
+                if timeout and (time.time() - start_time) > timeout:
+                    log.warning(f"⏰ Free Fees close timeout after {timeout}s")
+                    return await self._show_free_fees_timeout_menu(position)
+                
+                # 1. Получить текущие стаканы
+                ob1 = await self.exchange1.get_orderbook(position.pair)
+                ob2 = await self.exchange2.get_orderbook(position.pair)
+
+                # 2. Определить стороны закрытия и рассчитать aggressive цены
+                if position.exchange1_side == "LONG":
+                    ob_side1, ob_side2 = ob1.bids, ob2.asks
+                    close_side_ex1, close_side_ex2 = "SELL", "BUY"
+                else:
+                    ob_side1, ob_side2 = ob1.asks, ob2.bids
+                    close_side_ex1, close_side_ex2 = "BUY", "SELL"
+
+                try:
+                    agg_price1, _ = calculate_aggressive_fill_price(
+                        ob_side1, position.quantity, close_side_ex1
+                    )
+                    agg_price2, _ = calculate_aggressive_fill_price(
+                        ob_side2, position.quantity, close_side_ex2
+                    )
+                    # PnL по реальным ценам исполнения (с буфером 0.1%)
+                    pnl_usd = calculate_unrealized_pnl(
+                        entry_price_ex1=position.exchange1_entry_price,
+                        entry_price_ex2=position.exchange2_entry_price,
+                        close_price_ex1=agg_price1,
+                        close_price_ex2=agg_price2,
+                        quantity=position.quantity,
+                        side1=side1,
+                    )
+                except Exception:
+                    # fallback: best bid/ask если стакан пустой/нет ликвидности
+                    pnl_usd = calculate_unrealized_pnl_from_orderbooks(position, ob1, ob2)
+                    agg_price1 = ob1.best_bid if close_side_ex1 == "SELL" else ob1.best_ask
+                    agg_price2 = ob2.best_ask if close_side_ex2 == "BUY" else ob2.best_bid
+
+                pnl_pct = (pnl_usd / position.initial_capital) * 100 if position.initial_capital > 0 else 0
+
+                # 3. Рассчитать total taker fees в USD
+                mid_price = (ob1.best_bid + ob1.best_ask + ob2.best_bid + ob2.best_ask) / 4
+                total_fees_usd = self._calculate_total_taker_fees_usd(position, mid_price)
+
+                # 4. Цены закрытия уже рассчитаны (agg_price1/2)
+                close_price_ex1 = agg_price1
+                close_price_ex2 = agg_price2
+
+                # 5. Проверить instant fill на обеих биржах  
+                instant_ex1 = can_instant_fill(ob1, close_side_ex1, close_price_ex1)
+                instant_ex2 = can_instant_fill(ob2, close_side_ex2, close_price_ex2)
+
+                # Net PnL после вычета всех комиссий
+                net_pnl = pnl_usd - total_fees_usd
+                
+                # Логирование каждые 5 секунд
+                current_time = time.time()
+                if current_time - last_log_time >= 5:
+                    elapsed = int(current_time - start_time)
+                    status_ex1 = "✅" if instant_ex1 else "⏳"
+                    status_ex2 = "✅" if instant_ex2 else "⏳"
+                    fees_status = "✅" if pnl_usd >= total_fees_usd else "❌"
+                    
+                    print(
+                        f"⏱️  [{elapsed}s] PnL: ${pnl_usd:+.2f} | Fees: ${total_fees_usd:.2f} | "
+                        f"Net: ${net_pnl:+.2f} {fees_status} | "
+                        f"Ex1: {status_ex1} | Ex2: {status_ex2}"
+                    )
+                    last_log_time = current_time
+                    
+                    # Callback для UI
+                    if progress_callback:
+                        await progress_callback({
+                            'elapsed': elapsed,
+                            'pnl_usd': pnl_usd,
+                            'pnl_pct': pnl_pct,
+                            'total_fees_usd': total_fees_usd,
+                            'net_pnl': net_pnl,
+                            'instant_ex1': instant_ex1,
+                            'instant_ex2': instant_ex2,
+                        })
+                
+                # 6. УСЛОВИЕ ЗАКРЫТИЯ: PnL >= total_fees И обе instant fill
+                if pnl_usd >= total_fees_usd and instant_ex1 and instant_ex2:
+                    elapsed = int(time.time() - start_time)
+                    log.success(
+                        f"✅ Free Fees conditions met after {elapsed}s! "
+                        f"PnL=${pnl_usd:+.2f}, Fees=${total_fees_usd:.2f}, "
+                        f"Net=${net_pnl:+.2f}, both instant fill"
+                    )
+                    
+                    # Сохранить расчётные значения для итогового отчёта
+                    position.fees_paid = total_fees_usd
+                    position.unrealized_pnl = pnl_usd
+                    
+                    # Выставить лимитки одновременно
+                    await self._close_with_limit_orders(position, ob1, ob2)
+                    
+                    net_pnl_pct = (net_pnl / position.initial_capital) * 100 if position.initial_capital > 0 else 0
+                    
+                    print(f"""
+╔══════════════════════════════════════════════════════════
+║ ✅ POSITION CLOSED - FREE FEES
+╠══════════════════════════════════════════════════════════
+║ Position: {position.id}
+║ Gross PnL: ${pnl_usd:+.2f} ({pnl_pct:+.2f}%)
+║ Total fees: -${total_fees_usd:.2f} ({total_fee_bps:.1f} bps)
+║ Net PnL:   ${net_pnl:+.2f} ({net_pnl_pct:+.2f}%)
+║ Time waited: {elapsed}s
+║ Close prices:
+║   {position.exchange1}: {close_price_ex1:.6f}
+║   {position.exchange2}: {close_price_ex2:.6f}
+╚══════════════════════════════════════════════════════════
+""")
+                    return True
+                
+                await asyncio.sleep(check_interval)
+        
+        except KeyboardInterrupt:
+            log.info("🛑 Free Fees close interrupted by user")
+            return await self._show_free_fees_timeout_menu(position)
+        finally:
+            quit_task.cancel()
+        
+        # quit_event was set — show menu
+        log.info("🛑 Free Fees close stopped by user (q)")
+        return await self._show_free_fees_timeout_menu(position)
+    
+    async def _show_free_fees_timeout_menu(self, position: Position) -> bool:
+        """
+        Меню после timeout/прерывания Free Fees close
+        """
+        ob1 = await self.exchange1.get_orderbook(position.pair)
+        ob2 = await self.exchange2.get_orderbook(position.pair)
+        
+        pnl_usd = calculate_unrealized_pnl_from_orderbooks(position, ob1, ob2)
+        pnl_pct = (pnl_usd / position.initial_capital) * 100 if position.initial_capital > 0 else 0
+        
+        mid_price = (ob1.best_bid + ob1.best_ask + ob2.best_bid + ob2.best_ask) / 4
+        total_fees_usd = self._calculate_total_taker_fees_usd(position, mid_price)
+        net_pnl = pnl_usd - total_fees_usd
+        
+        print(f"""
+╔══════════════════════════════════════════════════════════
+║ FREE FEES CLOSE - Interrupted
+╠══════════════════════════════════════════════════════════
+║ Position: {position.id}
+║ Current PnL: ${pnl_usd:+.2f} ({pnl_pct:+.2f}%)
+║ Total fees:  ${total_fees_usd:.2f}
+║ Net PnL:     ${net_pnl:+.2f}
+╠══════════════════════════════════════════════════════════
+║ Options:
+║ 1. Continue Free Fees monitoring
+║ 2. Force close (MARKET orders) ⚠️
+║ 3. Cancel (keep position open)
+╚══════════════════════════════════════════════════════════
+Select [1-3]: """, end='')
+        
+        choice = input().strip()
+        
+        if choice == '1':
+            return await self.close_free_fees(position)
+        elif choice == '2':
+            print("\n⚠️  WARNING: Market close will cause slippage!")
+            confirm = input("Are you sure? [y/N]: ").strip().lower()
+            if confirm == 'y':
+                return await self.close_market(position)
+            return await self._show_free_fees_timeout_menu(position)
+        elif choice == '3':
+            log.info(f"Position {position.id} remains OPEN")
+            return False
+        else:
+            print("Invalid choice, try again...")
+            return await self._show_free_fees_timeout_menu(position)
     
     async def _show_smart_pnl_timeout_menu(self, position: Position) -> bool:
         """

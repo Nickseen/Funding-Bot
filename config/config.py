@@ -83,6 +83,12 @@ class Config:
     MEXC_API_KEY: str = os.getenv("MEXC_API_KEY", "")
     MEXC_SECRET_KEY: str = os.getenv("MEXC_SECRET_KEY", "")
     
+    # Aster Finance Pro (wallet-based, no traditional API key)
+    # Create an agent at: https://www.asterdex.com/en/api-wallet (switch to Pro API)
+    ASTER_USER: str = os.getenv("ASTER_USER", "")          # Login wallet address (0x…)
+    ASTER_SIGNER: str = os.getenv("ASTER_SIGNER", "")      # Agent wallet address (0x…)
+    ASTER_PRIVATE_KEY: str = os.getenv("ASTER_PRIVATE_KEY", "")  # Agent wallet private key (0x…)
+
     # Lighter (zkLighter DEX)
     LIGHTER_API_KEY: str = os.getenv("LIGHTER_API_KEY", "")  # API public key (hex)
     LIGHTER_SECRET_KEY: str = os.getenv("LIGHTER_SECRET_KEY", "")  # API private key (hex)

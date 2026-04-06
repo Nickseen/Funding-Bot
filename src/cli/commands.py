@@ -44,8 +44,6 @@ from .display import (
     clear_screen,
     render_balances_view,
     render_close_summary,
-    render_smart_pnl_status,
-    render_smart_pnl_stop_menu,
     render_position_detail_v2,
     render_insufficient_balance_error,
     render_position_confirmation_v2,
@@ -376,7 +374,9 @@ class OpenPositionCommand:
             position_size=position_size,
             leverage=leverage,
             execution_mode=execution_mode,
-            funding_rate_bps=net_funding_bps
+            funding_rate_bps=net_funding_bps,
+            funding_bps_ex1=funding_long.rate_bps,
+            funding_bps_ex2=funding_short.rate_bps,
         )
     
     async def _execute_open(
@@ -387,7 +387,9 @@ class OpenPositionCommand:
         position_size: float,
         leverage: int,
         execution_mode: str,
-        funding_rate_bps: float
+        funding_rate_bps: float,
+        funding_bps_ex1: float = 0.0,
+        funding_bps_ex2: float = 0.0,
     ) -> bool:
         """
         Execute the actual position opening using ExecutionEngine.
@@ -456,7 +458,11 @@ class OpenPositionCommand:
                 
                 # Set initial capital for PnL calculations
                 position.initial_capital = position_size * 2  # Both legs
-                
+
+                # Save entry funding bps per exchange (snapshot at open time)
+                position.entry_funding_bps_ex1 = funding_bps_ex1
+                position.entry_funding_bps_ex2 = funding_bps_ex2
+
                 # Add to state
                 await self.state.add_position(position)
                 
@@ -779,7 +785,7 @@ class ViewPositionsCommand:
         if ex1:
             try:
                 ex1_position = await ex1.get_position_by_symbol(position.pair)
-                if ex1_position:
+                if ex1_position and ex1_position.exchange1_current_price > 0:
                     position.exchange1_current_price = ex1_position.exchange1_current_price
                     # Exchange returns accumulated values, not incremental
                     ex1_funding = ex1_position.funding_received
@@ -798,7 +804,7 @@ class ViewPositionsCommand:
                         except Exception as e:
                             pass  # Silent fallback - use 0.0
                 else:
-                    # Fallback to just price if position not found
+                    # Fallback to just price if position not found or price is 0
                     price1 = await ex1.get_price_data(position.pair)
                     position.exchange1_current_price = price1.mid_price
             except Exception as e:
@@ -812,7 +818,7 @@ class ViewPositionsCommand:
         if ex2:
             try:
                 ex2_position = await ex2.get_position_by_symbol(position.pair)
-                if ex2_position:
+                if ex2_position and ex2_position.exchange1_current_price > 0:
                     position.exchange2_current_price = ex2_position.exchange1_current_price
                     # Exchange returns accumulated values, not incremental
                     ex2_funding = ex2_position.funding_received
@@ -831,7 +837,7 @@ class ViewPositionsCommand:
                         except Exception as e:
                             pass  # Silent fallback - use 0.0
                 else:
-                    # Fallback to just price if position not found
+                    # Fallback to just price if position not found or price is 0
                     price2 = await ex2.get_price_data(position.pair)
                     position.exchange2_current_price = price2.mid_price
             except Exception as e:
@@ -844,6 +850,8 @@ class ViewPositionsCommand:
         
         # Sum accumulated values from both exchanges
         position.funding_received = ex1_funding + ex2_funding
+        position.funding_received_ex1 = ex1_funding
+        position.funding_received_ex2 = ex2_funding
         position.fees_paid = ex1_fees + ex2_fees
         
         # Calculate unrealized PnL based on current prices
@@ -941,15 +949,15 @@ class ClosePositionCommand:
         # Show close mode menu
         print(render_close_mode_menu(position, current_spread_bps, pnl, pnl_pct))
         
-        # 5 options per CLI_SPECIFICATION.md
-        valid_choices = ["1", "2", "3", "4", "5"]
+        # 6 options
+        valid_choices = ["1", "2", "3", "4", "5", "6"]
         
         mode_choice = await get_menu_choice(
-            "Select mode [1-5]: ",
+            "Select mode [1-6]: ",
             valid_choices
         )
         
-        if mode_choice is None or mode_choice == "5":
+        if mode_choice is None or mode_choice == "6":
             return False
         
         # Create PositionCloser
@@ -981,6 +989,11 @@ class ClosePositionCommand:
                 close_method = "Market"
                 success = await closer.close_market(position)
             
+            elif mode_choice == "5":
+                # Free Fees close
+                close_method = "Free Fees"
+                success = await closer.close_free_fees(position)
+            
             if success:
                 # Show close summary
                 await self._show_close_summary(position, close_method)
@@ -1003,131 +1016,19 @@ class ClosePositionCommand:
         ex2: BaseExchange
     ) -> bool:
         """
-        Execute Smart PnL close with 'q' to stop and 10-sec updates.
-        
-        According to CLI_SPECIFICATION.md:
-        - No timeout (wait indefinitely)
-        - Press 'q' to stop
-        - Show current PnL every 10 seconds
-        """
-        from datetime import datetime
-        import select
-        import sys
-        
-        print("\n[Smart PnL Close] Monitoring... Press 'q' + Enter to stop\n")
-        
-        check_interval = 0.5  # 500ms internal check
-        log_interval = 10.0   # 10 sec display update
-        last_log_time = 0.0
-        
-        while True:
-            try:
-                # Check for 'q' input (non-blocking)
-                if self._check_for_quit():
-                    # User pressed 'q' - show stop menu
-                    current_pnl = position.total_pnl
-                    current_pnl_pct = (current_pnl / position.initial_capital * 100) if position.initial_capital > 0 else 0
-                    
-                    print(render_smart_pnl_stop_menu(current_pnl, current_pnl_pct))
-                    
-                    choice = await get_menu_choice(
-                        "Select [1-3]: ",
-                        valid_choices=["1", "2", "3"]
-                    )
-                    
-                    if choice == "1":
-                        # Resume monitoring
-                        print("\n[Smart PnL Close] Resuming...\n")
-                        continue
-                    elif choice == "2":
-                        # Market close
-                        print(render_loading("Executing market close..."))
-                        return await closer.close_market(position)
-                    else:
-                        # Cancel
-                        return False
-                
-                # Get current orderbooks
-                ob1 = await ex1.get_orderbook(position.pair)
-                ob2 = await ex2.get_orderbook(position.pair)
+        Execute Smart PnL close - delegates entirely to PositionCloser.close_smart_pnl().
 
-                # Fallback: sandbox exchanges may return empty L2 book — use ticker prices
-                _SYNTH = 1e9
-                if not ob1.bids or not ob1.asks:
-                    pd1 = await ex1.get_price_data(position.pair)
-                    ob1.bids = [(pd1.bid or pd1.ask, _SYNTH)]
-                    ob1.asks = [(pd1.ask or pd1.bid, _SYNTH)]
-                if not ob2.bids or not ob2.asks:
-                    pd2 = await ex2.get_price_data(position.pair)
-                    ob2.bids = [(pd2.bid or pd2.ask, _SYNTH)]
-                    ob2.asks = [(pd2.ask or pd2.bid, _SYNTH)]
-                
-                # Calculate PnL using smart_pnl logic
-                from ..utils.calculations import calculate_unrealized_pnl_from_orderbooks, can_instant_fill, get_close_prices_and_sides
-                
-                pnl = calculate_unrealized_pnl_from_orderbooks(position, ob1, ob2)
-                pnl_pct = (pnl / position.initial_capital * 100) if position.initial_capital > 0 else 0
-                
-                # Get close prices and check instant fill
-                # Determine position side on exchange 1
-                from ..exchanges.enums import PositionSide
-                side1 = PositionSide.SHORT if position.exchange1_side == "SHORT" else PositionSide.LONG
-                close_price_ex1, close_price_ex2, close_side_ex1, close_side_ex2 = get_close_prices_and_sides(
-                    ob1, ob2, side1
-                )
-                
-                instant_ex1 = can_instant_fill(ob1, close_side_ex1, close_price_ex1)
-                instant_ex2 = can_instant_fill(ob2, close_side_ex2, close_price_ex2)
-                
-                # Log every 10 seconds
-                current_time = asyncio.get_event_loop().time()
-                if current_time - last_log_time >= log_interval:
-                    timestamp = datetime.now().strftime("%H:%M:%S")
-                    
-                    if pnl >= 0 and instant_ex1 and instant_ex2:
-                        status = "Checking instant fill... ✅"
-                    elif pnl >= 0:
-                        status = "Checking instant fill..."
-                    else:
-                        status = "Waiting..."
-                    
-                    print(render_smart_pnl_status(timestamp, pnl, pnl_pct, status))
-                    last_log_time = current_time
-                
-                # Check close conditions
-                if pnl >= 0 and instant_ex1 and instant_ex2:
-                    timestamp = datetime.now().strftime("%H:%M:%S")
-                    print(f"[{timestamp}] ✅ Both orders instant fill! Closing...")
-                    
-                    # Execute close via PositionCloser
-                    success = await closer.close_smart_pnl(position)
-                    return success
-                
-                await asyncio.sleep(check_interval)
-                
-            except asyncio.CancelledError:
-                return False
-            except Exception as e:
-                print(render_error(f"Error during monitoring: {e}"))
-                return False
-    
-    def _check_for_quit(self) -> bool:
-        """Check if 'q' was pressed (non-blocking)"""
-        import sys
-        import select
-        
-        # Check if running on Unix (has select.select for stdin)
-        try:
-            if select.select([sys.stdin], [], [], 0.0)[0]:
-                line = sys.stdin.readline().strip().lower()
-                return line == 'q'
-        except (ValueError, OSError):
-            pass
-        
-        return False
-    
+        PositionCloser owns the full monitoring loop (500ms checks, box UI, Ctrl+C menu).
+        Having a second monitoring loop here would cause the first detected intersection
+        to be missed: when conditions are found here, close_smart_pnl() restarts from
+        scratch and may not see the same window again.
+        """
+        return await closer.close_smart_pnl(position)
+
     async def _show_close_summary(self, position: Position, close_method: str) -> None:
         """Show close summary according to CLI_SPECIFICATION.md"""
+        from ..exchanges.enums import get_taker_fee_bps, Exchange
+        
         # Calculate age string
         age_hours = position.age_hours
         if age_hours < 24:
@@ -1139,23 +1040,37 @@ class ClosePositionCommand:
         
         # Calculate values
         entry_capital = position.initial_capital
-        exit_value = entry_capital + position.total_pnl
+        leg_size = entry_capital / 2
         net_pnl = position.total_pnl
+        exit_value = entry_capital + net_pnl
         net_pnl_pct = (net_pnl / entry_capital * 100) if entry_capital > 0 else 0
+        
+        # Fee bps for display
+        try:
+            ex1_fee = get_taker_fee_bps(Exchange(position.exchange1))
+            ex2_fee = get_taker_fee_bps(Exchange(position.exchange2))
+            total_fee_bps = 2 * (ex1_fee + ex2_fee)  # 4 legs
+        except Exception:
+            total_fee_bps = 0.0
         
         print(render_close_summary(
             symbol=position.pair,
             exchanges=f"{position.exchange1}-{position.exchange2}",
             close_method=close_method,
             time_open=time_open,
+            leg_size=leg_size,
             entry_capital=entry_capital,
             exit_value=exit_value,
             net_pnl=net_pnl,
             net_pnl_pct=net_pnl_pct,
+            gross_pnl=position.unrealized_pnl,
             funding_earned=position.funding_received,
-            spread_pnl=position.unrealized_pnl,
-            entry_fees=position.fees_paid / 2,  # Approximate
-            exit_fees=position.fees_paid / 2
+            funding_earned_ex1=position.funding_received_ex1,
+            funding_earned_ex2=position.funding_received_ex2,
+            entry_funding_bps_ex1=position.entry_funding_bps_ex1,
+            entry_funding_bps_ex2=position.entry_funding_bps_ex2,
+            total_fees=position.fees_paid,
+            total_fee_bps=total_fee_bps,
         ))
 
 

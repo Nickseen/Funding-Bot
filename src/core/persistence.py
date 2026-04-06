@@ -432,6 +432,10 @@ class PositionPersistence:
         if not all_exchange_positions:
             return []
         
+        def _norm_sym(s: str) -> str:
+            """Normalize symbol: NTRN/USDT:USDT -> NTRNUSDT for cross-exchange comparison."""
+            return s.replace('/', '').replace(':USDT', '').replace(':BUSD', '').upper()
+
         # Step 2: Try to match pairs (same symbol, opposite sides on different exchanges)
         used_positions = set()  # Track which positions we've already paired
         
@@ -450,10 +454,10 @@ class PositionPersistence:
                             continue
                         
                         # Check if they form a delta-neutral pair:
-                        # - Same symbol
+                        # - Same symbol (normalized across exchange formats)
                         # - Opposite sides (LONG vs SHORT)
                         # - Similar quantity (within 5% tolerance)
-                        if (pos1.pair == pos2.pair and
+                        if (_norm_sym(pos1.pair) == _norm_sym(pos2.pair) and
                             pos1.exchange1_side != pos2.exchange1_side and
                             abs(pos1.quantity - pos2.quantity) / max(pos1.quantity, pos2.quantity) < 0.05):
                             
@@ -461,11 +465,12 @@ class PositionPersistence:
                             import time
                             import uuid
                             
-                            pair_id = f"pair_recovered_{pos1.pair}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+                            norm_pair = _norm_sym(pos1.pair)
+                            pair_id = f"pair_recovered_{norm_pair}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
                             
                             linked_position = Position(
-                                id=f"pos_recovered_{pos1.pair}_{int(time.time())}",
-                                pair=pos1.pair,
+                                id=f"pos_recovered_{norm_pair}_{int(time.time())}",
+                                pair=norm_pair,
                                 exchange1=ex1_name,
                                 exchange1_pos_id=pos1.exchange1_pos_id,
                                 exchange1_side=pos1.exchange1_side,
@@ -491,7 +496,7 @@ class PositionPersistence:
                             
                             logger.success(
                                 f"✓ Detected delta-neutral pair: {ex1_name} {pos1.exchange1_side} + "
-                                f"{ex2_name} {pos2.exchange1_side} for {pos1.pair}"
+                                f"{ex2_name} {pos2.exchange1_side} for {norm_pair}"
                             )
                             
                             discovered.append(linked_position)

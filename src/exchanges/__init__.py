@@ -22,6 +22,7 @@ from .gate import GateExchange
 from .bingx import BingXExchange
 from .bitget import BitgetExchange
 from .lighter import LighterExchange
+from .aster import AsterExchange
 from .mexc import MexcExchange
 
 __all__ = [
@@ -36,6 +37,7 @@ __all__ = [
     "BingXExchange",
     "BitgetExchange",
     "LighterExchange",
+    "AsterExchange",
     "MexcExchange",
     # Exceptions
     "ExchangeError",

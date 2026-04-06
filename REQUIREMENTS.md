@@ -111,7 +111,7 @@ while True:
 **Опции:**
 - Без timeout: ждет бесконечно
 - С timeout: показывает меню после истечения
-- Прерывание (Ctrl+C): меню с выбором (продолжить, установить timeout, отменить)
+- Прерывание (`[q] + Enter`): меню с выбором (продолжить, форс-маркет, отменить)
 
 **Преимущества:**
 - 🎯 Никогда не закрывает с убытком (PnL >= 0)
@@ -350,13 +350,65 @@ Select position to close [1-2]:
 ║ 2. Stable Spread close (Wait for spread to match entry)
 ║ 3. Smart PnL close (Close when PnL ≥ 0 + instant fill) ✅
 ║ 4. Market order (Instant)
+║ 5. Free Fees (PnL covers all taker fees + instant fill) ✅
+║ 6. Cancel
 ╚══════════════════════════════════════════════════════════
-Select mode [1-4]:
+Select mode [1-6]:
 ```
 
----
+### 5. Free Fees Close ✅ IMPLEMENTED (31 Mar 2026)
+**Модуль:** `src/core/position_closer.py` (метод `close_free_fees()`)
 
-## ⚠️ Emergency Close - Проблема и решение
+**Суть:** Расширение Smart PnL Close — закрывает позицию только когда PnL **полностью покрывает все taker-комиссии** (открытие + закрытие, обе биржи).
+
+**Зачем:** Smart PnL закрывает при PnL ≥ 0, но не учитывает уже заплаченные комиссии. Free Fees гарантирует, что заработок — это **чистый funding profit** без каких-либо потерь на комиссиях.
+
+**Пример:**
+```
+OKX (5 bps) + Gate.io (5 bps)
+Плечо: 10x, депозит: $25 на ногу → $250 на ногу
+Notional: $500
+
+Комиссии: 2 × (5 + 5) = 20 bps × $500 / 10000 = $1
+Порог закрытия: PnL >= $1
+→ Чистая прибыль = 100% funding
+```
+
+**Условия закрытия (ОБА должны выполняться):**
+1. ✅ Unrealized PnL ≥ total_taker_fees_usd
+2. ✅ Оба limit ордера исполнятся мгновенно (instant fill)
+
+**Формула расчёта threshold:**
+```
+total_fee_bps = 2 × (taker_ex1_bps + taker_ex2_bps)   # 4 ноги
+total_fees_usd = quantity × mid_price × total_fee_bps / 10000
+```
+
+**Расчёт PnL — aggressive цены (fix 02 Apr 2026):**
+
+PnL считается **по реальным ценам исполнения** (aggressive fill price с буфером 0.1%),
+а не по `best_bid`/`best_ask`. Это устраняет систематическое расхождение ~10 центов
+между ожидаемым и реальным результатом при закрытии.
+
+```
+agg_price = calculate_aggressive_fill_price(orderbook_side, qty, side, buffer=0.1%)
+pnl_usd   = calculate_unrealized_pnl(..., close_price_ex1=agg_price1, close_price_ex2=agg_price2)
+```
+
+Условие срабатывает только когда спред достаточно широк, чтобы покрыть и комиссии, и буфер
+исполнения. Если стакан пустой / нет ликвидности — fallback на `best_bid`/`best_ask`.
+
+**Отображение в мониторинге:**
+```
+⏱️  [30s] PnL: $+1.20 | Fees: $1.00 | Net: $+0.20 ✅ | Ex1: ✅ | Ex2: ✅
+```
+(PnL и Net теперь отражают реальную цену исполнения, а не теоретическую)
+
+**Управление:** Нажать `[q] + Enter` для выхода в меню (Continue / Market / Cancel)
+
+**Тесты:** Покрыт логикой `_calculate_total_taker_fees_usd()` в `position_closer.py`
+
+---
 
 ### Проблема
 При срабатывании SL/TP нужно, чтобы на **обеих** биржах закрылись позиции одновременно.
@@ -501,7 +553,9 @@ async def _trigger_emergency_close(position: Position):
 **Статус тестирования:**  
 ✅ Все баги исправлены и протестированы на production (Bybit + OKX)  
 ✅ Новые биржи протестированы на demo/testnet  
-✅ MEXC API connection, market data, balance - протестировано
+✅ MEXC API connection, market data, balance - протестировано  
+✅ MEXC адаптер полностью переработан и протестирован (02 Apr 2026)
+✅ Aster адаптер реализован и протестирован live (06 Apr 2026)
 ✅ 52/52 unit tests passing  
 ✅ Позиции успешно открываются, отслеживаются и закрываются
 ✅ Bitget: Market close и Smart PnL close протестированы и работают (24 Feb 2026)
@@ -527,40 +581,42 @@ data/
 
 ## �📊 Комиссии бирж
 
-### Taker Commission (маркет ордера)
+### Taker Commission (маркет ордера / агрессивные лимитки)
+**Обновлено: 31 Mar 2026 — сверено вручную по официальным страницам бирж**
 ```python
 TAKER_COMMISSION_BPS = {
-    "kucoin": 6.0,
+    "kucoin": 6.0,    # ✅ сверено
     "aster": 4.0,
-    "binance": 5.0,
-    "okx": 10.0,
-    "mexc": 4.0,
-    "gate": 5.0,
-    "bitget": 6.0,
-    "bybit": 5.5,
+    "binance": 5.0,   # ✅ сверено
+    "okx": 5.0,       # ✅ сверено (было 10.0 — исправлено)
+    "mexc": 4.0,      # ✅ сверено
+    "gate": 5.0,      # ✅ сверено
+    "bitget": 10.0,   # ✅ сверено (было 6.0 — исправлено)
+    "bybit": 5.5,     # ✅ сверено
     "lighter": 0.0,
     "extended": 2.5,
     "hyperliquid": 4.5,
-    "bingx": 5.0,
+    "bingx": 5.0,     # ✅ сверено
     "ethereal": 3.0,
 }
 ```
 
 ### Maker Commission (лимит ордера)
+**Обновлено: 31 Mar 2026 — сверено вручную по официальным страницам бирж**
 ```python
 MAKER_COMMISSION_BPS = {
-    "kucoin": 2.0,
+    "kucoin": 2.0,    # ✅ сверено
     "aster": 0.5,
-    "binance": 2.0,
-    "okx": 2.0,
-    "mexc": 1.0,
-    "gate": 2.0,
-    "bitget": 2.0,
-    "bybit": 2.0,
+    "binance": 2.0,   # ✅ сверено
+    "okx": 2.0,       # ✅ сверено
+    "mexc": 1.0,      # ✅ сверено
+    "gate": 2.0,      # ✅ сверено
+    "bitget": 3.6,    # ✅ сверено (было 2.0 — исправлено)
+    "bybit": 2.0,     # ✅ сверено
     "lighter": 0.0,
     "extended": 0.0,
     "hyperliquid": 1.5,
-    "bingx": 2.0,
+    "bingx": 2.0,     # ✅ сверено
     "ethereal": 0.0,
 }
 ```
@@ -640,6 +696,70 @@ MAKER_COMMISSION_BPS = {
 - [x] Добавить поддержку новых бирж в CLI (21 Jan 2026)
 - [x] Добавить новые тесты: test_persistence.py, test_smart_pnl_close.py
 - [x] Обновить документацию с новыми изменениями
+
+### Completed ✅ (02 Apr 2026)
+- [x] **MEXC адаптер — полный рефакторинг** (02 Apr 2026)
+  - Обновлён API домен: `contract.mexc.com` → `api.mexc.com` (миграция 2026-01-19, старый возвращал 403)
+  - Очищен `unavailableContracts` после инициализации: ccxt по умолчанию блокирует BTC/ETH/LTC для MEXC
+  - Исправлен `_api_open_position`: добавлены `marginMode: isolated`, `leverage` в params (ccxt требует явно)
+  - Исправлен `_api_set_stop_loss` и `_api_set_take_profit`: заменены несуществующие MEXC order types на
+    `triggerPrice`/`triggerType`/`trend`/`orderType` params; направление triggerType теперь соответствует стороне
+    (LONG TP → triggerType=1 ≥, SHORT TP → triggerType=2 ≤)
+  - Исправлен `_api_get_symbol_info`: `min_quantity`, `max_quantity`, `quantity_step` теперь в базовой валюте
+    (`volUnit × contractSize`), а не в контрактах
+  - Исправлен `_api_get_single_position`: фильтрация по symbolu (раньше возвращал первую ненулевую позицию)
+  - Исправлен `_parse_position`: contractSize берётся из market-кэша (или `info.contractSize` как fallback),
+    unrealizedPnl читается из `info.unrealized`, positionId включён в position.id
+  - Добавлен `sync_time()` при `connect()` для исключения timestamp-ошибок  
+  - Добавлен `_api_get_income_history()`: получает историю funding payments через
+    `contractPrivateGetPositionFundingRecords`
+- [x] **feat(main): инициализация MexcExchange в CLI** — MEXC подключается при наличии `MEXC_API_KEY` в конфиге
+- [x] **fix(commands): skip zero price** — `_update_position_prices()` теперь игнорирует данные позиции
+  когда `exchange1_current_price == 0` (fallback на `get_price_data()`)
+- [x] **fix(execution_engine): `entry_spread_abs` не определена в `stable_spread`** — после открытия
+  позиции бот падал с `NameError: name 'entry_spread_abs' is not defined`, позиция не сохранялась.
+  Исправлено добавлением `entry_spread_abs = abs(entry_spread_signed_abs)` сразу после вычисления спреда.
+- [x] **fix(persistence): нормализация символов при детекции orphaned-пар** — `discover_orphan_positions()`
+  не мог сопоставить `NTRN/USDT:USDT` (Gate) с `NTRNUSDT` (MEXC); добавлена функция `_norm_sym()` 
+  аналогичная той что используется в других частях persistence.py
+
+### Completed ✅ (31 Mar 2026)
+- [x] **Аудит taker-комиссий** по официальным страницам 9 бирж:
+  - OKX: исправлено 10.0 → 5.0 bps
+  - Bitget: исправлено 6.0 → 10.0 bps (taker) и 2.0 → 3.6 bps (maker)
+- [x] **Free Fees Close** — новый режим закрытия (пункт меню 5)
+  - Порог: PnL ≥ суммарные taker-комиссии за 4 ноги (open+close × 2 биржи)
+  - Та же механика instant fill что в Smart PnL
+  - `_calculate_total_taker_fees_usd()` в `position_closer.py`
+- [x] **[q] + Enter для выхода** из Smart PnL и Free Fees мониторинга
+  - `_stdin_quit_watcher()` — асинхронный watcher через `run_in_executor`
+  - Показывает меню (Continue / Market / Cancel)
+  - Исправлен `asyncio.get_running_loop()` вместо deprecated `get_event_loop()`
+
+### Completed ✅ (06 Apr 2026)
+- [x] **Aster адаптер — реализован с нуля** (06 Apr 2026)
+  - Протокол: Aster Finance Pro API v3 (старый REST API более не работает — только Pro)
+  - Аутентификация: EIP-712 wallet-based signing (нет API key/secret — только Ethereum wallet)
+    - `user` =登录 wallet address (ASTER_USER)
+    - `signer` = agent wallet address (ASTER_SIGNER)
+    - `private_key` = agent wallet private key (ASTER_PRIVATE_KEY)
+  - Nonce: микросекундные timestamp, строго монотонные, thread-safe (`_nonce_lock`)
+  - Подпись: `eth_account.messages.encode_typed_data(full_message=...)` + `Account.sign_message()`
+    - ⚠️ Используется `encode_typed_data` (не `encode_structured_data` — отсутствует в установленной версии)
+  - Base URL исправлен: `fapi3.asterdex.com` (403 Forbidden) → `fapi.asterdex.com` ✅
+  - Funding interval: 4 часа (00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC)
+  - Position mode: One-way (positionSide=BOTH)
+  - Зависимость: `eth-account>=0.10.0` (добавлена в `requirements.txt`, установлена)
+  - Все 18+ `_api_*` абстрактных методов BaseExchange реализованы
+  - **Протестировано live (06 Apr 2026):**
+    - ✅ Ping / server time (дрейф 60ms)
+    - ✅ Mark price, order book, funding rate (BTCUSDT)
+    - ✅ Symbol info (min_qty=0.001, max_lev=200)
+    - ✅ Balance (signed EIP-712 запрос — ответ получен, баланс 0 USDT)
+    - ✅ Set leverage 10x BTCUSDT
+    - ✅ Positions (нет открытых)
+  - Конфиг: `ASTER_USER`, `ASTER_SIGNER`, `ASTER_PRIVATE_KEY` в `.env` и `config/config.py`
+  - Инициализация в `main.py` при наличии `ASTER_SIGNER` в конфиге
 
 ### Pending ⬜ (Low Priority / Future)
 - [ ] WebSocket price monitoring (REST sufficient for now)

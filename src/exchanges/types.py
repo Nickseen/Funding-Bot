@@ -132,11 +132,17 @@ class Position:
     initial_capital: float = 0.0  # Total USD invested
     
     # PnL tracking
-    funding_received: float = 0.0  # Total funding received
+    funding_received: float = 0.0  # Total funding received (both exchanges)
+    funding_received_ex1: float = 0.0  # Funding received from exchange1
+    funding_received_ex2: float = 0.0  # Funding received from exchange2
     fees_paid: float = 0.0  # Total fees paid
     unrealized_pnl: float = 0.0  # Current unrealized PnL
     realized_pnl: float = 0.0  # Realized PnL (when closed)
-    
+
+    # Entry funding snapshot (bps per 8h interval at open time)
+    entry_funding_bps_ex1: float = 0.0  # Funding rate bps for exchange1 at open
+    entry_funding_bps_ex2: float = 0.0  # Funding rate bps for exchange2 at open
+
     # Metadata
     notes: str = ""  # Optional notes
     
