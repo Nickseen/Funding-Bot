@@ -732,8 +732,8 @@ class AsterExchange(BaseExchange):
             ask=data["ask"],
             bid_qty=data.get("bid_qty", 0.0),
             ask_qty=data.get("ask_qty", 0.0),
-            exchange=self.exchange_name,
             symbol=data.get("symbol", ""),
+            timestamp=time.time(),
         )
 
     def _parse_balance(self, data: Any) -> Balance:
