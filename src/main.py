@@ -34,6 +34,7 @@ from src.exchanges.kucoin import KuCoinExchange
 from src.exchanges.okx import OKXExchange
 from src.exchanges.gate import GateExchange
 from src.exchanges.bingx import BingXExchange
+from src.exchanges.aster import AsterExchange
 from src.exchanges.bitget import BitgetExchange
 from src.exchanges.mexc import MexcExchange
 
@@ -287,7 +288,17 @@ async def main_cli():
             )
         except Exception as e:
             log.warning(f"Error initializing MEXC: {e}")
-    
+
+    if hasattr(config, 'ASTER_SIGNER') and config.ASTER_SIGNER:
+        try:
+            exchanges['aster'] = AsterExchange(
+                user=config.ASTER_USER,
+                signer=config.ASTER_SIGNER,
+                private_key=config.ASTER_PRIVATE_KEY,
+            )
+        except Exception as e:
+            log.warning(f"Error initializing Aster: {e}")
+
     if not exchanges:
         log.warning("No exchanges configured. CLI will run in demo mode.")
         log.warning("Configure API keys in .env to enable trading.")
