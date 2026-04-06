@@ -31,6 +31,7 @@ import asyncio
 import threading
 import time
 import urllib.parse
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 import aiohttp
@@ -757,10 +758,17 @@ class AsterExchange(BaseExchange):
     def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
         """Convert _api_get_funding_rate result to FundingRate."""
         rate = float(data.get("fundingRate", 0))
+        rate_bps = rate * 10000
         next_funding_ms = int(data.get("nextFundingTime", 0))
+        next_funding_time = (
+            datetime.fromtimestamp(next_funding_ms / 1000, tz=timezone.utc)
+            if next_funding_ms
+            else None
+        )
         return FundingRate(
             rate=rate,
-            next_funding_time=next_funding_ms,
+            rate_bps=rate_bps,
+            next_funding_time=next_funding_time,
             exchange=self.exchange_name,
             symbol=data.get("symbol", ""),
         )
