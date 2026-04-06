@@ -555,6 +555,7 @@ async def _trigger_emergency_close(position: Position):
 ✅ Новые биржи протестированы на demo/testnet  
 ✅ MEXC API connection, market data, balance - протестировано  
 ✅ MEXC адаптер полностью переработан и протестирован (02 Apr 2026)
+✅ Aster адаптер реализован и протестирован live (06 Apr 2026)
 ✅ 52/52 unit tests passing  
 ✅ Позиции успешно открываются, отслеживаются и закрываются
 ✅ Bitget: Market close и Smart PnL close протестированы и работают (24 Feb 2026)
@@ -734,6 +735,31 @@ MAKER_COMMISSION_BPS = {
   - `_stdin_quit_watcher()` — асинхронный watcher через `run_in_executor`
   - Показывает меню (Continue / Market / Cancel)
   - Исправлен `asyncio.get_running_loop()` вместо deprecated `get_event_loop()`
+
+### Completed ✅ (06 Apr 2026)
+- [x] **Aster адаптер — реализован с нуля** (06 Apr 2026)
+  - Протокол: Aster Finance Pro API v3 (старый REST API более не работает — только Pro)
+  - Аутентификация: EIP-712 wallet-based signing (нет API key/secret — только Ethereum wallet)
+    - `user` =登录 wallet address (ASTER_USER)
+    - `signer` = agent wallet address (ASTER_SIGNER)
+    - `private_key` = agent wallet private key (ASTER_PRIVATE_KEY)
+  - Nonce: микросекундные timestamp, строго монотонные, thread-safe (`_nonce_lock`)
+  - Подпись: `eth_account.messages.encode_typed_data(full_message=...)` + `Account.sign_message()`
+    - ⚠️ Используется `encode_typed_data` (не `encode_structured_data` — отсутствует в установленной версии)
+  - Base URL исправлен: `fapi3.asterdex.com` (403 Forbidden) → `fapi.asterdex.com` ✅
+  - Funding interval: 4 часа (00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC)
+  - Position mode: One-way (positionSide=BOTH)
+  - Зависимость: `eth-account>=0.10.0` (добавлена в `requirements.txt`, установлена)
+  - Все 18+ `_api_*` абстрактных методов BaseExchange реализованы
+  - **Протестировано live (06 Apr 2026):**
+    - ✅ Ping / server time (дрейф 60ms)
+    - ✅ Mark price, order book, funding rate (BTCUSDT)
+    - ✅ Symbol info (min_qty=0.001, max_lev=200)
+    - ✅ Balance (signed EIP-712 запрос — ответ получен, баланс 0 USDT)
+    - ✅ Set leverage 10x BTCUSDT
+    - ✅ Positions (нет открытых)
+  - Конфиг: `ASTER_USER`, `ASTER_SIGNER`, `ASTER_PRIVATE_KEY` в `.env` и `config/config.py`
+  - Инициализация в `main.py` при наличии `ASTER_SIGNER` в конфиге
 
 ### Pending ⬜ (Low Priority / Future)
 - [ ] WebSocket price monitoring (REST sufficient for now)
