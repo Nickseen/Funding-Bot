@@ -752,8 +752,9 @@ class AsterExchange(BaseExchange):
                         margin_used=margin_used,
                         unrealized_pnl=cross_un_pnl,
                         exchange=self.exchange_name,
+                        timestamp=time.time(),
                     )
-        return Balance(total=0.0, available=0.0, margin_used=0.0, unrealized_pnl=0.0, exchange=self.exchange_name)
+        return Balance(total=0.0, available=0.0, margin_used=0.0, unrealized_pnl=0.0, exchange=self.exchange_name, timestamp=time.time())
 
     def _parse_funding_rate(self, data: Dict[str, Any]) -> FundingRate:
         """Convert _api_get_funding_rate result to FundingRate."""
