@@ -761,6 +761,27 @@ MAKER_COMMISSION_BPS = {
   - Конфиг: `ASTER_USER`, `ASTER_SIGNER`, `ASTER_PRIVATE_KEY` в `.env` и `config/config.py`
   - Инициализация в `main.py` при наличии `ASTER_SIGNER` в конфиге
 
+### Completed ✅ (07 Apr 2026)
+- [x] **Aster адаптер — post-live stabilization и совместимость с текущими dataclass**
+    - Исправлен `_parse_funding_rate`: добавлен `rate_bps`, `nextFundingTime` конвертируется в timezone-aware `datetime`
+    - Исправлен `_parse_price_data`: удалён невалидный аргумент `exchange`, добавлен обязательный `timestamp`
+    - Исправлен `_parse_orderbook`: добавлен обязательный `timestamp`
+    - Исправлен `_parse_balance`: добавлен обязательный `timestamp` во всех ветках возврата
+    - Переписан `_parse_position` под текущую модель `Position` (устранено падение `unexpected keyword argument 'symbol'`)
+    - Переписан `_parse_order` под текущую модель `Order` (`id`, `filled_quantity`, корректные поля)
+
+- [x] **Aster ордера — фиксы точности и ограничений биржи**
+    - Добавлено форматирование количества по `LOT_SIZE.stepSize` (`_fmt_qty`)
+    - Добавлено форматирование цены по `PRICE_FILTER.tickSize` (`_fmt_price`)
+    - Форматтеры применены в `_api_open_position`, `_api_close_position`, `_api_place_order`
+    - Ошибка `-4168` при `marginType=ISOLATED` в Multi-Assets mode помечена как допустимая (warning без блокировки открытия)
+    - Из `exchangeInfo` добавлен парсинг `min_notional` (`MIN_NOTIONAL`/`NOTIONAL`) в `_api_get_symbol_info`
+
+- [x] **CLI pre-open safety — корректный нижний порог USD ноги**
+    - `_calculate_equal_position_limits()` теперь учитывает `min_notional` обеих бирж (не только `min_quantity`)
+    - Добавлен расчёт floor-safe `Min required size` с учётом coarsest `quantity_step` и фактического floor в `ExecutionEngine`
+    - Устранён рассинхрон: UI больше не предлагает размер, который после выравнивания шага приводит к отказу биржи `-4164` (min notional)
+
 ### Pending ⬜ (Low Priority / Future)
 - [ ] WebSocket price monitoring (REST sufficient for now)
 - [ ] Additional exchanges testing (Binance, KuCoin)

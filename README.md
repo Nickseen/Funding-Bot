@@ -14,9 +14,9 @@ This bot automatically opens and manages **delta-neutral positions** across mult
 ### Key Features
 
 - ✅ **Delta-Neutral Strategy**: Simultaneous LONG and SHORT positions on different exchanges
-- ✅ **Multiple Exchanges**: Supports Binance, Bybit, KuCoin, OKX, Gate.io, BingX, Bitget, MEXC
-- ✅ **Real-time Monitoring**: WebSocket price tracking and position management
-- ✅ **Smart Order Execution**: Hit-the-bid strategy and flash funding modes
+- ✅ **Multiple Exchanges**: Supports Binance, Bybit, KuCoin, OKX, Gate.io, BingX, Bitget, MEXC, Lighter, Aster
+- ✅ **Smart Monitoring**: FundingTracker v3.0 (funding spread thresholds) + EmergencyMonitor
+- ✅ **Smart Order Execution**: Hit-the-bid, Stable Spread, and Market modes
 - ✅ **Risk Management**: Automatic Stop Loss and Take Profit (±20% to liquidation)
 - ✅ **In-Memory State**: Lightning-fast RAM-based state management
 - ✅ **Auto Recovery**: Restores positions from exchanges on restart
@@ -46,14 +46,20 @@ Funding-Bot/
 │   │   ├── bybit.py            # Bybit implementation
 │   │   ├── kucoin.py           # KuCoin implementation
 │   │   ├── okx.py              # OKX implementation
+│   │   ├── gate.py             # Gate.io implementation
+│   │   ├── bingx.py            # BingX implementation
+│   │   ├── bitget.py           # Bitget implementation
+│   │   ├── mexc.py             # MEXC implementation
+│   │   ├── lighter.py          # Lighter implementation
+│   │   ├── aster.py            # Aster Pro API implementation
 │   │   ├── types.py            # Data structures (Position, OrderBook, etc.)
 │   │   └── enums.py            # Constants & enums + fees for 13 exchanges
 │   ├── core/                   # Core business logic
 │   │   ├── state.py            # RAM state management (async, thread-safe)
 │   │   ├── execution_engine.py # Position opening (2 modes: hit_the_bid, stable_spread)
-│   │   └── position_closer.py  # Position closing (5 modes: hit_the_bid, flash, market, stable_spread, emergency)
+│   │   └── position_closer.py  # Position closing (hit_the_bid, market, stable_spread, smart_pnl, free_fees, emergency)
 │   ├── monitors/               # Monitoring & detection (stateful watchers)
-│   │   ├── funding_tracker.py  # Funding monitoring + auto-close (smart intervals)
+│   │   ├── funding_tracker.py  # Funding spread monitoring + auto-close thresholds
 │   │   └── emergency_monitor.py # SL/TP detection (REST polling 5 sec)
 │   ├── managers/               # Infrastructure & resource management
 │   │   └── (planned: RiskManager, WebSocketManager)
@@ -66,7 +72,7 @@ Funding-Bot/
 │   ├── cli/                    # CLI interface
 │   └── main.py                 # Bot orchestration (Bot class with lifecycle)
 ├── config/                     # Configuration
-├── tests/                      # Tests (12 passing)
+├── tests/                      # Unit + integration tests
 │   ├── unit/
 │   │   ├── test_calculations.py       # Calculations tests (7 tests)
 │   │   └── test_emergency_monitor.py  # EmergencyMonitor tests (5 tests)
@@ -178,10 +184,10 @@ Daily Funding:         ~$30 (if positive rate)
    - Uses limit orders for better pricing
    - 5-minute search window
 
-2. **Flash Funding** ⚡
-   - Quick execution before funding payment
-   - Analyzes profitability based on hourly funding rate
-   - Auto-confirm if profitable
+2. **Stable Spread** 📌
+   - Saves entry spread and opens with aggressive LIMIT orders
+   - Designed for quick open with spread-preserving close logic
+   - Suitable when waiting full hit-the-bid timeout is undesirable
 
 3. **Market Execution** 🚀
    - Immediate execution at market prices
@@ -267,14 +273,14 @@ pytest tests/unit/test_calculations.py
 | Binance | ✅ Implemented | 0.05% | 0.02% |
 | Bybit | ✅ Implemented | 0.055% | 0.02% |
 | KuCoin | ✅ Implemented | 0.06% | 0.02% |
-| OKX | ✅ Implemented | 0.10% | 0.02% |
+| OKX | ✅ Implemented | 0.05% | 0.02% |
 | Gate.io | ✅ Implemented | 0.05% | 0.02% |
 | BingX | ✅ Implemented | 0.05% | 0.02% |
-| Bitget | ✅ Implemented | 0.06% | 0.02% |
+| Bitget | ✅ Implemented | 0.10% | 0.036% |
 | MEXC | ✅ Implemented | 0.04% | 0.01% |
 | Lighter | ✅ Implemented | 0.00% | 0.00% |
-| Hyperliquid | 🚧 Planned | 0.045% | 0.00% |
-| Aster | 🚧 Planned | 0.04% | 0.02% |
+| Aster | ✅ Implemented | 0.04% | 0.005% |
+| Hyperliquid | 🚧 Planned | 0.045% | 0.015% |
 
 ---
 
@@ -324,8 +330,10 @@ pytest tests/unit/test_calculations.py
 - [x] Bitget adapter
 - [x] Lighter adapter
 - [x] MEXC adapter
+- [x] Aster adapter (EIP-712 wallet signing)
 - [x] Per-exchange mode overrides (BINANCE/BYBIT/KUCOIN/OKX/GATE/BINGX/BITGET)
 - [x] Unit tests (core modules passing)
+- [x] Post-live Aster stabilization fixes (precision/parsers/min notional)
 - [ ] WebSocket price monitoring (skeleton ready, low priority)
 - [ ] Full regression across all exchange adapter tests
 
