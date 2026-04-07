@@ -266,6 +266,55 @@ class AsterExchange(BaseExchange):
                 return sym
         return None
 
+    async def _fmt_qty(self, symbol: str, qty: float) -> str:
+        """
+        Format quantity string according to the LOT_SIZE stepSize from exchangeInfo.
+        e.g. stepSize=1 -> "10", stepSize=0.001 -> "10.000"
+        Falls back to str(qty) if info unavailable.
+        """
+        try:
+            info = await self._get_exchange_info()
+            aster_symbol = self._to_aster_symbol(symbol)
+            sym = self._find_symbol_info(info, aster_symbol)
+            if sym:
+                for f in sym.get("filters", []):
+                    if f.get("filterType") == "LOT_SIZE":
+                        step = float(f.get("stepSize", 0))
+                        if step > 0:
+                            # derive decimal places from stepSize
+                            s = f"{step:.10f}".rstrip("0")
+                            decimals = len(s.split(".")[1]) if "." in s else 0
+                            if decimals == 0:
+                                return str(int(round(qty)))
+                            return f"{qty:.{decimals}f}"
+        except Exception:
+            pass
+        return str(qty)
+
+    async def _fmt_price(self, symbol: str, price: float) -> str:
+        """
+        Format price string according to PRICE_FILTER tickSize from exchangeInfo.
+        e.g. tickSize=0.1 -> "100.1", tickSize=0.0001 -> "100.1234"
+        Falls back to str(price) if info unavailable.
+        """
+        try:
+            info = await self._get_exchange_info()
+            aster_symbol = self._to_aster_symbol(symbol)
+            sym = self._find_symbol_info(info, aster_symbol)
+            if sym:
+                for f in sym.get("filters", []):
+                    if f.get("filterType") == "PRICE_FILTER":
+                        tick = float(f.get("tickSize", 0))
+                        if tick > 0:
+                            s = f"{tick:.10f}".rstrip("0")
+                            decimals = len(s.split(".")[1]) if "." in s else 0
+                            if decimals == 0:
+                                return str(int(round(price)))
+                            return f"{price:.{decimals}f}"
+        except Exception:
+            pass
+        return str(price)
+
     # ============================================
     # CONNECTION
     # ============================================
@@ -394,8 +443,9 @@ class AsterExchange(BaseExchange):
                 {"symbol": aster_symbol, "marginType": "ISOLATED"},
             )
         except ExchangeError as e:
-            # -4046: no need to change margin type (already ISOLATED)
-            if "-4046" not in str(e) and "no need" not in str(e).lower():
+            err = str(e)
+            # -4046: already ISOLATED; -4168: Multi-Assets mode (can't switch) — both are OK
+            if "-4046" not in err and "-4168" not in err and "no need" not in err.lower():
                 log.warning(f"Aster: marginType set warning: {e}")
 
         # 2. Set leverage
@@ -418,11 +468,11 @@ class AsterExchange(BaseExchange):
             "side": order_side,
             "positionSide": "BOTH",
             "type": "LIMIT" if order_type == OrderType.LIMIT else "MARKET",
-            "quantity": str(quantity),
+            "quantity": await self._fmt_qty(symbol, quantity),
             "newOrderRespType": "RESULT",
         }
         if order_type == OrderType.LIMIT and price is not None:
-            params["price"] = str(price)
+            params["price"] = await self._fmt_price(symbol, price)
             params["timeInForce"] = "GTC"
 
         order = await self._signed_post("/fapi/v3/order", params)
@@ -459,12 +509,12 @@ class AsterExchange(BaseExchange):
             "side": close_side,
             "positionSide": "BOTH",
             "type": "LIMIT" if order_type == OrderType.LIMIT else "MARKET",
-            "quantity": str(qty),
+            "quantity": await self._fmt_qty(symbol, qty),
             "reduceOnly": "true",
             "newOrderRespType": "RESULT",
         }
         if order_type == OrderType.LIMIT and price is not None:
-            params["price"] = str(price)
+            params["price"] = await self._fmt_price(symbol, price)
             params["timeInForce"] = "GTC"
 
         await self._signed_post("/fapi/v3/order", params)
@@ -489,12 +539,12 @@ class AsterExchange(BaseExchange):
             "side": side.value,
             "positionSide": "BOTH",
             "type": "LIMIT" if order_type == OrderType.LIMIT else "MARKET",
-            "quantity": str(quantity),
+            "quantity": await self._fmt_qty(symbol, quantity),
         }
         if reduce_only:
             params["reduceOnly"] = "true"
         if order_type == OrderType.LIMIT and price is not None:
-            params["price"] = str(price)
+            params["price"] = await self._fmt_price(symbol, price)
             params["timeInForce"] = "GTC"
         return await self._signed_post("/fapi/v3/order", params)
 
@@ -654,6 +704,7 @@ class AsterExchange(BaseExchange):
         max_qty: float = 0.0
         step_size: float = 0.0
         price_tick: float = 0.0
+        min_notional: float = 0.0
 
         for f in sym.get("filters", []):
             ft = f.get("filterType")
@@ -663,6 +714,9 @@ class AsterExchange(BaseExchange):
                 step_size = float(f.get("stepSize", 0))
             elif ft == "PRICE_FILTER":
                 price_tick = float(f.get("tickSize", 0))
+            elif ft in {"MIN_NOTIONAL", "NOTIONAL"}:
+                # Binance-like futures schemas may expose either key name.
+                min_notional = float(f.get("notional") or f.get("minNotional") or 0)
 
         # Leverage brackets
         max_leverage = await self._get_max_leverage(aster_symbol)
@@ -675,6 +729,7 @@ class AsterExchange(BaseExchange):
             if sym.get("filters")
             else 0.0,
             "price_tick": price_tick,
+            "min_notional": min_notional,
             "max_leverage": max_leverage,
         }
 
@@ -723,6 +778,7 @@ class AsterExchange(BaseExchange):
             asks=asks,
             exchange=self.exchange_name,
             symbol=data.get("symbol", ""),
+            timestamp=time.time(),
         )
 
     def _parse_price_data(self, data: Dict[str, Any]) -> PriceData:
@@ -775,26 +831,59 @@ class AsterExchange(BaseExchange):
         )
 
     def _parse_position(self, data: Dict[str, Any]) -> Position:
-        """Convert Aster positionRisk entry to Position (minimal — for reference)."""
+        """Convert Aster positionRisk entry to Position object."""
+        symbol = data.get("symbol", "")
+        pos_amt = float(data.get("positionAmt", 0) or 0)
+        side = "LONG" if pos_amt >= 0 else "SHORT"
+        quantity = abs(pos_amt)
+        entry_price = float(data.get("entryPrice", 0) or 0)
+        mark_price = float(data.get("markPrice", 0) or 0)
+        leverage = int(float(data.get("leverage", 1) or 1))
+        notional = float(data.get("notional", 0) or 0)
+
+        initial_capital = abs(notional) if abs(notional) > 0 else quantity * entry_price
+
         return Position(
-            symbol=data.get("symbol", ""),
-            entry_price=float(data.get("entryPrice", 0)),
-            quantity=abs(float(data.get("positionAmt", 0))),
-            leverage=int(float(data.get("leverage", 1))),
-            liquidation_price=float(data.get("liquidationPrice", 0)),
-            unrealized_pnl=float(data.get("unRealizedProfit", 0)),
+            id=f"aster_{symbol}_{int(time.time())}",
+            pair=symbol,
+            exchange1=self.exchange_name.value,
+            exchange1_pos_id=str(data.get("positionId", "")),
+            exchange1_side=side,
+            exchange1_entry_price=entry_price,
+            exchange1_current_price=mark_price,
+            exchange1_leverage=leverage,
+            exchange2="",
+            exchange2_pos_id="",
+            exchange2_side="",
+            exchange2_entry_price=0.0,
+            exchange2_current_price=0.0,
+            exchange2_leverage=1,
+            quantity=quantity,
+            entry_time=time.time(),
+            stop_loss_price=0.0,
+            take_profit_price=0.0,
+            liquidation_price_ex1=float(data.get("liquidationPrice", 0) or 0),
+            liquidation_price_ex2=0.0,
+            status="OPEN" if quantity > 0 else "CLOSED",
+            unrealized_pnl=float(data.get("unRealizedProfit", 0) or 0),
+            initial_capital=initial_capital,
+            funding_received=0.0,
+            fees_paid=0.0,
         )
 
     def _parse_order(self, data: Dict[str, Any]) -> Order:
         """Convert Aster order response to Order."""
+        side = (data.get("side") or "").upper()
+        order_type = (data.get("type") or "").upper()
+        status = (data.get("status") or "PENDING").upper()
         return Order(
-            order_id=str(data.get("orderId", "")),
-            client_order_id=data.get("clientOrderId", ""),
+            id=str(data.get("orderId", "")),
+            exchange=self.exchange_name.value,
             symbol=data.get("symbol", ""),
-            side=data.get("side", ""),
-            order_type=data.get("type", ""),
+            side=side,
+            order_type=order_type,
+            price=float(data.get("price", 0) or 0),
             quantity=float(data.get("origQty", 0)),
-            price=float(data.get("price", 0)) if data.get("price") else None,
-            status=data.get("status", ""),
-            exchange=self.exchange_name,
+            status=status,
+            filled_quantity=float(data.get("executedQty", 0) or 0),
         )
