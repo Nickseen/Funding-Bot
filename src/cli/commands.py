@@ -567,6 +567,8 @@ class OpenPositionCommand:
         symbol_info_short: Dict[str, Any],
     ) -> Dict[str, float]:
         """Calculate min/max equal per-leg notional allowed on both exchanges."""
+        import math
+
         long_balance_limit = self._to_positive_float(balance_long_available) * leverage * self.balance_utilization_safety
         short_balance_limit = self._to_positive_float(balance_short_available) * leverage * self.balance_utilization_safety
 
@@ -578,6 +580,11 @@ class OpenPositionCommand:
 
         long_min_qty = self._to_positive_float(symbol_info_long.get("min_quantity"), 0.0)
         short_min_qty = self._to_positive_float(symbol_info_short.get("min_quantity"), 0.0)
+        long_min_notional = self._to_positive_float(symbol_info_long.get("min_notional"), 0.0)
+        short_min_notional = self._to_positive_float(symbol_info_short.get("min_notional"), 0.0)
+
+        long_qty_step = self._to_positive_float(symbol_info_long.get("quantity_step"), 0.0)
+        short_qty_step = self._to_positive_float(symbol_info_short.get("quantity_step"), 0.0)
 
         long_symbol_max_limit = float("inf")
         short_symbol_max_limit = float("inf")
@@ -587,8 +594,14 @@ class OpenPositionCommand:
         if short_max_qty > 0:
             short_symbol_max_limit = short_max_qty * short_contract_size * reference_price_short
 
-        long_symbol_min_limit = long_min_qty * long_contract_size * reference_price_long
-        short_symbol_min_limit = short_min_qty * short_contract_size * reference_price_short
+        long_symbol_min_limit = max(
+            long_min_qty * long_contract_size * reference_price_long,
+            long_min_notional,
+        )
+        short_symbol_min_limit = max(
+            short_min_qty * short_contract_size * reference_price_short,
+            short_min_notional,
+        )
 
         max_equal_usd = min(
             long_balance_limit,
@@ -600,6 +613,34 @@ class OpenPositionCommand:
 
         if max_equal_usd == float("inf"):
             max_equal_usd = min(long_balance_limit, short_balance_limit)
+
+        # ExecutionEngine floors quantity to the coarsest step across exchanges.
+        # To avoid UX mismatch (UI min accepted but exchange rejects after floor),
+        # derive a floor-safe minimum USD size.
+        long_step_base = long_qty_step * long_contract_size if long_qty_step > 0 else 0.0
+        short_step_base = short_qty_step * short_contract_size if short_qty_step > 0 else 0.0
+        coarsest_step_base = max(long_step_base, short_step_base)
+
+        long_required_qty_base = max(
+            long_min_qty * long_contract_size,
+            (long_min_notional / reference_price_long) if (long_min_notional > 0 and reference_price_long > 0) else 0.0,
+        )
+        short_required_qty_base = max(
+            short_min_qty * short_contract_size,
+            (short_min_notional / reference_price_short) if (short_min_notional > 0 and reference_price_short > 0) else 0.0,
+        )
+        pair_required_qty_base = max(long_required_qty_base, short_required_qty_base)
+
+        min_conversion_price = min(reference_price_long, reference_price_short)
+        floor_safe_min_usd = 0.0
+        if pair_required_qty_base > 0 and min_conversion_price > 0:
+            if coarsest_step_base > 0:
+                aligned_required_qty = math.ceil(pair_required_qty_base / coarsest_step_base) * coarsest_step_base
+            else:
+                aligned_required_qty = pair_required_qty_base
+            floor_safe_min_usd = aligned_required_qty * min_conversion_price
+
+        min_equal_usd = max(min_equal_usd, floor_safe_min_usd)
 
         return {
             "long_balance_limit": max(0.0, long_balance_limit),
