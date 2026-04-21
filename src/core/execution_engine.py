@@ -1296,17 +1296,54 @@ Open position? [Y/n]: """
     # POSITIVE SPREAD MODE
     # ============================================================
 
-    def _stdin_quit_watcher_eng(self, quit_event: asyncio.Event):
-        """Background task: wait for 'q' + Enter then set quit_event."""
+    def _stdin_quit_watcher_eng(self, quit_event: asyncio.Event, target_updates: asyncio.Queue):
+        """Background task: handle runtime commands for positive spread monitor.
+
+        Commands:
+            q           -> stop monitoring
+            s <bps>     -> change target spread in bps (e.g. "s 95")
+            s           -> ask for next line as bps value
+        """
         import sys
         loop = asyncio.get_running_loop()
         async def _watch():
+            waiting_target_value = False
             try:
                 while not quit_event.is_set():
                     line = await loop.run_in_executor(None, sys.stdin.readline)
-                    if line.strip().lower() == 'q':
+                    raw = line.strip()
+                    if not raw:
+                        continue
+
+                    cmd = raw.lower()
+                    if cmd == 'q':
                         quit_event.set()
                         return
+
+                    if waiting_target_value:
+                        try:
+                            await target_updates.put(float(raw))
+                            print(f"🎯 New target spread queued: {float(raw):+.2f} bps")
+                        except ValueError:
+                            print("❌ Invalid spread value. Enter a number, e.g. 90 or 92.5")
+                        finally:
+                            waiting_target_value = False
+                        continue
+
+                    if cmd == 's':
+                        waiting_target_value = True
+                        print("✏️  Enter new target spread (bps):")
+                        continue
+
+                    if cmd.startswith('s '):
+                        value_str = raw[2:].strip()
+                        try:
+                            new_target = float(value_str)
+                            await target_updates.put(new_target)
+                            print(f"🎯 New target spread queued: {new_target:+.2f} bps")
+                        except ValueError:
+                            print("❌ Invalid format. Use: s <bps>, e.g. s 95")
+                        continue
             except Exception:
                 pass
         return asyncio.create_task(_watch())
@@ -1360,14 +1397,26 @@ Open position? [Y/n]: """
 ║ Target spread: {target_spread_bps:+.2f} bps
 ║ Polling every {CHECK_INTERVAL * 1000:.0f} ms (aggressive prices)
 ║ Press [q] + Enter to cancel
+║ Press [s <bps>] + Enter to change target spread
 ╚══════════════════════════════════════════════════════════
 """)
 
         quit_event = asyncio.Event()
-        quit_task  = self._stdin_quit_watcher_eng(quit_event)
+        target_updates: asyncio.Queue = asyncio.Queue()
+        quit_task  = self._stdin_quit_watcher_eng(quit_event, target_updates)
 
         try:
             while not quit_event.is_set():
+                # Apply any user target changes from stdin command watcher.
+                try:
+                    while True:
+                        new_target = target_updates.get_nowait()
+                        target_spread_bps = new_target
+                        log.info(f"Positive Spread target updated by user: {target_spread_bps:.2f} bps")
+                        print(f"🔄 Target spread updated: {target_spread_bps:+.2f} bps")
+                except asyncio.QueueEmpty:
+                    pass
+
                 # ── fetch orderbooks ──────────────────────────────────
                 ob1 = await self.exchange1.get_orderbook(symbol)
                 ob2 = await self.exchange2.get_orderbook(symbol)

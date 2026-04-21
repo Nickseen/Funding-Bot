@@ -355,6 +355,62 @@ Close position? [Y/n]: """
         except Exception:
             pass
 
+    async def _stdin_spread_gap_watcher(
+        self,
+        quit_event: asyncio.Event,
+        threshold_updates: asyncio.Queue,
+    ) -> None:
+        """Watch stdin for spread-gap runtime commands.
+
+        Commands:
+          q           -> stop monitoring
+          s <bps>     -> update threshold immediately
+          s           -> ask next line as new threshold
+        """
+        loop = asyncio.get_running_loop()
+        waiting_threshold_value = False
+
+        try:
+            while not quit_event.is_set():
+                line = await loop.run_in_executor(None, sys.stdin.readline)
+                raw = line.strip()
+
+                if not raw:
+                    continue
+
+                cmd = raw.lower()
+                if cmd == 'q':
+                    quit_event.set()
+                    return
+
+                if waiting_threshold_value:
+                    try:
+                        new_threshold = float(raw)
+                        await threshold_updates.put(new_threshold)
+                        print(f"🎯 New close threshold queued: {new_threshold:+.2f} bps")
+                    except ValueError:
+                        print("❌ Invalid threshold. Enter a number, e.g. 30 or 27.5")
+                    finally:
+                        waiting_threshold_value = False
+                    continue
+
+                if cmd == 's':
+                    waiting_threshold_value = True
+                    print("✏️  Enter new gap threshold (bps):")
+                    continue
+
+                if cmd.startswith('s '):
+                    value_str = raw[2:].strip()
+                    try:
+                        new_threshold = float(value_str)
+                        await threshold_updates.put(new_threshold)
+                        print(f"🎯 New close threshold queued: {new_threshold:+.2f} bps")
+                    except ValueError:
+                        print("❌ Invalid format. Use: s <bps>, e.g. s 25")
+                    continue
+        except Exception:
+            pass
+
     # ============================================
     # 5. SMART PNL CLOSE
     # ============================================
@@ -1223,14 +1279,28 @@ Select [1-4]: """, end='')
 ║ Strategy: Close when current spread matches target
 ║ Monitoring every 0.5 seconds...
 ║ Press [q] + Enter to stop
+║ Press [s <bps>] + Enter to change threshold
 ╚══════════════════════════════════════════════════════════
 """)
 
         quit_event = asyncio.Event()
-        quit_task  = asyncio.create_task(self._stdin_quit_watcher(quit_event))
+        threshold_updates: asyncio.Queue = asyncio.Queue()
+        quit_task  = asyncio.create_task(self._stdin_spread_gap_watcher(quit_event, threshold_updates))
 
         try:
             while not quit_event.is_set():
+                # Apply user threshold updates without leaving monitor mode.
+                try:
+                    while True:
+                        threshold_bps = threshold_updates.get_nowait()
+                        log.info(
+                            f"Spread Gap threshold updated by user: {threshold_bps:.2f} bps "
+                            f"(tol=±{match_tolerance_bps:.2f})"
+                        )
+                        print(f"🔄 Gap threshold updated: {threshold_bps:+.2f} bps")
+                except asyncio.QueueEmpty:
+                    pass
+
                 # timeout check
                 if timeout and (time.time() - start_time) > timeout:
                     log.warning(f"⏰ Spread Gap close timeout after {timeout}s")
