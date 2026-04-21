@@ -8,6 +8,7 @@ NO business logic, only input/output operations.
 import asyncio
 import sys
 import signal
+import select
 from typing import Optional, List, Tuple, Any
 from concurrent.futures import ThreadPoolExecutor
 
@@ -59,6 +60,44 @@ async def async_input(prompt: str = "") -> str:
         if _shutdown_requested:
             _shutdown_requested = False
             raise KeyboardInterrupt()
+        return result.strip()
+    except asyncio.CancelledError:
+        raise KeyboardInterrupt()
+
+
+def _blocking_input_with_timeout(timeout_seconds: float) -> Optional[str]:
+    """Wait for stdin input up to timeout_seconds and return a raw line if available."""
+    global _shutdown_requested
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], timeout_seconds)
+        if not ready:
+            return None
+        return sys.stdin.readline()
+    except (EOFError, KeyboardInterrupt):
+        _shutdown_requested = True
+        return ""
+
+
+async def async_input_timeout(prompt: str = "", timeout_seconds: float = 1.0) -> Optional[str]:
+    """Async input with timeout; returns None if no input was provided in time."""
+    global _shutdown_requested
+
+    loop = asyncio.get_event_loop()
+
+    if prompt:
+        print(prompt, end="", flush=True)
+
+    try:
+        result = await loop.run_in_executor(
+            _executor,
+            _blocking_input_with_timeout,
+            timeout_seconds,
+        )
+        if _shutdown_requested:
+            _shutdown_requested = False
+            raise KeyboardInterrupt()
+        if result is None:
+            return None
         return result.strip()
     except asyncio.CancelledError:
         raise KeyboardInterrupt()

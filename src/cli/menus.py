@@ -17,7 +17,7 @@ from .display import (
     render_info,
 )
 from .input_handler import (
-    async_input,
+    async_input_timeout,
     get_menu_choice,
     wait_for_keypress,
 )
@@ -46,14 +46,17 @@ class MainMenu:
     
     def __init__(
         self,
-        get_stats_callback: Optional[Callable] = None
+        get_stats_callback: Optional[Callable] = None,
+        refresh_interval_seconds: float = 2.0,
     ):
         """
         Args:
             get_stats_callback: Async callback to get current stats
                                (positions count, total PnL, etc.)
+            refresh_interval_seconds: How often to refresh menu stats while idle
         """
         self.get_stats = get_stats_callback
+        self.refresh_interval_seconds = refresh_interval_seconds
     
     async def show(self) -> MenuAction:
         """
@@ -62,40 +65,6 @@ class MainMenu:
         Returns:
             MenuAction enum value based on user selection
         """
-        clear_screen()
-        
-        # Get current stats if callback provided
-        stats = {
-            'active_positions': 0,
-            'total_pnl': 0.0,
-            'pending_funding': 0.0,
-            'next_funding': 'N/A'
-        }
-        
-        if self.get_stats:
-            try:
-                stats = await self.get_stats()
-            except Exception:
-                pass  # Use default stats on error
-        
-        # Render menu
-        print(render_main_menu(
-            active_positions_count=stats.get('active_positions', 0),
-            total_pnl_usd=stats.get('total_pnl_usd', 0.0),
-            total_pnl_pct=stats.get('total_pnl_pct', 0.0),
-            pending_funding=stats.get('pending_funding', 0.0),
-            next_funding_str=stats.get('next_funding', 'N/A')
-        ))
-        
-        # Get user choice (updated to 6 options - added Manage Funding)
-        choice = await get_menu_choice(
-            "Select [1-6]: ",
-            valid_choices=["1", "2", "3", "4", "5", "6"]
-        )
-        
-        if choice is None:
-            return MenuAction.EXIT
-        
         action_map = {
             "1": MenuAction.OPEN_POSITION,
             "2": MenuAction.VIEW_POSITIONS,
@@ -104,8 +73,49 @@ class MainMenu:
             "5": MenuAction.VIEW_BALANCES,
             "6": MenuAction.EXIT,
         }
-        
-        return action_map.get(choice, MenuAction.MAIN_MENU)
+
+        while True:
+            clear_screen()
+
+            # Get current stats if callback provided
+            stats = {
+                'active_positions': 0,
+                'total_pnl': 0.0,
+                'pending_funding': 0.0,
+                'next_funding': 'N/A'
+            }
+
+            if self.get_stats:
+                try:
+                    stats = await self.get_stats()
+                except Exception:
+                    pass  # Use default stats on error
+
+            print(render_main_menu(
+                active_positions_count=stats.get('active_positions', 0),
+                total_pnl_usd=stats.get('total_pnl_usd', 0.0),
+                total_pnl_pct=stats.get('total_pnl_pct', 0.0),
+                pending_funding=stats.get('pending_funding', 0.0),
+                next_funding_str=stats.get('next_funding', 'N/A')
+            ))
+
+            # Wait for user choice, but refresh menu stats if timeout expires.
+            choice = await async_input_timeout(
+                "Select [1-6]: ",
+                timeout_seconds=self.refresh_interval_seconds,
+            )
+
+            if choice is None:
+                continue
+
+            if choice.lower() in ['q', 'quit', 'exit']:
+                return MenuAction.EXIT
+
+            if choice in action_map:
+                return action_map[choice]
+
+            print(f"Invalid choice. Please select from: 1, 2, 3, 4, 5, 6")
+            await asyncio.sleep(0.8)
 
 
 class SubMenu:

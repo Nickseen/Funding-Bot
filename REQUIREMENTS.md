@@ -1960,3 +1960,19 @@ async def get_income_history(
     - Guardrail переименован: `MAX EQUAL MARGIN (PER LEG)`.
     - Risk check: показывает "Margin per leg" + "Total notional".
     - Файлы: `src/cli/commands.py`, `src/cli/display.py`, `tests/unit/test_open_position_safety_checks.py`
+
+### 2026-04-21
+- **feat(execution,close)**: runtime update of spread targets without leaving monitoring screens (commit `1da47bb`)
+    - В `Positive Spread` добавлена команда `s <bps>` (и пошаговый вариант `s` + ввод числа) для смены `target_spread_bps` прямо в активном мониторинге.
+    - В `Spread Gap Close` добавлена аналогичная команда `s <bps>` для смены `threshold_bps` без выхода в timeout/interrupt меню.
+    - `q + Enter` сохранён как мгновенная остановка мониторинга.
+    - Обновлены подсказки в UI-блоках мониторинга для обеих команд (`q`, `s <bps>`).
+    - Файлы: `src/core/execution_engine.py`, `src/core/position_closer.py`
+    - Тесты: `tests/unit/test_execution_engine_okx_step_parsing.py`, `tests/unit/test_execution_engine_quantity_alignment.py`, `tests/unit/test_spread_gap_logic.py`, `tests/unit/test_smart_pnl_close.py`, `tests/unit/test_emergency_monitor.py`.
+
+- **feat(cli)**: live refresh of Main Menu stats while screen is open
+    - Добавлен неблокирующий ввод с таймаутом (`async_input_timeout`) и helper на `select.select(...)`.
+    - Main Menu теперь обновляет экран по таймеру в idle-состоянии (по умолчанию каждые 2 секунды), поэтому `Open positions` и `Total PnL` меняются без выхода из меню.
+    - В `CliApp` добавлен best-effort refresh текущих цен и `unrealized_pnl` перед вычислением агрегированной строки `Total PnL`.
+    - Файлы: `src/cli/input_handler.py`, `src/cli/menus.py`, `src/cli/app.py`
+    - Тесты: `tests/unit/test_cli.py`.
