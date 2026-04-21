@@ -176,6 +176,23 @@ class BitgetExchange(BaseExchange):
 
         return contracts
 
+    def _symbol_key(self, symbol: str) -> str:
+        """Normalize symbol to a comparable uppercase key (REDUSDT style)."""
+        if not symbol:
+            return ""
+        key = str(symbol).upper()
+        for token in ("/", ":", "_UMCBL", "-", " "):
+            key = key.replace(token, "")
+        return key
+
+    def _matches_requested_symbol(self, position_symbol: str, requested_symbol: str) -> bool:
+        """Best-effort symbol match for Bitget/ccxt format variations."""
+        pos_key = self._symbol_key(position_symbol)
+        req_key = self._symbol_key(requested_symbol)
+        if not pos_key or not req_key:
+            return False
+        return pos_key == req_key or pos_key.startswith(req_key) or req_key.startswith(pos_key)
+
     def _is_already_set_error(self, error: Exception) -> bool:
         """Detect idempotent leverage/margin errors that are safe to ignore."""
         msg = str(error).lower()
@@ -498,16 +515,33 @@ class BitgetExchange(BaseExchange):
         """Bitget: POST /api/v2/mix/account/set-leverage"""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
-            
-            # CCXT handles symbol conversion and params internally for Bitget
+
+            base_params = {
+                'productType': 'umcbl',  # USDT-margined perpetual
+                'marginCoin': 'USDT',
+                'marginMode': 'isolated',
+            }
+
+            # Primary call for one-way mode.
             await self.client.set_leverage(
-                leverage, 
+                leverage,
                 ccxt_symbol,
-                params={
-                    'productType': 'umcbl',  # USDT-margined perpetual
-                    'marginCoin': 'USDT',
-                }
+                params=base_params,
             )
+
+            # Best-effort sync for hedge mode where long/short leverage can differ.
+            for hold_side in ('long', 'short'):
+                try:
+                    await self.client.set_leverage(
+                        leverage,
+                        ccxt_symbol,
+                        params={
+                            **base_params,
+                            'holdSide': hold_side,
+                        },
+                    )
+                except Exception:
+                    pass
             return True
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
@@ -726,10 +760,30 @@ class BitgetExchange(BaseExchange):
             ccxt_symbol = self._convert_symbol(symbol)
             positions = await self.client.fetch_positions([ccxt_symbol])
             position = next(
-                (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
-                None
+                (
+                    p
+                    for p in positions
+                    if float(p.get('contracts', 0) or 0) != 0
+                    and self._matches_requested_symbol(p.get('symbol', ''), symbol)
+                ),
+                None,
             )
-            return position
+
+            if position:
+                return position
+
+            # Fallback: Bitget can return empty on immediate symbol-filtered query
+            # right after fill; check full positions list before reporting no position.
+            all_positions = await self.client.fetch_positions()
+            return next(
+                (
+                    p
+                    for p in all_positions
+                    if float(p.get('contracts', 0) or 0) != 0
+                    and self._matches_requested_symbol(p.get('symbol', ''), symbol)
+                ),
+                None,
+            )
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
     
@@ -752,6 +806,35 @@ class BitgetExchange(BaseExchange):
             market = markets.get(ccxt_symbol)
             if not market:
                 raise ExchangeError(f"Symbol {symbol} not found")
+
+            # Bitget often enforces a minimum order value in quote currency (e.g. 5 USDT).
+            # Different ccxt versions expose this under different keys, so parse robustly.
+            min_notional = None
+            try:
+                cost_limits = (market.get('limits') or {}).get('cost') or {}
+                if cost_limits.get('min') is not None:
+                    min_notional = float(cost_limits.get('min'))
+            except (TypeError, ValueError):
+                min_notional = None
+
+            if not min_notional or min_notional <= 0:
+                info = market.get('info') or {}
+                for key in (
+                    'minTradeUSDT',
+                    'minTradeAmount',
+                    'minNotional',
+                    'minOrderValue',
+                    'minCost',
+                    'minQuoteAmount',
+                ):
+                    raw = info.get(key)
+                    try:
+                        val = float(raw)
+                        if val > 0:
+                            min_notional = val
+                            break
+                    except (TypeError, ValueError):
+                        continue
             
             return {
                 'min_quantity': market['limits']['amount']['min'],
@@ -760,6 +843,7 @@ class BitgetExchange(BaseExchange):
                 'min_price': market['limits']['price']['min'],
                 'price_tick': market['precision']['price'],
                 'contract_size': market.get('contractSize', 1),
+                'min_notional': min_notional,
                 'max_leverage': self._extract_max_leverage(market),
             }
         except ccxt.RateLimitExceeded as e:

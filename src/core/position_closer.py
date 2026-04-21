@@ -1088,3 +1088,314 @@ Select [1-4]: """, end='')
         else:
             print("Invalid choice, try again...")
             return await self._show_close_mode_menu(position, reason)
+
+    # ============================================
+    # 7. SPREAD GAP CLOSE
+    # ============================================
+
+    @staticmethod
+    def _is_spread_gap_triggered(
+        current_spread_bps: float,
+        threshold_bps: float,
+        entry_spread_bps: Optional[float],
+        tolerance_bps: float,
+    ) -> bool:
+        """
+        Determine whether Spread Gap close condition is triggered.
+
+        Rule set:
+        - If entry spread is known, infer expected direction and trigger on threshold crossing.
+          This prevents missing exits when spread jumps over the target between polls.
+        - If entry spread is unknown, fallback to near-match logic.
+        """
+        if entry_spread_bps is None:
+            return abs(current_spread_bps - threshold_bps) <= tolerance_bps
+
+        # Compression case: entry > threshold, close when spread goes down to target.
+        if threshold_bps < entry_spread_bps:
+            return current_spread_bps <= (threshold_bps + tolerance_bps)
+
+        # Expansion case: entry < threshold, close when spread rises to target.
+        if threshold_bps > entry_spread_bps:
+            return current_spread_bps >= (threshold_bps - tolerance_bps)
+
+        # Equal target/entry: treat as near-match.
+        return abs(current_spread_bps - threshold_bps) <= tolerance_bps
+
+    async def close_spread_gap(
+        self,
+        position: Position,
+        threshold_bps: float,
+        timeout: Optional[int] = None,
+        progress_callback: Optional[Callable] = None,
+    ) -> bool:
+        """
+        Spread Gap close — closes when spread reaches/passes target threshold.
+
+        Logic:
+          Every 500 ms, compute spread with the SAME orientation as Positive Spread open:
+              spread = (short_price - long_price) / mid * 10000
+          where prices are aggressive for immediate execution at current depth.
+          Close when spread reaches threshold in the expected direction.
+          Example: entry=170 bps, target=80 bps -> trigger when spread <= 80 (+tolerance).
+
+        Args:
+            position: Position to close
+            threshold_bps: Target spread in bps to match at close
+            timeout: Optional timeout in seconds (None = indefinite)
+            progress_callback: Optional async callback for UI updates
+
+        Returns:
+            True if closed, False if cancelled / timeout
+        """
+        match_tolerance_bps = 5.0
+        log.info(
+            f"📉 Spread Gap close for {position.id}, "
+            f"target={threshold_bps:.2f} bps (tol=±{match_tolerance_bps:.2f})"
+        )
+
+        start_time = time.time()
+        CHECK_INTERVAL = 0.5
+        LOG_INTERVAL   = 5.0
+        last_log_time  = 0.0
+
+        def _compute_metrics(ob1: OrderBook, ob2: OrderBook) -> tuple:
+            """Returns (spread_bps, close_price1, close_price2, close_avg1, close_avg2)."""
+            try:
+                # Spread monitoring uses the same orientation as opening:
+                # spread = short_price - long_price
+                if position.exchange1_side == "LONG":
+                    # Long leg is exchange1, short leg is exchange2
+                    _long_agg, long_avg = calculate_aggressive_fill_price(
+                        ob1.asks, position.quantity, "BUY"
+                    )
+                    _short_agg, short_avg = calculate_aggressive_fill_price(
+                        ob2.bids, position.quantity, "SELL"
+                    )
+
+                    # Close execution prices (reverse of open sides)
+                    close_price1, close_avg1 = calculate_aggressive_fill_price(
+                        ob1.bids, position.quantity, "SELL"
+                    )
+                    close_price2, close_avg2 = calculate_aggressive_fill_price(
+                        ob2.asks, position.quantity, "BUY"
+                    )
+                else:
+                    # Long leg is exchange2, short leg is exchange1
+                    _short_agg, short_avg = calculate_aggressive_fill_price(
+                        ob1.bids, position.quantity, "SELL"
+                    )
+                    _long_agg, long_avg = calculate_aggressive_fill_price(
+                        ob2.asks, position.quantity, "BUY"
+                    )
+
+                    # Close execution prices (reverse of open sides)
+                    close_price1, close_avg1 = calculate_aggressive_fill_price(
+                        ob1.asks, position.quantity, "BUY"
+                    )
+                    close_price2, close_avg2 = calculate_aggressive_fill_price(
+                        ob2.bids, position.quantity, "SELL"
+                    )
+            except Exception as e:
+                raise RuntimeError(f"Aggressive price failed: {e}")
+
+            mid = (short_avg + long_avg) / 2
+            spread_bps = ((short_avg - long_avg) / mid) * 10000 if mid > 0 else 0.0
+            return spread_bps, close_price1, close_price2, close_avg1, close_avg2
+
+        # UI header
+        entry_display = (
+            f"{position.entry_spread_bps:+.2f} bps"
+            if position.entry_spread_bps is not None else "N/A"
+        )
+        print(f"""
+╔══════════════════════════════════════════════════════════
+║ SPREAD GAP CLOSE - Waiting for spread compression...
+╠══════════════════════════════════════════════════════════
+║ Position : {position.id}
+║ Pair     : {position.pair}
+║ Exchanges: {position.exchange1} ({position.exchange1_side}) / {position.exchange2} ({position.exchange2_side})
+╠══════════════════════════════════════════════════════════
+║ Entry spread : {entry_display}
+║ Target spread: {threshold_bps:+.2f} bps
+║ Match tolerance: ±{match_tolerance_bps:.2f} bps
+╠══════════════════════════════════════════════════════════
+║ Strategy: Close when current spread matches target
+║ Monitoring every 0.5 seconds...
+║ Press [q] + Enter to stop
+╚══════════════════════════════════════════════════════════
+""")
+
+        quit_event = asyncio.Event()
+        quit_task  = asyncio.create_task(self._stdin_quit_watcher(quit_event))
+
+        try:
+            while not quit_event.is_set():
+                # timeout check
+                if timeout and (time.time() - start_time) > timeout:
+                    log.warning(f"⏰ Spread Gap close timeout after {timeout}s")
+                    return await self._show_spread_gap_timeout_menu(position, threshold_bps)
+
+                ob1 = await self.exchange1.get_orderbook(position.pair)
+                ob2 = await self.exchange2.get_orderbook(position.pair)
+
+                # Fallback for demo/sandbox modes where orderbook depth may be empty.
+                # Build a synthetic 1-level book from ticker bid/ask so monitoring can proceed.
+                synthetic_qty = max(position.quantity * 1000, 1e6)
+                if not ob1.asks or not ob1.bids:
+                    pd1 = await self.exchange1.get_price_data(position.pair)
+                    ask1 = pd1.ask if pd1.ask > 0 else pd1.bid
+                    bid1 = pd1.bid if pd1.bid > 0 else pd1.ask
+                    ob1.asks = [(ask1, synthetic_qty)]
+                    ob1.bids = [(bid1, synthetic_qty)]
+                if not ob2.asks or not ob2.bids:
+                    pd2 = await self.exchange2.get_price_data(position.pair)
+                    ask2 = pd2.ask if pd2.ask > 0 else pd2.bid
+                    bid2 = pd2.bid if pd2.bid > 0 else pd2.ask
+                    ob2.asks = [(ask2, synthetic_qty)]
+                    ob2.bids = [(bid2, synthetic_qty)]
+
+                try:
+                    spread_bps, agg_price1, agg_price2, avg_price1, avg_price2 = _compute_metrics(ob1, ob2)
+                except RuntimeError as e:
+                    log.warning(str(e))
+                    await asyncio.sleep(CHECK_INTERVAL)
+                    continue
+
+                # PnL: based on aggressive close prices vs entry
+                from ..utils.calculations import calculate_unrealized_pnl
+                side1 = PositionSide.SHORT if position.exchange1_side == "SHORT" else PositionSide.LONG
+                try:
+                    pnl_usd = calculate_unrealized_pnl(
+                        entry_price_ex1=position.exchange1_entry_price,
+                        entry_price_ex2=position.exchange2_entry_price,
+                        close_price_ex1=avg_price1,
+                        close_price_ex2=avg_price2,
+                        quantity=position.quantity,
+                        side1=side1,
+                    )
+                except Exception:
+                    from ..utils.calculations import calculate_unrealized_pnl_from_orderbooks
+                    pnl_usd = calculate_unrealized_pnl_from_orderbooks(position, ob1, ob2)
+
+                pnl_pct = (pnl_usd / position.initial_capital) * 100 if position.initial_capital > 0 else 0
+
+                # periodic log
+                now = time.time()
+                if now - last_log_time >= LOG_INTERVAL:
+                    elapsed = int(now - start_time)
+                    distance_bps = spread_bps - threshold_bps
+                    spread_status = "✅" if abs(distance_bps) <= match_tolerance_bps else "⏳"
+                    print(
+                        f"⏱️  [{elapsed}s] Spread: {spread_bps:+.2f} bps "
+                        f"(target: {threshold_bps:+.2f}, Δ={distance_bps:+.2f}) {spread_status} | "
+                        f"PnL: ${pnl_usd:+.2f} ({pnl_pct:+.2f}%)"
+                    )
+                    last_log_time = now
+
+                    if progress_callback:
+                        await progress_callback({
+                            'elapsed': elapsed,
+                            'current_spread_bps': spread_bps,
+                            'threshold_bps': threshold_bps,
+                            'distance_bps': distance_bps,
+                            'pnl_usd': pnl_usd,
+                            'pnl_pct': pnl_pct,
+                        })
+
+                # close condition (direction-aware threshold crossing)
+                if self._is_spread_gap_triggered(
+                    current_spread_bps=spread_bps,
+                    threshold_bps=threshold_bps,
+                    entry_spread_bps=position.entry_spread_bps,
+                    tolerance_bps=match_tolerance_bps,
+                ):
+                    elapsed = int(time.time() - start_time)
+                    log.success(
+                        f"✅ Spread target matched after {elapsed}s! "
+                        f"spread={spread_bps:.2f} bps, target={threshold_bps:.2f} bps "
+                        f"(tol=±{match_tolerance_bps:.2f})"
+                    )
+
+                    position.unrealized_pnl = pnl_usd
+
+                    await self._close_with_limit_orders(position, ob1, ob2)
+
+                    print(f"""
+╔══════════════════════════════════════════════════════════
+║ ✅ POSITION CLOSED - SPREAD GAP
+╠══════════════════════════════════════════════════════════
+║ Position  : {position.id}
+║ Final spread: {spread_bps:+.2f} bps
+║ Target     : {threshold_bps:+.2f} bps (tol ±{match_tolerance_bps:.2f})
+║ PnL       : ${pnl_usd:+.2f} ({pnl_pct:+.2f}%)
+║ Time waited: {elapsed}s
+║ Close prices:
+║   {position.exchange1}: {agg_price1:.6f}
+║   {position.exchange2}: {agg_price2:.6f}
+╚══════════════════════════════════════════════════════════
+""")
+                    return True
+
+                await asyncio.sleep(CHECK_INTERVAL)
+
+        except KeyboardInterrupt:
+            log.info("🛑 Spread Gap close interrupted")
+            return await self._show_spread_gap_timeout_menu(position, threshold_bps)
+        finally:
+            quit_task.cancel()
+
+        log.info("🛑 Spread Gap close stopped by user (q)")
+        return await self._show_spread_gap_timeout_menu(position, threshold_bps)
+
+    async def _show_spread_gap_timeout_menu(
+        self,
+        position: Position,
+        threshold_bps: float,
+    ) -> bool:
+        """Menu shown after user stops / timeout of Spread Gap close."""
+        ob1 = await self.exchange1.get_orderbook(position.pair)
+        ob2 = await self.exchange2.get_orderbook(position.pair)
+
+        from ..utils.calculations import calculate_unrealized_pnl_from_orderbooks
+        pnl_usd = calculate_unrealized_pnl_from_orderbooks(position, ob1, ob2)
+        pnl_pct = (pnl_usd / position.initial_capital) * 100 if position.initial_capital > 0 else 0
+
+        print(f"""
+╔══════════════════════════════════════════════════════════
+║ SPREAD GAP CLOSE - Interrupted
+╠══════════════════════════════════════════════════════════
+║ Position : {position.id}
+║ Current PnL: ${pnl_usd:+.2f} ({pnl_pct:+.2f}%)
+║ Gap threshold was: {threshold_bps:+.2f} bps
+╠══════════════════════════════════════════════════════════
+║ Options:
+║ 1. Continue Spread Gap monitoring (same threshold)
+║ 2. Change threshold and continue
+║ 3. Force close (MARKET orders) ⚠️
+║ 4. Cancel (keep position open)
+╚══════════════════════════════════════════════════════════
+Select [1-4]: """, end='')
+
+        choice = input().strip()
+
+        if choice == '1':
+            return await self.close_spread_gap(position, threshold_bps)
+        elif choice == '2':
+            try:
+                new_thr = float(input("Enter new threshold (bps): ").strip())
+            except ValueError:
+                print("Invalid input, keeping original threshold.")
+                new_thr = threshold_bps
+            return await self.close_spread_gap(position, new_thr)
+        elif choice == '3':
+            print("\n⚠️  WARNING: Market close will cause slippage!")
+            if input("Are you sure? [y/N]: ").strip().lower() == 'y':
+                return await self.close_market(position)
+            return await self._show_spread_gap_timeout_menu(position, threshold_bps)
+        elif choice == '4':
+            log.info(f"Position {position.id} remains OPEN")
+            return False
+        else:
+            print("Invalid choice, try again...")
+            return await self._show_spread_gap_timeout_menu(position, threshold_bps)

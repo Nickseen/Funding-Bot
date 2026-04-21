@@ -119,9 +119,10 @@ class Position:
     # Execution mode (with defaults)
     execution_mode: str = "hit_the_bid"  # "hit_the_bid", "stable_spread"
     
-    # Stable Spread Mode (only if execution_mode = "stable_spread")
+    # Stable Spread / Positive Spread Mode
     entry_spread_abs: Optional[float] = None  # Absolute spread at entry (e.g., 0.12 for 1.00 vs 1.12)
-    entry_spread_bps: Optional[float] = None  # Spread in basis points at entry
+    entry_spread_bps: Optional[float] = None  # Actual spread in bps at entry
+    entry_spread_target_bps: Optional[float] = None  # User-defined target spread threshold (positive_spread mode)
     
     # Status
     status: str = "OPEN"  # OPEN, CLOSING, CLOSED
