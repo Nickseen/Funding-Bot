@@ -522,15 +522,56 @@ class BybitExchange(BaseExchange):
         try:
             await self._sync_time_with_safety_margin()
             ccxt_symbol = self._convert_symbol(symbol)
+
+            def _symbol_key(raw: str) -> str:
+                if not raw:
+                    return ""
+                key = str(raw).upper()
+                for token in ("/", ":", "-", " "):
+                    key = key.replace(token, "")
+                return key
+
+            requested_key = _symbol_key(symbol)
+
             positions = await self._with_timestamp_retry(
                 lambda: self.client.fetch_positions([ccxt_symbol]),
                 retries=3,
             )
             position = next(
-                (p for p in positions if float(p.get('contracts', 0) or 0) != 0),
+                (
+                    p
+                    for p in positions
+                    if float(p.get('contracts', 0) or 0) != 0
+                    and (
+                        _symbol_key(p.get('symbol', '')) == requested_key
+                        or _symbol_key(p.get('symbol', '')).startswith(requested_key)
+                        or requested_key.startswith(_symbol_key(p.get('symbol', '')))
+                    )
+                ),
                 None
             )
-            return position
+
+            if position:
+                return position
+
+            # Fallback: immediately after fill symbol-filtered request can return empty.
+            all_positions = await self._with_timestamp_retry(
+                lambda: self.client.fetch_positions(),
+                retries=2,
+            )
+            return next(
+                (
+                    p
+                    for p in all_positions
+                    if float(p.get('contracts', 0) or 0) != 0
+                    and (
+                        _symbol_key(p.get('symbol', '')) == requested_key
+                        or _symbol_key(p.get('symbol', '')).startswith(requested_key)
+                        or requested_key.startswith(_symbol_key(p.get('symbol', '')))
+                    )
+                ),
+                None,
+            )
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
     
