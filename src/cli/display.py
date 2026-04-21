@@ -200,6 +200,9 @@ def render_execution_mode_menu() -> str:
         _create_line(""),
         _create_line("3. Market Order (Instant execution, taker fees)"),
         _create_line("   └─ Guaranteed fill, higher fees, emergency only"),
+        _create_line(""),
+        _create_line("4. Positive Spread (Open when spread reaches your target)"),
+        _create_line("   └─ Aggressive prices, set target bps, pair with Spread Gap close"),
         _create_footer(),
     ]
     
@@ -562,8 +565,10 @@ def render_close_mode_menu(
         _create_line("2. Stable Spread (Wait until spread matches entry)"),
         _create_line("3. Smart PnL (Close when PnL>=0 + instant fill) *"),
         _create_line("4. Market order (Instant)"),
-        _create_line("5. Free Fees (PnL covers all maker fees + instant fill)"),
-        _create_line("6. Cancel"),
+        _create_line("5. Free Fees (PnL covers all taker fees + instant fill)"),
+        _create_line("6. Spread Gap (Close when spread compresses to target bps)"),
+        _create_line("   └─ Set your exit gap threshold; pairs with Positive Spread open"),
+        _create_line("7. Cancel"),
         _create_footer(),
     ])
     

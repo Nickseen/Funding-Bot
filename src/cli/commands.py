@@ -205,6 +205,11 @@ class OpenPositionCommand:
         except Exception as e:
             print(render_warning(f"Could not fetch {short_exchange_name} symbol limits: {e}"))
 
+        # Some adapters/exchange metadata may miss min_notional even when exchange enforces it.
+        # Add conservative fallback so pre-open guardrails never underestimate minimum order value.
+        self._apply_min_notional_fallback(symbol_info_long, long_exchange_name)
+        self._apply_min_notional_fallback(symbol_info_short, short_exchange_name)
+
         if balance_long and balance_short:
             print(render_position_size_info(
                 balance_ex1=balance_long.available,
@@ -334,8 +339,8 @@ class OpenPositionCommand:
         print(render_execution_mode_menu())
         
         mode_choice = await get_menu_choice(
-            "Select mode [1-3]: ",
-            valid_choices=["1", "2", "3"]
+            "Select mode [1-4]: ",
+            valid_choices=["1", "2", "3", "4"]
         )
         if mode_choice is None:
             return False
@@ -343,9 +348,24 @@ class OpenPositionCommand:
         execution_modes = {
             "1": "hit_the_bid",
             "2": "stable_spread",
-            "3": "market"
+            "3": "market",
+            "4": "positive_spread",
         }
         execution_mode = execution_modes[mode_choice]
+
+        # For Positive Spread ask for target bps
+        target_spread_bps: Optional[float] = None
+        if execution_mode == "positive_spread":
+            print(render_info("Enter the minimum spread (in bps) you want to enter at."))
+            print(render_info("Bot will monitor aggressive prices and open when spread >= target."))
+            target_spread_bps = await get_float_input(
+                "Target spread threshold (bps, e.g. 50): ",
+                min_val=0.1,
+                max_val=10000.0,
+            )
+            if target_spread_bps is None:
+                print(render_info("Position opening cancelled"))
+                return False
         
         # Step 5: Confirmation
         print(render_position_confirmation(
@@ -377,6 +397,7 @@ class OpenPositionCommand:
             funding_rate_bps=net_funding_bps,
             funding_bps_ex1=funding_long.rate_bps,
             funding_bps_ex2=funding_short.rate_bps,
+            target_spread_bps=target_spread_bps,
         )
     
     async def _execute_open(
@@ -390,6 +411,7 @@ class OpenPositionCommand:
         funding_rate_bps: float,
         funding_bps_ex1: float = 0.0,
         funding_bps_ex2: float = 0.0,
+        target_spread_bps: Optional[float] = None,
     ) -> bool:
         """
         Execute the actual position opening using ExecutionEngine.
@@ -451,6 +473,18 @@ class OpenPositionCommand:
                     quantity=quantity,
                     leverage=leverage,
                     funding_rate_bps=funding_rate_bps
+                )
+            
+            elif execution_mode == "positive_spread":
+                if target_spread_bps is None:
+                    raise ValueError("target_spread_bps is required for positive_spread mode")
+                result = await engine.positive_spread(
+                    symbol=symbol,
+                    side1=PositionSide.LONG,
+                    quantity=quantity,
+                    leverage=leverage,
+                    funding_rate_bps=funding_rate_bps,
+                    target_spread_bps=target_spread_bps,
                 )
             
             if result:
@@ -665,6 +699,24 @@ class OpenPositionCommand:
         if value == float("inf"):
             return "unlimited"
         return f"${value:,.2f}"
+
+    def _apply_min_notional_fallback(self, symbol_info: Dict[str, Any], exchange_name: str) -> None:
+        """Ensure min_notional exists when exchange has known hard floor notional."""
+        try:
+            current = float(symbol_info.get("min_notional", 0) or 0)
+        except (TypeError, ValueError):
+            current = 0.0
+
+        if current > 0:
+            return
+
+        # Conservative known fallback values (quote currency, typically USDT).
+        fallback_by_exchange = {
+            "bitget": 5.0,
+        }
+        fallback = fallback_by_exchange.get((exchange_name or "").strip().lower())
+        if fallback:
+            symbol_info["min_notional"] = fallback
 
     @staticmethod
     def _box_line(text: str) -> str:
@@ -990,15 +1042,15 @@ class ClosePositionCommand:
         # Show close mode menu
         print(render_close_mode_menu(position, current_spread_bps, pnl, pnl_pct))
         
-        # 6 options
-        valid_choices = ["1", "2", "3", "4", "5", "6"]
+        # 7 options (6 close modes + cancel)
+        valid_choices = ["1", "2", "3", "4", "5", "6", "7"]
         
         mode_choice = await get_menu_choice(
-            "Select mode [1-6]: ",
+            "Select mode [1-7]: ",
             valid_choices
         )
         
-        if mode_choice is None or mode_choice == "6":
+        if mode_choice is None or mode_choice == "7":
             return False
         
         # Create PositionCloser
@@ -1034,6 +1086,24 @@ class ClosePositionCommand:
                 # Free Fees close
                 close_method = "Free Fees"
                 success = await closer.close_free_fees(position)
+            
+            elif mode_choice == "6":
+                # Spread Gap close — ask user for threshold
+                print(render_info("Enter the spread gap threshold (bps) to close at."))
+                print(render_info("Bot closes when current spread matches this target (with small tolerance)."))
+                print(render_info("Example: entry 170 bps, threshold 20 bps → captures ~150 bps."))
+                from .input_handler import get_float_input as _get_float
+                threshold_bps = await _get_float(
+                    "Gap threshold (bps, e.g. 20): ",
+                    min_val=-500.0,
+                    max_val=10000.0,
+                )
+                if threshold_bps is None:
+                    print(render_info("Position close cancelled"))
+                    await wait_for_keypress()
+                    return False
+                close_method = "Spread Gap"
+                success = await closer.close_spread_gap(position, threshold_bps)
             
             if success:
                 # Show close summary
