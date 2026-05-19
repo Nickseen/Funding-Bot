@@ -1976,3 +1976,21 @@ async def get_income_history(
     - В `CliApp` добавлен best-effort refresh текущих цен и `unrealized_pnl` перед вычислением агрегированной строки `Total PnL`.
     - Файлы: `src/cli/input_handler.py`, `src/cli/menus.py`, `src/cli/app.py`
     - Тесты: `tests/unit/test_cli.py`.
+
+### 2026-04-24
+- **feat(cli)**: Open Positions table now includes spread columns + live row updates
+    - В списке открытых позиций добавлены колонки `EntSpr` (entry spread) и `CurSpr` (current spread).
+    - Добавлены helper-рендеры для строк таблицы: единый формат строки, расчёт текущего спреда и компактный формат возраста.
+    - Экран `OPEN POSITIONS` теперь обновляет только строки позиций в фоне (P&L / CurSpr / Age), без полной перерисовки меню.
+    - Файлы: `src/cli/display.py`, `src/cli/commands.py`.
+
+- **fix(cli)**: removed dynamic refresh visual artifacts and log spam during open-positions monitoring
+    - Фоновый refresh в `View Open Positions` больше не вызывает persistence на каждом тике (`state.update_position` отключён для фонового режима), поэтому исчезли постоянные `save_single_position` логи в середине меню.
+    - In-place обновления в Main Menu и Open Positions переведены на очистку целевой строки перед перезаписью (`\033[2K`), чтобы не затирать соседние пункты и не оставлять артефакты.
+    - Файлы: `src/cli/commands.py`, `src/cli/menus.py`.
+
+- **fix(spread-gap-close)**: corrected spread sign/magnitude to use actual close-side prices
+    - В `close_spread_gap` расчёт spread переведён на close-side aggressive averages (`short_close_avg - long_close_avg`), вместо open-side ориентации.
+    - Это устраняет ложный знак (например, `-19 bps` при фактически положительном close spread) и согласует `Final spread` с реальными ценами закрытия.
+    - Файл: `src/core/position_closer.py`.
+    - Тесты: `tests/unit/test_spread_gap_logic.py`, `tests/unit/test_smart_pnl_close.py`, `tests/unit/test_cli.py`.

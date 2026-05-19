@@ -402,6 +402,59 @@ def render_position_confirmation(
 # VIEW POSITIONS
 # ============================================
 
+def _calculate_current_spread_bps(position: Position) -> Optional[float]:
+    """Calculate signed current spread as short_price - long_price in bps."""
+    if position.exchange1_current_price <= 0 or position.exchange2_current_price <= 0:
+        return None
+
+    if position.exchange1_side == "LONG":
+        long_price = position.exchange1_current_price
+        short_price = position.exchange2_current_price
+    else:
+        long_price = position.exchange2_current_price
+        short_price = position.exchange1_current_price
+
+    mid = (long_price + short_price) / 2
+    if mid <= 0:
+        return None
+
+    return ((short_price - long_price) / mid) * 10000
+
+
+def _format_list_age(age_hours: float) -> str:
+    """Compact age formatter for table rows."""
+    if age_hours < 24:
+        return f"{age_hours:.0f}h"
+    days = int(age_hours / 24)
+    hours = int(age_hours % 24)
+    return f"{days}d{hours}h"
+
+
+def render_positions_list_row(index: int, position: Position) -> str:
+    """Render a single open-position table row."""
+    ex1_icon = "🔴" if position.exchange1_side == "SHORT" else "🟢"
+
+    pnl = position.total_pnl
+    pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+
+    entry_spread_bps = position.entry_spread_bps
+    if entry_spread_bps is None:
+        entry_spread_bps = position.entry_spread
+    entry_spread_str = f"{entry_spread_bps:+.1f}" if entry_spread_bps is not None else "N/A"
+
+    current_spread_bps = _calculate_current_spread_bps(position)
+    current_spread_str = f"{current_spread_bps:+.1f}" if current_spread_bps is not None else "N/A"
+
+    age_str = _format_list_age(position.age_hours)
+
+    mid_price = (position.exchange1_entry_price + position.exchange2_entry_price) / 2
+    size_usd = position.quantity * mid_price
+
+    return (
+        f" {index}. {ex1_icon}{position.pair[:8]:<8} ${size_usd:>6,.0f}"
+        f" {pnl_str:>8} {entry_spread_str:>7} {current_spread_str:>7} {age_str:>5}"
+    )
+
 def render_positions_list(positions: List[Position]) -> str:
     """
     Render list of open positions
@@ -423,35 +476,11 @@ def render_positions_list(positions: List[Position]) -> str:
         _create_header(),
         _create_line("OPEN POSITIONS"),
         _create_separator(),
-        _create_line(" #  Pair       Size      P&L       Funding   Age"),
+        _create_line(" #  Pair      Size      P&L    EntSpr  CurSpr   Age"),
     ]
     
     for i, pos in enumerate(positions, 1):
-        # Format side indicators
-        ex1_icon = "🔴" if pos.exchange1_side == "SHORT" else "🟢"
-        ex2_icon = "🔴" if pos.exchange2_side == "SHORT" else "🟢"
-        
-        # Calculate total PnL
-        pnl = pos.total_pnl
-        pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-        
-        # Format funding
-        funding_str = f"+${pos.funding_received:.2f}"
-        
-        # Format age
-        age_hours = pos.age_hours
-        if age_hours < 24:
-            age_str = f"{age_hours:.0f}h"
-        else:
-            days = int(age_hours / 24)
-            hours = int(age_hours % 24)
-            age_str = f"{days}d {hours}h"
-        
-        # Position size (quantity * mid price approx)
-        mid_price = (pos.exchange1_entry_price + pos.exchange2_entry_price) / 2
-        size_usd = pos.quantity * mid_price
-        
-        line = f" {i}. {ex1_icon}{pos.pair[:8]:<8} ${size_usd:>7,.0f}  {pnl_str:>8}  {funding_str:>8}  {age_str}"
+        line = render_positions_list_row(i, pos)
         lines.append(_create_line(line[:MENU_WIDTH-4], has_emoji=True))
     
     lines.extend([

@@ -1218,17 +1218,10 @@ Select [1-4]: """, end='')
         def _compute_metrics(ob1: OrderBook, ob2: OrderBook) -> tuple:
             """Returns (spread_bps, close_price1, close_price2, close_avg1, close_avg2)."""
             try:
-                # Spread monitoring uses the same orientation as opening:
-                # spread = short_price - long_price
+                # Spread monitoring for CLOSE mode must use actual close-side prices:
+                # spread = short_close_avg - long_close_avg
                 if position.exchange1_side == "LONG":
                     # Long leg is exchange1, short leg is exchange2
-                    _long_agg, long_avg = calculate_aggressive_fill_price(
-                        ob1.asks, position.quantity, "BUY"
-                    )
-                    _short_agg, short_avg = calculate_aggressive_fill_price(
-                        ob2.bids, position.quantity, "SELL"
-                    )
-
                     # Close execution prices (reverse of open sides)
                     close_price1, close_avg1 = calculate_aggressive_fill_price(
                         ob1.bids, position.quantity, "SELL"
@@ -1236,15 +1229,11 @@ Select [1-4]: """, end='')
                     close_price2, close_avg2 = calculate_aggressive_fill_price(
                         ob2.asks, position.quantity, "BUY"
                     )
+
+                    long_close_avg = close_avg1
+                    short_close_avg = close_avg2
                 else:
                     # Long leg is exchange2, short leg is exchange1
-                    _short_agg, short_avg = calculate_aggressive_fill_price(
-                        ob1.bids, position.quantity, "SELL"
-                    )
-                    _long_agg, long_avg = calculate_aggressive_fill_price(
-                        ob2.asks, position.quantity, "BUY"
-                    )
-
                     # Close execution prices (reverse of open sides)
                     close_price1, close_avg1 = calculate_aggressive_fill_price(
                         ob1.asks, position.quantity, "BUY"
@@ -1252,11 +1241,14 @@ Select [1-4]: """, end='')
                     close_price2, close_avg2 = calculate_aggressive_fill_price(
                         ob2.bids, position.quantity, "SELL"
                     )
+
+                    short_close_avg = close_avg1
+                    long_close_avg = close_avg2
             except Exception as e:
                 raise RuntimeError(f"Aggressive price failed: {e}")
 
-            mid = (short_avg + long_avg) / 2
-            spread_bps = ((short_avg - long_avg) / mid) * 10000 if mid > 0 else 0.0
+            mid = (short_close_avg + long_close_avg) / 2
+            spread_bps = ((short_close_avg - long_close_avg) / mid) * 10000 if mid > 0 else 0.0
             return spread_bps, close_price1, close_price2, close_avg1, close_avg2
 
         # UI header

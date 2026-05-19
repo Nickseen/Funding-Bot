@@ -74,38 +74,66 @@ class MainMenu:
             "6": MenuAction.EXIT,
         }
 
-        while True:
-            clear_screen()
-
-            # Get current stats if callback provided
-            stats = {
+        def _default_stats() -> Dict[str, Any]:
+            return {
                 'active_positions': 0,
                 'total_pnl': 0.0,
                 'pending_funding': 0.0,
                 'next_funding': 'N/A'
             }
 
+        async def _fetch_stats() -> Dict[str, Any]:
+            stats = _default_stats()
             if self.get_stats:
                 try:
                     stats = await self.get_stats()
                 except Exception:
-                    pass  # Use default stats on error
+                    pass
+            return stats
 
-            print(render_main_menu(
+        def _render_menu(stats: Dict[str, Any]) -> str:
+            return render_main_menu(
                 active_positions_count=stats.get('active_positions', 0),
                 total_pnl_usd=stats.get('total_pnl_usd', 0.0),
                 total_pnl_pct=stats.get('total_pnl_pct', 0.0),
                 pending_funding=stats.get('pending_funding', 0.0),
                 next_funding_str=stats.get('next_funding', 'N/A')
-            ))
+            )
 
-            # Wait for user choice, but refresh menu stats if timeout expires.
+        # Initial full render.
+        current_stats = await _fetch_stats()
+        menu_text = _render_menu(current_stats)
+        menu_lines = menu_text.splitlines()
+        status_line_index = 2  # "Open positions ... | Total PnL ..."
+        status_line = menu_lines[status_line_index] if len(menu_lines) > status_line_index else ""
+
+        clear_screen()
+        print(menu_text)
+        print("Select [1-6]: ", end="", flush=True)
+
+        # Cursor distance from prompt line to status line in menu block.
+        lines_up_to_status = len(menu_lines) - status_line_index
+
+        while True:
             choice = await async_input_timeout(
-                "Select [1-6]: ",
+                "",
                 timeout_seconds=self.refresh_interval_seconds,
             )
 
             if choice is None:
+                new_stats = await _fetch_stats()
+                new_menu_text = _render_menu(new_stats)
+                new_menu_lines = new_menu_text.splitlines()
+                new_status_line = new_menu_lines[status_line_index] if len(new_menu_lines) > status_line_index else ""
+
+                # Update only status line when its content changed.
+                if new_status_line != status_line:
+                    print(f"\033[{lines_up_to_status}A", end="")
+                    print("\r\033[2K", end="")
+                    print(new_status_line, end="")
+                    print(f"\033[{lines_up_to_status}B", end="")
+                    print("\r", end="", flush=True)
+                    status_line = new_status_line
                 continue
 
             if choice.lower() in ['q', 'quit', 'exit']:
