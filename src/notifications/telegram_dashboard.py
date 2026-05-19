@@ -17,8 +17,11 @@ import aiohttp
 
 from src.core.state import AppState
 from src.exchanges.base import BaseExchange
+from src.exchanges.enums import PositionSide
 from src.exchanges.types import Position
-from src.cli.display import render_main_menu
+from src.core.execution_engine import ExecutionEngine
+from src.core.position_closer import PositionCloser
+from src.cli.display import render_main_menu, render_pair_info
 from src.utils.logger import log
 from config.config import config
 
@@ -172,6 +175,18 @@ class TelegramDashboard:
             return
 
         command = text.split()[0].split("@")[0].lower()
+
+        if command == "/cancel":
+            if chat_id in self._chat_flows:
+                self._chat_flows.pop(chat_id, None)
+                await self._safe_send_text(chat_id, "Current action cancelled.")
+            else:
+                await self._safe_send_text(chat_id, "No active action.")
+            return
+
+        if chat_id in self._chat_flows:
+            await self._handle_flow_input(chat_id, text)
+            return
 
         # CLI-like numeric shortcuts from dashboard menu.
         if command in {"1", "2", "3", "4", "5", "6"}:
