@@ -8,6 +8,7 @@ Features:
 """
 
 import asyncio
+import builtins
 import html
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -21,6 +22,13 @@ from src.exchanges.enums import PositionSide
 from src.exchanges.types import Position
 from src.core.execution_engine import ExecutionEngine
 from src.core.position_closer import PositionCloser
+from src.cli.commands import (
+    ClosePositionCommand,
+    ManageFundingMonitoringCommand,
+    OpenPositionCommand,
+    ViewBalancesCommand,
+    ViewPositionsCommand,
+)
 from src.cli.display import render_main_menu, render_pair_info
 from src.utils.logger import log
 from config.config import config
@@ -64,6 +72,7 @@ class TelegramDashboard:
         update_interval_seconds: int = 5,
         polling_timeout_seconds: int = 30,
         allowed_chat_ids: Optional[Set[int]] = None,
+        funding_tracker: Optional[Any] = None,
     ):
         self.token = token
         self.state = state
@@ -71,6 +80,7 @@ class TelegramDashboard:
         self.update_interval_seconds = max(update_interval_seconds, 3)
         self.polling_timeout_seconds = max(polling_timeout_seconds, 10)
         self.allowed_chat_ids = allowed_chat_ids or set()
+        self.funding_tracker = funding_tracker
 
         self._session: Optional[aiohttp.ClientSession] = None
         self._running = False
@@ -84,6 +94,10 @@ class TelegramDashboard:
         self._last_rendered_text: Dict[int, str] = {}
         # chat_id -> active wizard state
         self._chat_flows: Dict[int, ChatFlowState] = {}
+        # chat_id -> running CLI-like command task
+        self._chat_command_tasks: Dict[int, asyncio.Task] = {}
+        # chat_id -> input queue used by patched CLI input handlers
+        self._chat_input_queues: Dict[int, asyncio.Queue[str]] = {}
 
     @property
     def _base_url(self) -> str:
@@ -177,11 +191,24 @@ class TelegramDashboard:
         command = text.split()[0].split("@")[0].lower()
 
         if command == "/cancel":
+            task = self._chat_command_tasks.get(chat_id)
+            queue = self._chat_input_queues.get(chat_id)
+            if task and not task.done() and queue:
+                await queue.put("q")
+                await self._safe_send_text(chat_id, "Cancel requested...")
+                return
             if chat_id in self._chat_flows:
                 self._chat_flows.pop(chat_id, None)
                 await self._safe_send_text(chat_id, "Current action cancelled.")
             else:
                 await self._safe_send_text(chat_id, "No active action.")
+            return
+
+        command_task = self._chat_command_tasks.get(chat_id)
+        if command_task and not command_task.done():
+            queue = self._chat_input_queues.get(chat_id)
+            if queue:
+                await queue.put(text)
             return
 
         if chat_id in self._chat_flows:
@@ -230,21 +257,26 @@ class TelegramDashboard:
     async def _handle_menu_number(self, chat_id: int, command: str) -> None:
         """Handle numeric menu input to mirror CLI menu semantics."""
         if command == "1":
-            await self._start_open_flow(chat_id)
+            await self._start_cli_command(chat_id, "open")
             return
 
         if command == "2":
-            payload = await self._render_positions_message()
-            await self._safe_send_pre(chat_id, payload)
+            await self._start_cli_command(chat_id, "view_positions")
             return
 
         if command == "3":
-            await self._start_close_flow(chat_id)
+            await self._start_cli_command(chat_id, "close")
+            return
+
+        if command == "4":
+            if not self.funding_tracker:
+                await self._safe_send_text(chat_id, "Funding tracker is not available.")
+                return
+            await self._start_cli_command(chat_id, "manage_funding")
             return
 
         if command == "5":
-            payload = await self._render_balances_message()
-            await self._safe_send_pre(chat_id, payload)
+            await self._start_cli_command(chat_id, "balances")
             return
 
         if command == "6":
@@ -253,13 +285,158 @@ class TelegramDashboard:
             await self._safe_send_text(chat_id, "Exit selected. Dashboard auto-updates disabled for this chat.")
             return
 
-        if command == "4":
+    async def _start_cli_command(self, chat_id: int, command_name: str) -> None:
+        """Start a CLI command execution backed by Telegram I/O."""
+        active = self._chat_command_tasks.get(chat_id)
+        if active and not active.done():
             await self._safe_send_text(
                 chat_id,
-                "Menu 4 in Telegram is read-only for now. "
-                "Use CLI for funding-monitoring management, or /positions to inspect state.",
+                "Another action is in progress. Complete it or send /cancel first.",
             )
             return
+
+        input_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._chat_input_queues[chat_id] = input_queue
+        task = asyncio.create_task(self._run_cli_command(chat_id, command_name, input_queue))
+        self._chat_command_tasks[chat_id] = task
+
+    async def _run_cli_command(
+        self,
+        chat_id: int,
+        command_name: str,
+        input_queue: asyncio.Queue[str],
+    ) -> None:
+        """Execute selected CLI command with patched input/output transport."""
+        from src.cli import input_handler as cli_input_handler
+        from src.cli import commands as cli_commands_module
+
+        output_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+
+        async def output_sender() -> None:
+            while True:
+                item = await output_queue.get()
+                if item is None:
+                    break
+                text = item.strip()
+                if not text:
+                    continue
+                await self._safe_send_pre(chat_id, self._truncate(text))
+                await asyncio.sleep(0.12)
+
+        sender_task = asyncio.create_task(output_sender())
+        print_buffer = {"value": ""}
+
+        def patched_print(*args, **kwargs) -> None:
+            sep = kwargs.get("sep", " ")
+            end = kwargs.get("end", "\n")
+            if end is None:
+                end = ""
+
+            text = sep.join(str(a) for a in args)
+            chunk = f"{text}{end}".replace("\033[2J\033[H", "")
+            print_buffer["value"] += chunk
+
+            while "\n" in print_buffer["value"]:
+                line, tail = print_buffer["value"].split("\n", 1)
+                print_buffer["value"] = tail
+                if line.strip():
+                    output_queue.put_nowait(line)
+
+        async def patched_async_input(prompt: str = "") -> str:
+            if prompt:
+                await output_queue.put(prompt)
+            user_input = await input_queue.get()
+            return user_input.strip()
+
+        async def patched_async_input_timeout(
+            prompt: str = "",
+            timeout_seconds: float = 1.0,
+        ) -> Optional[str]:
+            # Telegram cannot mimic fast in-place terminal redraw safely.
+            # Use blocking wait to avoid update spam/rate-limit issues.
+            _ = timeout_seconds
+            if prompt:
+                await output_queue.put(prompt)
+            user_input = await input_queue.get()
+            return user_input.strip()
+
+        def patched_clear_screen() -> None:
+            return
+
+        # Save originals
+        original_print = builtins.print
+        original_async_input = cli_input_handler.async_input
+        original_async_input_timeout = cli_input_handler.async_input_timeout
+        original_commands_async_input = cli_commands_module.async_input
+        original_commands_async_input_timeout = cli_commands_module.async_input_timeout
+        original_commands_clear_screen = cli_commands_module.clear_screen
+
+        # Patch
+        builtins.print = patched_print
+        cli_input_handler.async_input = patched_async_input
+        cli_input_handler.async_input_timeout = patched_async_input_timeout
+        cli_commands_module.async_input = patched_async_input
+        cli_commands_module.async_input_timeout = patched_async_input_timeout
+        cli_commands_module.clear_screen = patched_clear_screen
+
+        try:
+            await self._execute_cli_command_object(command_name)
+            if print_buffer["value"].strip():
+                await output_queue.put(print_buffer["value"])
+        except Exception as e:
+            await output_queue.put(f"Error while executing CLI command: {e}")
+        finally:
+            # Restore
+            builtins.print = original_print
+            cli_input_handler.async_input = original_async_input
+            cli_input_handler.async_input_timeout = original_async_input_timeout
+            cli_commands_module.async_input = original_commands_async_input
+            cli_commands_module.async_input_timeout = original_commands_async_input_timeout
+            cli_commands_module.clear_screen = original_commands_clear_screen
+
+            await output_queue.put(None)
+            try:
+                await sender_task
+            except Exception:
+                pass
+
+            self._chat_command_tasks.pop(chat_id, None)
+            self._chat_input_queues.pop(chat_id, None)
+
+            # Repaint dashboard snapshot after command ends.
+            await self._refresh_dashboard(chat_id, force=True)
+
+    async def _execute_cli_command_object(self, command_name: str) -> None:
+        """Execute one of the existing CLI commands unchanged."""
+        if command_name == "open":
+            command = OpenPositionCommand(exchanges=self.exchanges, state=self.state)
+            await command.execute()
+            return
+
+        if command_name == "close":
+            command = ClosePositionCommand(state=self.state, exchanges=self.exchanges)
+            await command.execute()
+            return
+
+        if command_name == "balances":
+            command = ViewBalancesCommand(state=self.state, exchanges=self.exchanges)
+            await command.execute()
+            return
+
+        if command_name == "view_positions":
+            command = ViewPositionsCommand(state=self.state, exchanges=self.exchanges)
+            await command.execute()
+            return
+
+        if command_name == "manage_funding":
+            command = ManageFundingMonitoringCommand(
+                state=self.state,
+                funding_tracker=self.funding_tracker,
+            )
+            await command.execute()
+            return
+
+        raise ValueError(f"Unsupported command_name: {command_name}")
 
     async def _start_open_flow(self, chat_id: int) -> None:
         """Start interactive open-position wizard."""
