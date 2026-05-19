@@ -311,6 +311,7 @@ class TelegramDashboard:
         from src.cli import commands as cli_commands_module
 
         output_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+        output_buffer = {"value": ""}
 
         async def output_sender() -> None:
             while True:
@@ -324,7 +325,12 @@ class TelegramDashboard:
                 await asyncio.sleep(0.12)
 
         sender_task = asyncio.create_task(output_sender())
-        print_buffer = {"value": ""}
+
+        async def flush_output_buffer() -> None:
+            text = output_buffer["value"].replace("\r", "")
+            output_buffer["value"] = ""
+            if text.strip():
+                await output_queue.put(text)
 
         def patched_print(*args, **kwargs) -> None:
             sep = kwargs.get("sep", " ")
@@ -334,17 +340,12 @@ class TelegramDashboard:
 
             text = sep.join(str(a) for a in args)
             chunk = f"{text}{end}".replace("\033[2J\033[H", "")
-            print_buffer["value"] += chunk
-
-            while "\n" in print_buffer["value"]:
-                line, tail = print_buffer["value"].split("\n", 1)
-                print_buffer["value"] = tail
-                if line.strip():
-                    output_queue.put_nowait(line)
+            output_buffer["value"] += chunk
 
         async def patched_async_input(prompt: str = "") -> str:
             if prompt:
-                await output_queue.put(prompt)
+                output_buffer["value"] += prompt
+            await flush_output_buffer()
             user_input = await input_queue.get()
             return user_input.strip()
 
@@ -356,7 +357,8 @@ class TelegramDashboard:
             # Use blocking wait to avoid update spam/rate-limit issues.
             _ = timeout_seconds
             if prompt:
-                await output_queue.put(prompt)
+                output_buffer["value"] += prompt
+            await flush_output_buffer()
             user_input = await input_queue.get()
             return user_input.strip()
 
@@ -381,9 +383,9 @@ class TelegramDashboard:
 
         try:
             await self._execute_cli_command_object(command_name)
-            if print_buffer["value"].strip():
-                await output_queue.put(print_buffer["value"])
+            await flush_output_buffer()
         except Exception as e:
+            await flush_output_buffer()
             await output_queue.put(f"Error while executing CLI command: {e}")
         finally:
             # Restore
