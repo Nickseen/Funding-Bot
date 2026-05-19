@@ -18,6 +18,7 @@ import aiohttp
 from src.core.state import AppState
 from src.exchanges.base import BaseExchange
 from src.exchanges.types import Position
+from src.cli.display import render_main_menu
 from src.utils.logger import log
 from config.config import config
 
@@ -164,7 +165,8 @@ class TelegramDashboard:
         if command == "/start":
             await self._safe_send_text(
                 chat_id,
-                "Monitoring enabled. Use /status for dashboard, /positions for list, /stop to stop updates.",
+                "Monitoring enabled. CLI-style menu is now shown in dashboard. "
+                "Use /status to refresh, /positions for details, /stop to stop updates.",
             )
             await self._refresh_dashboard(chat_id, force=True)
             return
@@ -236,18 +238,25 @@ class TelegramDashboard:
         await self._refresh_positions_pnl(positions)
         stats = self._calculate_stats(positions)
 
-        mode = "TESTNET" if config.is_testnet() else "MAINNET"
         updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        mode = "TESTNET" if config.is_testnet() else "MAINNET"
+
+        # Reuse CLI renderer so menu options match local terminal exactly.
+        menu_text = render_main_menu(
+            active_positions_count=stats.open_positions,
+            total_pnl_usd=stats.total_pnl_usd,
+            total_pnl_pct=stats.total_pnl_pct,
+            pending_funding=0.0,
+            next_funding_str="N/A",
+        )
 
         lines = [
-            "DELTA NEUTRAL BOT - TELEGRAM DASHBOARD",
-            "=" * 54,
+            menu_text,
+            "",
             f"Mode: {mode}",
-            f"Open positions: {stats.open_positions}",
-            f"Total PnL: ${stats.total_pnl_usd:+.2f} ({stats.total_pnl_pct:+.2f}%)",
             f"Total capital: ${stats.total_capital:.2f}",
             f"Updated: {updated}",
-            "-" * 54,
+            "",
         ]
 
         if positions:
@@ -263,8 +272,8 @@ class TelegramDashboard:
         else:
             lines.append("No open positions")
 
-        lines.append("-" * 54)
-        lines.append("Commands: /status /positions /refresh /stop")
+        lines.append("")
+        lines.append("Select [1-6] in CLI. Telegram commands: /status /positions /refresh /stop")
         return self._truncate("\n".join(lines))
 
     async def _render_positions_message(self) -> str:
