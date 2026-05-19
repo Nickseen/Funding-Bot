@@ -157,8 +157,22 @@ BINGX_SETTLEMENT_ASSET=auto
 ### 4. Run Bot
 
 ```bash
+# Interactive CLI (local terminal)
 python -m src.main
+
+# Telegram dashboard mode (Railway/non-interactive)
+python -m src.main --telegram
 ```
+
+### 5. Railway Secrets (No .env in Git)
+
+- Do **not** push `.env` to GitHub (already ignored by `.gitignore`).
+- In Railway: `Service -> Variables` add all required env values.
+- Minimum for Telegram monitoring:
+  - `TELEGRAM_BOT_TOKEN`
+  - `TELEGRAM_ALLOWED_CHAT_IDS` (recommended, comma-separated chat IDs)
+  - `BOT_MODE=testnet` for initial safe testing
+- Keep state persistence in mind: container filesystem is ephemeral unless you mount a volume.
 
 ---
 

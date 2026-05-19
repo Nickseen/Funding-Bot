@@ -97,6 +97,17 @@ class Config:
     
     # Bot settings
     MAX_POSITIONS: int = int(os.getenv("MAX_POSITIONS", "100"))
+
+    # Telegram dashboard
+    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    # Comma-separated chat ids, e.g. "123456789,-100987654321"
+    TELEGRAM_ALLOWED_CHAT_IDS: str = os.getenv("TELEGRAM_ALLOWED_CHAT_IDS", "")
+    TELEGRAM_UPDATE_INTERVAL_SECONDS: int = int(
+        os.getenv("TELEGRAM_UPDATE_INTERVAL_SECONDS", "5")
+    )
+    TELEGRAM_POLLING_TIMEOUT_SECONDS: int = int(
+        os.getenv("TELEGRAM_POLLING_TIMEOUT_SECONDS", "30")
+    )
     
     # Risk management
     DEFAULT_STOP_LOSS_PERCENT: float = float(os.getenv("DEFAULT_STOP_LOSS_PERCENT", "20"))
@@ -273,8 +284,38 @@ class Config:
             errors.append(
                 f"Invalid BINGX_SETTLEMENT_ASSET: {cls.BINGX_SETTLEMENT_ASSET}"
             )
+
+        if cls.TELEGRAM_UPDATE_INTERVAL_SECONDS < 3:
+            errors.append(
+                "TELEGRAM_UPDATE_INTERVAL_SECONDS must be >= 3 to avoid Telegram rate limits"
+            )
+
+        if cls.TELEGRAM_POLLING_TIMEOUT_SECONDS < 10:
+            errors.append("TELEGRAM_POLLING_TIMEOUT_SECONDS must be >= 10")
         
         return (len(errors) == 0, errors)
+
+    @classmethod
+    def get_telegram_allowed_chat_ids(cls) -> set[int]:
+        """
+        Parse TELEGRAM_ALLOWED_CHAT_IDS env value.
+
+        Format: comma-separated integers, e.g. "12345,-10098765"
+        """
+        raw = (cls.TELEGRAM_ALLOWED_CHAT_IDS or "").strip()
+        if not raw:
+            return set()
+
+        result: set[int] = set()
+        for chunk in raw.split(","):
+            item = chunk.strip()
+            if not item:
+                continue
+            try:
+                result.add(int(item))
+            except ValueError:
+                continue
+        return result
 
 
 # Global config instance
