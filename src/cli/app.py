@@ -193,6 +193,10 @@ class CliApp:
         
         try:
             positions = await self.state.get_open_positions()
+
+            # Refresh unrealized PnL from current prices so main menu shows live total.
+            if positions:
+                await self._refresh_positions_pnl_for_menu(positions)
             
             # Calculate totals
             total_pnl_usd = sum(p.total_pnl for p in positions)
@@ -231,6 +235,43 @@ class CliApp:
         except Exception as e:
             log.error(f"Error getting stats: {e}")
             return {}
+
+    async def _refresh_positions_pnl_for_menu(self, positions) -> None:
+        """Best-effort refresh of current prices/PnL for main menu stats."""
+        for position in positions:
+            ex1 = self.exchanges.get(position.exchange1.lower())
+            ex2 = self.exchanges.get(position.exchange2.lower())
+
+            try:
+                if ex1:
+                    price1 = await ex1.get_price_data(position.pair)
+                    if price1 and price1.mid_price > 0:
+                        position.exchange1_current_price = price1.mid_price
+            except Exception:
+                pass
+
+            try:
+                if ex2:
+                    price2 = await ex2.get_price_data(position.pair)
+                    if price2 and price2.mid_price > 0:
+                        position.exchange2_current_price = price2.mid_price
+            except Exception:
+                pass
+
+            pnl_ex1 = 0.0
+            pnl_ex2 = 0.0
+
+            if position.exchange1_side == "LONG":
+                pnl_ex1 = (position.exchange1_current_price - position.exchange1_entry_price) * position.quantity
+            else:
+                pnl_ex1 = (position.exchange1_entry_price - position.exchange1_current_price) * position.quantity
+
+            if position.exchange2_side == "LONG":
+                pnl_ex2 = (position.exchange2_current_price - position.exchange2_entry_price) * position.quantity
+            else:
+                pnl_ex2 = (position.exchange2_entry_price - position.exchange2_current_price) * position.quantity
+
+            position.unrealized_pnl = pnl_ex1 + pnl_ex2
     
     # ============================================
     # ACTION HANDLERS

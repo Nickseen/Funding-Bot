@@ -1960,3 +1960,37 @@ async def get_income_history(
     - Guardrail переименован: `MAX EQUAL MARGIN (PER LEG)`.
     - Risk check: показывает "Margin per leg" + "Total notional".
     - Файлы: `src/cli/commands.py`, `src/cli/display.py`, `tests/unit/test_open_position_safety_checks.py`
+
+### 2026-04-21
+- **feat(execution,close)**: runtime update of spread targets without leaving monitoring screens (commit `1da47bb`)
+    - В `Positive Spread` добавлена команда `s <bps>` (и пошаговый вариант `s` + ввод числа) для смены `target_spread_bps` прямо в активном мониторинге.
+    - В `Spread Gap Close` добавлена аналогичная команда `s <bps>` для смены `threshold_bps` без выхода в timeout/interrupt меню.
+    - `q + Enter` сохранён как мгновенная остановка мониторинга.
+    - Обновлены подсказки в UI-блоках мониторинга для обеих команд (`q`, `s <bps>`).
+    - Файлы: `src/core/execution_engine.py`, `src/core/position_closer.py`
+    - Тесты: `tests/unit/test_execution_engine_okx_step_parsing.py`, `tests/unit/test_execution_engine_quantity_alignment.py`, `tests/unit/test_spread_gap_logic.py`, `tests/unit/test_smart_pnl_close.py`, `tests/unit/test_emergency_monitor.py`.
+
+- **feat(cli)**: live refresh of Main Menu stats while screen is open
+    - Добавлен неблокирующий ввод с таймаутом (`async_input_timeout`) и helper на `select.select(...)`.
+    - Main Menu теперь обновляет экран по таймеру в idle-состоянии (по умолчанию каждые 2 секунды), поэтому `Open positions` и `Total PnL` меняются без выхода из меню.
+    - В `CliApp` добавлен best-effort refresh текущих цен и `unrealized_pnl` перед вычислением агрегированной строки `Total PnL`.
+    - Файлы: `src/cli/input_handler.py`, `src/cli/menus.py`, `src/cli/app.py`
+    - Тесты: `tests/unit/test_cli.py`.
+
+### 2026-04-24
+- **feat(cli)**: Open Positions table now includes spread columns + live row updates
+    - В списке открытых позиций добавлены колонки `EntSpr` (entry spread) и `CurSpr` (current spread).
+    - Добавлены helper-рендеры для строк таблицы: единый формат строки, расчёт текущего спреда и компактный формат возраста.
+    - Экран `OPEN POSITIONS` теперь обновляет только строки позиций в фоне (P&L / CurSpr / Age), без полной перерисовки меню.
+    - Файлы: `src/cli/display.py`, `src/cli/commands.py`.
+
+- **fix(cli)**: removed dynamic refresh visual artifacts and log spam during open-positions monitoring
+    - Фоновый refresh в `View Open Positions` больше не вызывает persistence на каждом тике (`state.update_position` отключён для фонового режима), поэтому исчезли постоянные `save_single_position` логи в середине меню.
+    - In-place обновления в Main Menu и Open Positions переведены на очистку целевой строки перед перезаписью (`\033[2K`), чтобы не затирать соседние пункты и не оставлять артефакты.
+    - Файлы: `src/cli/commands.py`, `src/cli/menus.py`.
+
+- **fix(spread-gap-close)**: corrected spread sign/magnitude to use actual close-side prices
+    - В `close_spread_gap` расчёт spread переведён на close-side aggressive averages (`short_close_avg - long_close_avg`), вместо open-side ориентации.
+    - Это устраняет ложный знак (например, `-19 bps` при фактически положительном close spread) и согласует `Final spread` с реальными ценами закрытия.
+    - Файл: `src/core/position_closer.py`.
+    - Тесты: `tests/unit/test_spread_gap_logic.py`, `tests/unit/test_smart_pnl_close.py`, `tests/unit/test_cli.py`.

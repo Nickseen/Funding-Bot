@@ -15,6 +15,7 @@ Binance Futures API Reference:
 
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
+import asyncio
 import ccxt.async_support as ccxt
 from loguru import logger as log
 
@@ -96,20 +97,23 @@ class BinanceExchange(BaseExchange):
         3. Check position mode & set One-Way if needed
         """
         try:
-            # 1. Sync time with server
-            server_time = await self.client.fetch_time()
-            local_time = self.client.milliseconds()
-            time_diff = server_time - local_time
-            self.client.options['timeDifference'] = time_diff
+            # 1. Sync time with server (keep client slightly behind exchange time)
+            await self._sync_time_with_safety_margin()
 
-            # 2. Load markets
-            await self.client.load_markets()
+            # 2. Load markets with retry on timestamp drift errors (-1021)
+            await self._with_timestamp_retry(
+                lambda: self.client.load_markets(True),
+                retries=3,
+            )
 
             # 3. Ensure One-Way position mode (dualSidePosition = false)
             try:
-                await self.client.fapiPrivatePostPositionSideDual({
-                    'dualSidePosition': 'false'
-                })
+                await self._with_timestamp_retry(
+                    lambda: self.client.fapiPrivatePostPositionSideDual({
+                        'dualSidePosition': 'false'
+                    }),
+                    retries=2,
+                )
             except Exception as e:
                 # "No need to change position side" (code -4059) is expected
                 err_msg = str(e).lower()
@@ -1163,8 +1167,68 @@ class BinanceExchange(BaseExchange):
 
     async def sync_time(self) -> None:
         """Sync time with Binance server"""
-        # ccxt handles this automatically with adjustForTimeDifference
-        pass
+        await self._sync_time_with_safety_margin()
+
+    async def _sync_time_with_safety_margin(self) -> None:
+        """
+        Sync exchange time and keep local signed timestamp slightly behind.
+
+        Binance may reject signed requests if local clock is just ahead
+        (`-1021`), so we bias the outgoing timestamp backwards.
+        """
+        try:
+            safety_margin_ms = 1500
+
+            # Prefer ccxt native time sync when available.
+            try:
+                if hasattr(self.client, 'load_time_difference'):
+                    await self.client.load_time_difference()
+            except Exception:
+                # Continue with manual sync fallback.
+                pass
+
+            server_time = await self.client.fetch_time()
+            local_time = self.client.milliseconds()
+
+            # For Binance/ccxt signing path, positive timeDifference shifts outgoing
+            # signed timestamps backwards (safer for -1021 "ahead of server" errors).
+            time_diff = (local_time - server_time) + safety_margin_ms
+
+            self.client.options['timeDifference'] = time_diff
+            if hasattr(self.client, 'timeDifference'):
+                self.client.timeDifference = time_diff
+        except Exception:
+            # Non-fatal: keep previous timeDifference if sync fails.
+            return
+
+    def _is_timestamp_error(self, error: Exception) -> bool:
+        """Check whether an exception indicates Binance timestamp drift (-1021)."""
+        if isinstance(error, ccxt.InvalidNonce):
+            return True
+        msg = str(error).lower()
+        return (
+            'code":-1021' in msg
+            or 'timestamp for this request was' in msg
+            or 'outside of the recvwindow' in msg
+        )
+
+    async def _with_timestamp_retry(self, operation, retries: int = 3):
+        """
+        Execute operation with retries when Binance timestamp drift is detected.
+
+        The operation is an async callable without arguments.
+        """
+        last_error = None
+        for _ in range(retries):
+            try:
+                return await operation()
+            except Exception as e:
+                if not self._is_timestamp_error(e):
+                    raise
+                last_error = e
+                await self._sync_time_with_safety_margin()
+                await asyncio.sleep(0.2)
+        raise last_error
 
     # ============================================
     # BINANCE-SPECIFIC METHODS

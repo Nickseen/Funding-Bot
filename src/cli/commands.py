@@ -47,9 +47,11 @@ from .display import (
     render_position_detail_v2,
     render_insufficient_balance_error,
     render_position_confirmation_v2,
+    render_positions_list_row,
 )
 from .input_handler import (
     async_input,
+    async_input_timeout,
     get_menu_choice,
     get_integer_input,
     get_float_input,
@@ -804,21 +806,61 @@ class ViewPositionsCommand:
         Returns:
             Selected position if user wants to view details, None otherwise
         """
-        clear_screen()
-        
         positions = await self.state.get_open_positions()
-        print(render_positions_list(positions))
-        
+
         if not positions:
+            clear_screen()
+            print(render_positions_list(positions))
             await wait_for_keypress()
             return None
-        
-        # Get selection
+
+        # Prime prices/PnL before first render.
+        await self._refresh_open_positions(positions)
+
+        clear_screen()
+        menu_text = render_positions_list(positions)
+        menu_lines = menu_text.splitlines()
+        print(menu_text)
+        print("Select position for analysis [1-N] or [0] to go back: ", end="", flush=True)
+
         valid_choices = ["0"] + [str(i) for i in range(1, len(positions) + 1)]
-        choice = await get_menu_choice(
-            "Select position for analysis [1-N] or [0] to go back: ",
-            valid_choices
-        )
+        table_header_index = 3
+        table_row_start_index = table_header_index + 1
+        total_menu_lines = len(menu_lines)
+        refresh_interval_seconds = 2.0
+
+        while True:
+            choice = await async_input_timeout("", timeout_seconds=refresh_interval_seconds)
+
+            if choice is None:
+                await self._refresh_open_positions(positions)
+
+                # Update only table rows (PnL/current spread/age) in place.
+                for row_idx, pos in enumerate(positions):
+                    row_line = render_positions_list_row(row_idx + 1, pos)
+                    row_text = row_line[:56]
+                    padded_text = " " + row_text.ljust(55) + " "
+                    row_rendered = f"║{padded_text[:57]}║"
+                    lines_up = total_menu_lines - (table_row_start_index + row_idx)
+
+                    print(f"\033[{lines_up}A", end="")
+                    print("\r\033[2K", end="")
+                    print(row_rendered, end="")
+                    print(f"\033[{lines_up}B", end="")
+
+                print("\r", end="", flush=True)
+                continue
+
+            if choice.lower() in ['q', 'quit', 'exit']:
+                return None
+
+            if choice not in valid_choices:
+                print("\nInvalid choice. Please select from: 0, 1..N")
+                await asyncio.sleep(0.8)
+                print("\rSelect position for analysis [1-N] or [0] to go back: ", end="", flush=True)
+                continue
+
+            break
         
         if choice is None or choice == "0":
             return None
@@ -829,6 +871,14 @@ class ViewPositionsCommand:
         await self._show_position_detail(selected_position)
         
         return selected_position
+
+    async def _refresh_open_positions(self, positions: List[Position]) -> None:
+        """Best-effort bulk refresh of positions in list view."""
+        for position in positions:
+            try:
+                await self._update_position_prices(position, persist=False)
+            except Exception:
+                pass
     
     async def _show_position_detail(self, position: Position) -> None:
         """Show detailed position view with options"""
@@ -860,7 +910,7 @@ class ViewPositionsCommand:
             # Refresh and show again
             await self._show_position_detail(position)
     
-    async def _update_position_prices(self, position: Position) -> None:
+    async def _update_position_prices(self, position: Position, persist: bool = True) -> None:
         """Update position with current prices, PnL, funding, and fees from exchanges"""
         ex1 = self.exchanges.get(position.exchange1.lower())
         ex2 = self.exchanges.get(position.exchange2.lower())
@@ -965,7 +1015,8 @@ class ViewPositionsCommand:
         
         position.unrealized_pnl = pnl_ex1 + pnl_ex2
         
-        await self.state.update_position(position)
+        if persist:
+            await self.state.update_position(position)
 
 
 class ClosePositionCommand:
