@@ -162,6 +162,11 @@ class TelegramDashboard:
 
         command = text.split()[0].split("@")[0].lower()
 
+        # CLI-like numeric shortcuts from dashboard menu.
+        if command in {"1", "2", "3", "4", "5", "6"}:
+            await self._handle_menu_number(chat_id, command)
+            return
+
         if command == "/start":
             await self._safe_send_text(
                 chat_id,
@@ -194,6 +199,39 @@ class TelegramDashboard:
             return
 
         await self._safe_send_text(chat_id, "Unknown command. Use /help.")
+
+    async def _handle_menu_number(self, chat_id: int, command: str) -> None:
+        """Handle numeric menu input to mirror CLI menu semantics."""
+        if command == "2":
+            payload = await self._render_positions_message()
+            await self._safe_send_pre(chat_id, payload)
+            return
+
+        if command == "5":
+            payload = await self._render_balances_message()
+            await self._safe_send_pre(chat_id, payload)
+            return
+
+        if command == "6":
+            self._dashboard_messages.pop(chat_id, None)
+            self._last_rendered_text.pop(chat_id, None)
+            await self._safe_send_text(chat_id, "Exit selected. Dashboard auto-updates disabled for this chat.")
+            return
+
+        if command == "4":
+            await self._safe_send_text(
+                chat_id,
+                "Menu 4 in Telegram is read-only for now. "
+                "Use CLI for funding-monitoring management, or /positions to inspect state.",
+            )
+            return
+
+        if command in {"1", "3"}:
+            await self._safe_send_text(
+                chat_id,
+                "This action requires interactive trading flow and is available in CLI only for now.",
+            )
+            return
 
     async def _refresh_dashboard(self, chat_id: int, force: bool) -> None:
         """Create or edit dashboard message for the chat."""
@@ -295,6 +333,27 @@ class TelegramDashboard:
                 f"   qty={position.quantity:.6f} pnl=${position.total_pnl:+.2f} "
                 f"funding=${position.funding_received:+.2f} fees=${position.fees_paid:+.2f}"
             )
+        return self._truncate("\n".join(lines))
+
+    async def _render_balances_message(self) -> str:
+        """Render balances snapshot for all connected exchanges."""
+        lines = ["BALANCES", "=" * 54]
+
+        if not self.exchanges:
+            lines.append("No configured exchanges")
+            return self._truncate("\n".join(lines))
+
+        for name, exchange in self.exchanges.items():
+            try:
+                balance = await asyncio.wait_for(exchange.get_balance(), timeout=8)
+                lines.append(
+                    f"{name.upper():<10} total=${balance.total:.2f} "
+                    f"available=${balance.available:.2f} "
+                    f"uPnL=${balance.unrealized_pnl:+.2f}"
+                )
+            except Exception as e:
+                lines.append(f"{name.upper():<10} unavailable ({type(e).__name__})")
+
         return self._truncate("\n".join(lines))
 
     async def _refresh_positions_pnl(self, positions: List[Position]) -> None:
