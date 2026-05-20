@@ -10,6 +10,7 @@ Features:
 import asyncio
 import builtins
 import html
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
@@ -98,6 +99,8 @@ class TelegramDashboard:
         self._chat_command_tasks: Dict[int, asyncio.Task] = {}
         # chat_id -> input queue used by patched CLI input handlers
         self._chat_input_queues: Dict[int, asyncio.Queue[str]] = {}
+        # chat_id -> unix monotonic seconds until Telegram API calls are paused
+        self._chat_rate_limited_until: Dict[int, float] = {}
 
     @property
     def _base_url(self) -> str:
@@ -164,6 +167,10 @@ class TelegramDashboard:
                 if not self._dashboard_messages:
                     continue
                 for chat_id in list(self._dashboard_messages.keys()):
+                    task = self._chat_command_tasks.get(chat_id)
+                    if task and not task.done():
+                        # Interactive CLI command owns chat output while active.
+                        continue
                     await self._refresh_dashboard(chat_id, force=False)
             except asyncio.CancelledError:
                 raise
@@ -886,6 +893,9 @@ class TelegramDashboard:
 
     async def _refresh_dashboard(self, chat_id: int, force: bool) -> None:
         """Create or edit dashboard message for the chat."""
+        if self._is_rate_limited(chat_id):
+            return
+
         text = await self._render_dashboard_message()
         previous = self._last_rendered_text.get(chat_id)
         if not force and previous == text:
@@ -919,6 +929,9 @@ class TelegramDashboard:
                 self._dashboard_messages.pop(chat_id, None)
                 self._last_rendered_text.pop(chat_id, None)
                 return
+            retry_after = self._extract_retry_after_seconds(str(e))
+            if retry_after is not None:
+                self._set_rate_limit(chat_id, retry_after)
             log.warning(f"Telegram edit error for chat {chat_id}: {e}")
 
     async def _render_dashboard_message(self) -> str:
@@ -1064,6 +1077,8 @@ class TelegramDashboard:
 
     async def _send_pre(self, chat_id: int, text: str) -> Optional[int]:
         """Send preformatted text and return message_id."""
+        if self._is_rate_limited(chat_id):
+            return None
         try:
             response = await self._telegram_call(
                 "sendMessage",
@@ -1077,6 +1092,14 @@ class TelegramDashboard:
             result = response.get("result") or {}
             message_id = result.get("message_id")
             return int(message_id) if isinstance(message_id, int) else None
+        except TelegramApiError as e:
+            retry_after = self._extract_retry_after_seconds(str(e))
+            if retry_after is not None:
+                self._set_rate_limit(chat_id, retry_after)
+                log.warning(f"Telegram send pre rate-limited for chat {chat_id}: {e}")
+                return None
+            log.warning(f"Telegram send pre error for chat {chat_id}: {e}")
+            return None
         except Exception as e:
             log.warning(f"Telegram send pre error for chat {chat_id}: {e}")
             return None
@@ -1087,6 +1110,8 @@ class TelegramDashboard:
 
     async def _safe_send_text(self, chat_id: int, text: str) -> None:
         """Best-effort plain text sender."""
+        if self._is_rate_limited(chat_id):
+            return
         try:
             await self._telegram_call(
                 "sendMessage",
@@ -1096,6 +1121,13 @@ class TelegramDashboard:
                     "disable_web_page_preview": True,
                 },
             )
+        except TelegramApiError as e:
+            retry_after = self._extract_retry_after_seconds(str(e))
+            if retry_after is not None:
+                self._set_rate_limit(chat_id, retry_after)
+                log.warning(f"Telegram send text rate-limited for chat {chat_id}: {e}")
+                return
+            log.warning(f"Telegram send text error for chat {chat_id}: {e}")
         except Exception as e:
             log.warning(f"Telegram send text error for chat {chat_id}: {e}")
 
@@ -1125,3 +1157,26 @@ class TelegramDashboard:
         if len(text) <= max_len:
             return text
         return text[: max_len - 40] + "\n... output truncated ..."
+
+    def _is_rate_limited(self, chat_id: int) -> bool:
+        until = self._chat_rate_limited_until.get(chat_id, 0.0)
+        return until > asyncio.get_running_loop().time()
+
+    def _set_rate_limit(self, chat_id: int, retry_after_seconds: int) -> None:
+        # Add a tiny safety margin before resuming traffic.
+        delay = max(1, int(retry_after_seconds)) + 1
+        until = asyncio.get_running_loop().time() + delay
+        self._chat_rate_limited_until[chat_id] = until
+
+    @staticmethod
+    def _extract_retry_after_seconds(error_text: str) -> Optional[int]:
+        lowered = error_text.lower()
+        if "too many requests" not in lowered:
+            return None
+        match = re.search(r"retry after\s+(\d+)", lowered)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
