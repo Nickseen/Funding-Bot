@@ -206,6 +206,22 @@ class TelegramDashboard:
 
         command_task = self._chat_command_tasks.get(chat_id)
         if command_task and not command_task.done():
+            normalized = text.split()[0].split("@")[0].lower()
+            blocked_during_flow = {
+                "/start",
+                "/status",
+                "/pnl",
+                "/refresh",
+                "/positions",
+                "/stop",
+                "/help",
+            }
+            if normalized in blocked_during_flow:
+                await self._safe_send_text(
+                    chat_id,
+                    "Action in progress. Finish current step or send /cancel.",
+                )
+                return
             queue = self._chat_input_queues.get(chat_id)
             if queue:
                 await queue.put(text)
@@ -346,6 +362,17 @@ class TelegramDashboard:
             if prompt:
                 output_buffer["value"] += prompt
             await flush_output_buffer()
+
+            # Telegram has no "empty enter" button like terminal.
+            # For pure "pause-only" prompts, auto-continue to avoid deadlocks.
+            prompt_l = prompt.lower().strip()
+            if (
+                "press enter to continue" in prompt_l
+                or prompt_l == "press enter..."
+                or prompt_l == "press enter"
+            ):
+                return ""
+
             user_input = await input_queue.get()
             return user_input.strip()
 
