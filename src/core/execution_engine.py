@@ -24,7 +24,6 @@ from ..exchanges.enums import (
     get_taker_fee_bps,
 )
 from ..utils.calculations import (
-    calculate_spread_bps,
     calculate_net_profit_bps,
     is_profitable_spread,
     calculate_liquidation_price,
@@ -257,6 +256,31 @@ class ExecutionEngine:
         )
         return None
 
+    def _calculate_opening_spread_bps(
+        self,
+        exec_price1: float,
+        exec_price2: float,
+        side1: PositionSide,
+    ) -> float:
+        """
+        Calculate signed spread for OPENING flow in bps.
+
+        Convention used by open/hit/market flows:
+        - negative spread => favorable entry (profitable slippage)
+        - positive spread => unfavorable entry (entry cost)
+        """
+        if side1 == PositionSide.LONG:
+            buy_price = exec_price1   # LONG on exchange1 buys at ex1 price
+            sell_price = exec_price2  # SHORT on exchange2 sells at ex2 price
+        else:
+            buy_price = exec_price2   # LONG on exchange2 buys at ex2 price
+            sell_price = exec_price1  # SHORT on exchange1 sells at ex1 price
+
+        if buy_price <= 0:
+            raise ExchangeError(f"Invalid buy price for spread calculation: {buy_price}")
+
+        return ((buy_price - sell_price) / buy_price) * 10000
+
     async def hit_the_bid(
         self,
         symbol: str,
@@ -369,7 +393,11 @@ class ExecutionEngine:
         
         # Рассчитываем спред
         # Отрицательный спред = profitable (bid > ask)
-        spread_bps = calculate_spread_bps(price_ex2, price_ex1)
+        spread_bps = self._calculate_opening_spread_bps(
+            exec_price1=price_ex1,
+            exec_price2=price_ex2,
+            side1=side1,
+        )
         
         return {
             'price1': price_ex1,
@@ -406,7 +434,11 @@ class ExecutionEngine:
             exec_price2 = price2.bid
         
         # Считаем spread
-        spread_bps = calculate_spread_bps(exec_price2, exec_price1)
+        spread_bps = self._calculate_opening_spread_bps(
+            exec_price1=exec_price1,
+            exec_price2=exec_price2,
+            side1=side1,
+        )
         
         # Получаем комиссии
         from ..exchanges.enums import get_total_fees_bps
@@ -684,7 +716,11 @@ Open position anyway? [Y/n]: """
             exec_price2 = ob2.best_ask  # Buy takes ask
         
         # 2. Показать анализ
-        spread_bps = calculate_spread_bps(exec_price1, exec_price2)
+        spread_bps = self._calculate_opening_spread_bps(
+            exec_price1=exec_price1,
+            exec_price2=exec_price2,
+            side1=side1,
+        )
         
         from ..exchanges.enums import get_total_fees_bps, Exchange
         total_fees_bps = get_total_fees_bps(
