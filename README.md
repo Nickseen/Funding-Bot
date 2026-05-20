@@ -158,10 +158,10 @@ BINGX_SETTLEMENT_ASSET=auto
 
 ```bash
 # Interactive CLI (local terminal)
-python -m src.main
+source venv/bin/activate && python3 -m src.main
 
 # Telegram dashboard mode (Railway/non-interactive)
-python -m src.main --telegram
+source venv/bin/activate && python3 -m src.main --telegram
 ```
 
 ### 5. Railway Secrets (No .env in Git)
