@@ -2052,3 +2052,16 @@ async def get_income_history(
     - В refresh-loop добавлен skip обновлений dashboard во время активного CLI command-task.
     - Это устраняет flood `Too Many Requests` и конфликт dashboard refresh с интерактивным вводом.
     - Файл: `src/notifications/telegram_dashboard.py`.
+
+### 2026-05-21
+- **fix(telegram)**: stabilize cli chat bridge and live output updates
+    - Повышена стабильность вывода в Telegram-чат из CLI: live output апдейты команд больше не сбрасывают состояние дашборда.
+    - Файл: `src/notifications/telegram_dashboard.py`.
+
+- **docs(readme)**: use venv activation and python3 in run examples
+    - Обновлены примеры запуска в `README.md` (добавлен `source venv/bin/activate` и `python3 -m src.main`).
+
+- **fix(cli)**: prevent event loop blocking by using async stdin readers in position closer
+    - Заменен блокирующий вызов `input()` в интерактивных меню `PositionCloser` на асинхронный метод `_read_stdin_line()` (выполнение через `loop.run_in_executor`).
+    - Это предотвращает полную блокировку asyncio event loop во время ожидания ввода пользователя в CLI, обеспечивая бесперебойную работу Telegram-бота.
+    - Файл: `src/core/position_closer.py`.
