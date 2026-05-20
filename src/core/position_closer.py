@@ -53,6 +53,19 @@ class PositionCloser:
         self.exchange2 = exchange2
         self.state = state
         self.emergency_close_timeout_seconds = 3
+
+    async def _read_stdin_line(self, prompt: str = "") -> str:
+        """
+        Read one line from stdin without blocking the asyncio event loop.
+
+        This keeps Telegram dashboard command mode responsive while waiting for
+        interactive user choices in close-flow menus.
+        """
+        if prompt:
+            print(prompt, end="")
+        loop = asyncio.get_running_loop()
+        line = await loop.run_in_executor(None, sys.stdin.readline)
+        return line.strip()
     
     # ============================================
     # 1. HIT-THE-BID CLOSE
@@ -208,7 +221,7 @@ class PositionCloser:
 Close position? [Y/n]: """
         
         print(message, end='')
-        confirm = input().strip().lower()
+        confirm = (await self._read_stdin_line()).lower()
         
         if confirm in ['', 'y', 'yes']:
             await self._close_with_limit_orders(position, ob1, ob2)
@@ -327,7 +340,7 @@ Close position? [Y/n]: """
 Close position? [Y/n]: """
         
         print(message, end='')
-        confirm = input().strip().lower()
+        confirm = (await self._read_stdin_line()).lower()
         
         if confirm in ['', 'y', 'yes']:
             await self._close_with_limit_orders(position, ob1, ob2)
@@ -817,13 +830,13 @@ Close position? [Y/n]: """
 ╚══════════════════════════════════════════════════════════
 Select [1-3]: """, end='')
         
-        choice = input().strip()
+        choice = await self._read_stdin_line()
         
         if choice == '1':
             return await self.close_free_fees(position)
         elif choice == '2':
             print("\n⚠️  WARNING: Market close will cause slippage!")
-            confirm = input("Are you sure? [y/N]: ").strip().lower()
+            confirm = (await self._read_stdin_line("Are you sure? [y/N]: ")).lower()
             if confirm == 'y':
                 return await self.close_market(position)
             return await self._show_free_fees_timeout_menu(position)
@@ -860,13 +873,13 @@ Select [1-3]: """, end='')
 ╚══════════════════════════════════════════════════════════
 Select [1-3]: """, end='')
         
-        choice = input().strip()
+        choice = await self._read_stdin_line()
         
         if choice == '1':
             return await self.close_smart_pnl(position)
         elif choice == '2':
             print("\n⚠️  WARNING: Market close will cause slippage!")
-            confirm = input("Are you sure? [y/N]: ").strip().lower()
+            confirm = (await self._read_stdin_line("Are you sure? [y/N]: ")).lower()
             if confirm == 'y':
                 return await self.close_market(position)
             return await self._show_smart_pnl_timeout_menu(position)
@@ -1115,7 +1128,7 @@ Select [1-3]: """, end='')
 ╚══════════════════════════════════════════════════════════
 Select [1-4]: """, end='')
         
-        choice = input().strip()
+        choice = await self._read_stdin_line()
         
         if choice == '1':
             # Попробовать еще раз
@@ -1129,7 +1142,7 @@ Select [1-4]: """, end='')
         elif choice == '3':
             # Market close (с предупреждением!)
             print("\n⚠️  WARNING: Market close will cause high slippage!")
-            confirm = input("Are you sure? [y/N]: ").strip().lower()
+            confirm = (await self._read_stdin_line("Are you sure? [y/N]: ")).lower()
             if confirm == 'y':
                 return await self.close_market(position)
             else:
@@ -1439,20 +1452,20 @@ Select [1-4]: """, end='')
 ╚══════════════════════════════════════════════════════════
 Select [1-4]: """, end='')
 
-        choice = input().strip()
+        choice = await self._read_stdin_line()
 
         if choice == '1':
             return await self.close_spread_gap(position, threshold_bps)
         elif choice == '2':
             try:
-                new_thr = float(input("Enter new threshold (bps): ").strip())
+                new_thr = float(await self._read_stdin_line("Enter new threshold (bps): "))
             except ValueError:
                 print("Invalid input, keeping original threshold.")
                 new_thr = threshold_bps
             return await self.close_spread_gap(position, new_thr)
         elif choice == '3':
             print("\n⚠️  WARNING: Market close will cause slippage!")
-            if input("Are you sure? [y/N]: ").strip().lower() == 'y':
+            if (await self._read_stdin_line("Are you sure? [y/N]: ")).lower() == 'y':
                 return await self.close_market(position)
             return await self._show_spread_gap_timeout_menu(position, threshold_bps)
         elif choice == '4':
