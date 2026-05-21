@@ -184,7 +184,7 @@ class TelegramDashboard:
     async def _handle_update(self, update: dict) -> None:
         """Handle a single Telegram update payload."""
         message = update.get("message") or {}
-        text = (message.get("text") or "").strip()
+        text = self._normalize_reply_button_text(message.get("text") or "")
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
 
@@ -251,7 +251,7 @@ class TelegramDashboard:
             await self._safe_send_text(
                 chat_id,
                 "Monitoring enabled. CLI-style menu is now shown in dashboard. "
-                "Use /status to refresh, /positions for details, /stop to stop updates.",
+                "Use the buttons below to navigate.",
             )
             await self._refresh_dashboard(chat_id, force=True)
             return
@@ -275,7 +275,7 @@ class TelegramDashboard:
             await self._safe_send_text(
                 chat_id,
                 "Commands: /start, /status, /positions, /refresh, /stop, /cancel. "
-                "Also supported: numeric menu input 1..6.",
+                "You can also use the reply keyboard buttons below.",
             )
             return
 
@@ -350,6 +350,7 @@ class TelegramDashboard:
             self._run_cli_command(chat_id, command_name, input_queue, stdin_queue)
         )
         self._chat_command_tasks[chat_id] = task
+        await self._safe_send_text(chat_id, "Action started. Use buttons or type manually.")
 
     async def _run_cli_command(
         self,
@@ -561,6 +562,7 @@ class TelegramDashboard:
 
             # Repaint dashboard snapshot after command ends.
             # Send a fresh menu message so chat UX mirrors CLI "return to main menu".
+            await self._safe_send_text(chat_id, "Action finished. Main keyboard restored.")
             await self._send_dashboard_snapshot(chat_id)
 
     async def _execute_cli_command_object(self, command_name: str) -> Any:
@@ -1048,6 +1050,14 @@ class TelegramDashboard:
                 self._dashboard_messages.pop(chat_id, None)
                 self._last_rendered_text.pop(chat_id, None)
                 return
+            if "message can't be edited" in message:
+                self._dashboard_messages.pop(chat_id, None)
+                self._last_rendered_text.pop(chat_id, None)
+                sent = await self._send_pre(chat_id, text)
+                if sent:
+                    self._dashboard_messages[chat_id] = sent
+                    self._last_rendered_text[chat_id] = text
+                return
             retry_after = self._extract_retry_after_seconds(str(e))
             if retry_after is not None:
                 self._set_rate_limit(chat_id, retry_after)
@@ -1141,7 +1151,7 @@ class TelegramDashboard:
             lines.append("No open positions")
 
         lines.append("")
-        lines.append("Select [1-6] in CLI. Telegram commands: /status /positions /refresh /stop")
+        lines.append("Tap reply buttons below, or type 1..6 / q manually.")
         return self._truncate("\n".join(lines))
 
     async def _render_positions_message(self) -> str:
@@ -1246,14 +1256,16 @@ class TelegramDashboard:
         if self._is_rate_limited(chat_id):
             return None
         try:
+            payload = {
+                "chat_id": chat_id,
+                "text": self._wrap_pre(text),
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+
             response = await self._telegram_call(
                 "sendMessage",
-                {
-                    "chat_id": chat_id,
-                    "text": self._wrap_pre(text),
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                },
+                payload,
             )
             result = response.get("result") or {}
             message_id = result.get("message_id")
@@ -1279,13 +1291,18 @@ class TelegramDashboard:
         if self._is_rate_limited(chat_id):
             return
         try:
+            payload = {
+                "chat_id": chat_id,
+                "text": text,
+                "disable_web_page_preview": True,
+            }
+            reply_markup = self._reply_keyboard_for_chat(chat_id)
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
+
             await self._telegram_call(
                 "sendMessage",
-                {
-                    "chat_id": chat_id,
-                    "text": text,
-                    "disable_web_page_preview": True,
-                },
+                payload,
             )
         except TelegramApiError as e:
             retry_after = self._extract_retry_after_seconds(str(e))
@@ -1311,6 +1328,75 @@ class TelegramDashboard:
             description = body.get("description", "unknown Telegram error")
             raise TelegramApiError(description)
         return body
+
+    def _reply_keyboard_for_chat(self, chat_id: int) -> dict:
+        """
+        Build a Telegram Reply Keyboard for the current chat state.
+
+        Reply keyboards send ordinary text messages back to the bot.  We keep
+        button labels readable, then normalize them back to CLI input values in
+        _normalize_reply_button_text().
+        """
+        command_task = self._chat_command_tasks.get(chat_id)
+        if (
+            chat_id in self._chat_flows
+            or (command_task is not None and not command_task.done())
+        ):
+            keyboard = [
+                [{"text": "1"}, {"text": "2"}, {"text": "3"}, {"text": "4"}],
+                [{"text": "5"}, {"text": "6"}, {"text": "7"}, {"text": "q"}],
+            ]
+            placeholder = "Tap a choice, or type symbol/size when needed"
+        else:
+            keyboard = [
+                [{"text": "1"}, {"text": "2"}, {"text": "3"}],
+                [{"text": "4"}, {"text": "5"}, {"text": "6"}],
+                [{"text": "q"}],
+            ]
+            placeholder = "Tap a menu button"
+
+        return {
+            "keyboard": keyboard,
+            "resize_keyboard": True,
+            "one_time_keyboard": False,
+            "is_persistent": True,
+            "input_field_placeholder": placeholder,
+        }
+
+    @staticmethod
+    def _normalize_reply_button_text(text: str) -> str:
+        """
+        Convert human-readable Reply Keyboard labels into existing CLI inputs.
+
+        Examples:
+            "1 Open" -> "1"
+            "q Cancel" -> "q"
+            "/start Menu" -> "/start"
+        """
+        raw = (text or "").strip()
+        if not raw:
+            return ""
+
+        first_token = raw.split()[0].strip()
+        first_token_without_dot = first_token.rstrip(".")
+
+        if first_token.startswith("/"):
+            return first_token.split("@")[0]
+
+        if first_token_without_dot in {"1", "2", "3", "4", "5", "6", "7"}:
+            return first_token_without_dot
+
+        lowered = raw.lower()
+        if lowered in {"q", "q cancel", "cancel", "quit"}:
+            return "q"
+
+        if lowered in {"yes", "y"}:
+            return "yes"
+
+        if lowered in {"no", "n"}:
+            return "no"
+
+        return raw
 
     @staticmethod
     def _wrap_pre(text: str) -> str:
