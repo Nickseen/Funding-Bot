@@ -845,6 +845,16 @@ async def funding_tracker_loop():
             await asyncio.sleep(300)
 ```
 
+### Telegram 24/7 режим (Railway / VPS)
+- Для non-interactive работы добавлен отдельный запуск: `python -m src.main --telegram`.
+- В этом режиме bot управляется через `TelegramDashboard`:
+  - long polling (`getUpdates`) и динамический dashboard message,
+  - команды `/start`, `/status`, `/positions`, `/refresh`, `/stop`, `/cancel`,
+  - numeric shortcut `1..6` как в CLI меню,
+  - интерактивные open/close flow и запуск существующих CLI-команд через chat bridge.
+- Обязательный env: `TELEGRAM_BOT_TOKEN`.
+- Рекомендуемый access control: `TELEGRAM_ALLOWED_CHAT_IDS`.
+
 ---
 
 ## 📝 Примечания
@@ -878,12 +888,14 @@ Funding-Bot/
 │   │   └── enums.py        # Exchange enum, комиссии в bps
 │   ├── core/               # Бизнес-логика
 │   │   ├── state.py        # AppState с asyncio locks (RAM)
-│   │   ├── execution_engine.py  # 2 modes: hit_the_bid, stable_spread (558 lines)
-│   │   ├── position_closer.py   # 6 modes: hit_the_bid, flash, market, stable_spread, smart_pnl, emergency (~770 lines)
+│   │   ├── execution_engine.py  # 4 modes: hit_the_bid, stable_spread, market, positive_spread
+│   │   ├── position_closer.py   # 8 modes: hit_the_bid, flash, market, stable_spread, smart_pnl, free_fees, spread_gap, emergency
 │   │   └── persistence.py       # Сохранение и загрузка позиций (558 lines) ✅ (добавлен 12 янв 2026)
 │   ├── monitors/           # Мониторинг (stateful watchers)
 │   │   ├── funding_tracker.py   # Smart monitoring с PnL threshold (431 lines) ✅
 │   │   └── emergency_monitor.py # REST polling 5 sec для SL/TP (348 lines) ✅
+│   ├── notifications/      # 24/7 Telegram dashboard (long polling + CLI bridge)
+│   │   └── telegram_dashboard.py
 │   ├── managers/           # Infrastructure (resource management)
 │   │   └── (planned: RiskManager, WebSocketManager)
 │   ├── utils/              # Stateless utilities
@@ -898,7 +910,7 @@ Funding-Bot/
 │   │   ├── display.py      # Отображение меню
 │   │   ├── input_handler.py # Обработка ввода
 │   │   └── menus.py        # Меню
-│   └── main.py             # Bot orchestration (Bot class, 176 lines) ✅
+│   └── main.py             # Entry points: CLI / Bot / Telegram (`--telegram`) ✅
 ├── tests/                  # Tests (52/52 passing) ✅
 │   ├── unit/
 │   │   ├── test_calculations.py       # 7 tests ✅
@@ -1536,8 +1548,8 @@ async def funding_monitoring_loop():
 
 ---
 
-**Дата обновления:** 30 марта 2026  
-**Статус:** Phase 1-4 завершены ✅ | Production ready 🚀
+**Дата обновления:** 20 мая 2026  
+**Статус:** Phase 1-4 завершены ✅ | Production ready 🚀 | Telegram 24/7 dashboard ✅
 
 ## 📝 Подробный changelog (после 6c57a131cb21d9021c4f079849debb7dd70af0b4)
 
@@ -1994,3 +2006,62 @@ async def get_income_history(
     - Это устраняет ложный знак (например, `-19 bps` при фактически положительном close spread) и согласует `Final spread` с реальными ценами закрытия.
     - Файл: `src/core/position_closer.py`.
     - Тесты: `tests/unit/test_spread_gap_logic.py`, `tests/unit/test_smart_pnl_close.py`, `tests/unit/test_cli.py`.
+
+### 2026-05-19
+- **feat(telegram)**: добавлен Telegram dashboard mode для 24/7 non-interactive запуска (Railway-friendly)
+    - Новый режим запуска: `python -m src.main --telegram`.
+    - Добавлен модуль `src/notifications/telegram_dashboard.py` (long polling + периодический refresh одного dashboard-сообщения на чат).
+    - Поддержаны команды: `/start`, `/status`, `/positions`, `/refresh`, `/stop`, `/help`, `/cancel`.
+    - Добавлен контроль доступа по chat id (`TELEGRAM_ALLOWED_CHAT_IDS`).
+    - Файлы: `src/main.py`, `src/notifications/telegram_dashboard.py`, `src/notifications/__init__.py`.
+
+- **feat(config)**: добавлены env-настройки Telegram
+    - `TELEGRAM_BOT_TOKEN`
+    - `TELEGRAM_ALLOWED_CHAT_IDS`
+    - `TELEGRAM_UPDATE_INTERVAL_SECONDS` (валидация: `>= 3`)
+    - `TELEGRAM_POLLING_TIMEOUT_SECONDS` (валидация: `>= 10`)
+    - Добавлен parser `get_telegram_allowed_chat_ids()` в `config/config.py`.
+    - Файлы: `config/config.py`, `.env.example`, `README.md`.
+
+- **feat(telegram)**: сближение Telegram UX с CLI и интерактивные операции через чат
+    - Dashboard рендерит меню в CLI-формате (`render_main_menu`) и обрабатывает numeric-команды `1..6`.
+    - Добавлены wizard-флоу открытия/закрытия позиций с пошаговым вводом параметров.
+    - Добавлен bridge для переиспользования существующих CLI-команд (`OpenPositionCommand`, `ClosePositionCommand`, `ViewPositionsCommand`, `ViewBalancesCommand`, `ManageFundingMonitoringCommand`) прямо из Telegram.
+    - В `main.py` Telegram dashboard получает `FundingTracker`, чтобы команды monitoring работали консистентно с CLI.
+    - Файлы: `src/notifications/telegram_dashboard.py`, `src/main.py`.
+
+- **fix(telegram)**: улучшен вывод результатов CLI-команд в чат
+    - Многострочный вывод CLI батчируется и отправляется единым блоком вместо фрагментации по строкам.
+    - Файл: `src/notifications/telegram_dashboard.py`.
+
+### 2026-05-20
+- **fix(core)**: исправлен расчёт signed spread при открытии позиции (регрессия в opening/market path)
+    - В `ExecutionEngine` добавлен единый helper `_calculate_opening_spread_bps(...)`.
+    - Расчёт унифицирован для `hit_the_bid`, timeout-анализа и `market_open`.
+    - Конвенция зафиксирована: отрицательный spread = выгодный вход (profitable slippage), положительный = cost на входе.
+    - Добавлен регрессионный тест `tests/unit/test_execution_engine_market_mode.py`.
+    - Файлы: `src/core/execution_engine.py`, `tests/unit/test_execution_engine_market_mode.py`.
+
+- **fix(telegram)**: устранены deadlock-сценарии и зацикливание в command-flow
+    - Во время активного flow блокируются конфликтующие команды (`/start`, `/status`, `/refresh`, `/positions`, `/stop`, `/help`) с подсказкой использовать `/cancel`.
+    - Паузы вида `Press Enter to continue` auto-resume'ятся в Telegram-режиме, чтобы не зависать на шагах без пользовательского текста.
+    - Файл: `src/notifications/telegram_dashboard.py`.
+
+- **fix(telegram)**: добавлен backoff по `retry_after` и защита от Telegram rate-limit
+    - Парсится `retry after N` из ответа API и включается per-chat pause отправки/редактирования сообщений.
+    - В refresh-loop добавлен skip обновлений dashboard во время активного CLI command-task.
+    - Это устраняет flood `Too Many Requests` и конфликт dashboard refresh с интерактивным вводом.
+    - Файл: `src/notifications/telegram_dashboard.py`.
+
+### 2026-05-21
+- **fix(telegram)**: stabilize cli chat bridge and live output updates
+    - Повышена стабильность вывода в Telegram-чат из CLI: live output апдейты команд больше не сбрасывают состояние дашборда.
+    - Файл: `src/notifications/telegram_dashboard.py`.
+
+- **docs(readme)**: use venv activation and python3 in run examples
+    - Обновлены примеры запуска в `README.md` (добавлен `source venv/bin/activate` и `python3 -m src.main`).
+
+- **fix(cli)**: prevent event loop blocking by using async stdin readers in position closer
+    - Заменен блокирующий вызов `input()` в интерактивных меню `PositionCloser` на асинхронный метод `_read_stdin_line()` (выполнение через `loop.run_in_executor`).
+    - Это предотвращает полную блокировку asyncio event loop во время ожидания ввода пользователя в CLI, обеспечивая бесперебойную работу Telegram-бота.
+    - Файл: `src/core/position_closer.py`.

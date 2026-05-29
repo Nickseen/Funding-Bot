@@ -1140,15 +1140,7 @@ class ClosePositionCommand:
             
             elif mode_choice == "6":
                 # Spread Gap close — ask user for threshold
-                print(render_info("Enter the spread gap threshold (bps) to close at."))
-                print(render_info("Bot closes when current spread matches this target (with small tolerance)."))
-                print(render_info("Example: entry 170 bps, threshold 20 bps → captures ~150 bps."))
-                from .input_handler import get_float_input as _get_float
-                threshold_bps = await _get_float(
-                    "Gap threshold (bps, e.g. 20): ",
-                    min_val=-500.0,
-                    max_val=10000.0,
-                )
+                threshold_bps = await self._prompt_spread_gap_threshold(position, closer)
                 if threshold_bps is None:
                     print(render_info("Position close cancelled"))
                     await wait_for_keypress()
@@ -1169,6 +1161,80 @@ class ClosePositionCommand:
             print(render_error(f"Failed to close position: {e}"))
             await wait_for_keypress()
             return False
+
+    async def _prompt_spread_gap_threshold(
+        self,
+        position: Position,
+        closer: PositionCloser,
+    ) -> Optional[float]:
+        """Ask for Spread Gap threshold while refreshing current spread live."""
+        import time
+
+        min_val = -500.0
+        max_val = 10000.0
+        start_time = time.time()
+
+        print(render_info("Enter the spread gap threshold (bps) to close at."))
+        print(render_info("Bot closes when current spread matches this target (with small tolerance)."))
+        print(render_info("Example: entry 170 bps, threshold 20 bps -> captures ~150 bps."))
+        print(render_info("Live spread below uses the same aggressive close-side prices as Spread Gap close."))
+        print("Gap threshold (bps, e.g. 20): ", end="", flush=True)
+
+        while True:
+            user_input = await async_input_timeout("", timeout_seconds=2.0)
+
+            if user_input is None:
+                elapsed = int(time.time() - start_time)
+                entry_text = (
+                    f"{position.entry_spread_bps:+.2f} bps"
+                    if position.entry_spread_bps is not None else "N/A"
+                )
+                try:
+                    snapshot = await closer.get_spread_gap_snapshot(position)
+                    print(
+                        "\r"
+                        f"⏱️  [{elapsed}s] Live spread: "
+                        f"{snapshot['current_spread_bps']:+.2f} bps | "
+                        f"Entry: {entry_text} | "
+                        f"PnL: ${snapshot['pnl_usd']:+.2f} "
+                        f"({snapshot['pnl_pct']:+.2f}%) | "
+                        "Gap threshold (bps, e.g. 20): ",
+                        end="",
+                        flush=True,
+                    )
+                except Exception as e:
+                    print(
+                        "\r"
+                        f"⏱️  [{elapsed}s] Live spread: unavailable "
+                        f"({type(e).__name__}) | Gap threshold (bps, e.g. 20): ",
+                        end="",
+                        flush=True,
+                    )
+                continue
+
+            print()
+            raw = user_input.strip()
+            if raw.lower() in {"q", "quit", "cancel"}:
+                return None
+
+            try:
+                threshold_bps = float(raw)
+            except ValueError:
+                print("Please enter a valid number")
+                print("Gap threshold (bps, e.g. 20): ", end="", flush=True)
+                continue
+
+            if threshold_bps < min_val:
+                print(f"Value must be at least {min_val}")
+                print("Gap threshold (bps, e.g. 20): ", end="", flush=True)
+                continue
+
+            if threshold_bps > max_val:
+                print(f"Value must be at most {max_val}")
+                print("Gap threshold (bps, e.g. 20): ", end="", flush=True)
+                continue
+
+            return threshold_bps
     
     async def _execute_smart_pnl_close(
         self,

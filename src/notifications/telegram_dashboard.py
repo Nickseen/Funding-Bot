@@ -10,6 +10,8 @@ Features:
 import asyncio
 import builtins
 import html
+import queue
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
@@ -98,6 +100,10 @@ class TelegramDashboard:
         self._chat_command_tasks: Dict[int, asyncio.Task] = {}
         # chat_id -> input queue used by patched CLI input handlers
         self._chat_input_queues: Dict[int, asyncio.Queue[str]] = {}
+        # chat_id -> blocking stdin queue used by sys.stdin.readline watchers
+        self._chat_stdin_queues: Dict[int, queue.Queue[Optional[str]]] = {}
+        # chat_id -> unix monotonic seconds until Telegram API calls are paused
+        self._chat_rate_limited_until: Dict[int, float] = {}
 
     @property
     def _base_url(self) -> str:
@@ -164,6 +170,10 @@ class TelegramDashboard:
                 if not self._dashboard_messages:
                     continue
                 for chat_id in list(self._dashboard_messages.keys()):
+                    task = self._chat_command_tasks.get(chat_id)
+                    if task and not task.done():
+                        # Interactive CLI command owns chat output while active.
+                        continue
                     await self._refresh_dashboard(chat_id, force=False)
             except asyncio.CancelledError:
                 raise
@@ -174,7 +184,7 @@ class TelegramDashboard:
     async def _handle_update(self, update: dict) -> None:
         """Handle a single Telegram update payload."""
         message = update.get("message") or {}
-        text = (message.get("text") or "").strip()
+        text = self._normalize_reply_button_text(message.get("text") or "")
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
 
@@ -192,9 +202,7 @@ class TelegramDashboard:
 
         if command == "/cancel":
             task = self._chat_command_tasks.get(chat_id)
-            queue = self._chat_input_queues.get(chat_id)
-            if task and not task.done() and queue:
-                await queue.put("q")
+            if task and not task.done() and await self._enqueue_command_input(chat_id, "q"):
                 await self._safe_send_text(chat_id, "Cancel requested...")
                 return
             if chat_id in self._chat_flows:
@@ -206,6 +214,11 @@ class TelegramDashboard:
 
         command_task = self._chat_command_tasks.get(chat_id)
         if command_task and not command_task.done():
+            if command in {"q", "quit", "cancel"}:
+                if await self._enqueue_command_input(chat_id, "q"):
+                    await self._safe_send_text(chat_id, "Cancel requested...")
+                    return
+
             normalized = text.split()[0].split("@")[0].lower()
             blocked_during_flow = {
                 "/start",
@@ -222,9 +235,7 @@ class TelegramDashboard:
                     "Action in progress. Finish current step or send /cancel.",
                 )
                 return
-            queue = self._chat_input_queues.get(chat_id)
-            if queue:
-                await queue.put(text)
+            await self._enqueue_command_input(chat_id, text)
             return
 
         if chat_id in self._chat_flows:
@@ -240,7 +251,7 @@ class TelegramDashboard:
             await self._safe_send_text(
                 chat_id,
                 "Monitoring enabled. CLI-style menu is now shown in dashboard. "
-                "Use /status to refresh, /positions for details, /stop to stop updates.",
+                "Use the buttons below to navigate.",
             )
             await self._refresh_dashboard(chat_id, force=True)
             return
@@ -264,7 +275,7 @@ class TelegramDashboard:
             await self._safe_send_text(
                 chat_id,
                 "Commands: /start, /status, /positions, /refresh, /stop, /cancel. "
-                "Also supported: numeric menu input 1..6.",
+                "You can also use the reply keyboard buttons below.",
             )
             return
 
@@ -301,6 +312,26 @@ class TelegramDashboard:
             await self._safe_send_text(chat_id, "Exit selected. Dashboard auto-updates disabled for this chat.")
             return
 
+    async def _enqueue_command_input(self, chat_id: int, text: str) -> bool:
+        """
+        Deliver user input to active command transports.
+
+        Returns True if input was delivered to at least one active queue.
+        """
+        delivered = False
+
+        async_queue = self._chat_input_queues.get(chat_id)
+        if async_queue:
+            await async_queue.put(text)
+            delivered = True
+
+        blocking_queue = self._chat_stdin_queues.get(chat_id)
+        if blocking_queue:
+            blocking_queue.put(text)
+            delivered = True
+
+        return delivered
+
     async def _start_cli_command(self, chat_id: int, command_name: str) -> None:
         """Start a CLI command execution backed by Telegram I/O."""
         active = self._chat_command_tasks.get(chat_id)
@@ -312,24 +343,53 @@ class TelegramDashboard:
             return
 
         input_queue: asyncio.Queue[str] = asyncio.Queue()
+        stdin_queue: queue.Queue[Optional[str]] = queue.Queue()
         self._chat_input_queues[chat_id] = input_queue
-        task = asyncio.create_task(self._run_cli_command(chat_id, command_name, input_queue))
+        self._chat_stdin_queues[chat_id] = stdin_queue
+        task = asyncio.create_task(
+            self._run_cli_command(chat_id, command_name, input_queue, stdin_queue)
+        )
         self._chat_command_tasks[chat_id] = task
+        await self._safe_send_text(chat_id, "Action started. Use buttons or type manually.")
 
     async def _run_cli_command(
         self,
         chat_id: int,
         command_name: str,
         input_queue: asyncio.Queue[str],
+        stdin_queue: queue.Queue[Optional[str]],
     ) -> None:
         """Execute selected CLI command with patched input/output transport."""
         from src.cli import input_handler as cli_input_handler
         from src.cli import commands as cli_commands_module
+        import sys as py_sys
 
         output_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
         output_buffer = {"value": ""}
+        ansi_escape_re = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+        loop = asyncio.get_running_loop()
+        flush_task: Optional[asyncio.Task] = None
+
+        class _TelegramStdin:
+            """Blocking stdin proxy backed by Telegram input queue."""
+
+            def __init__(self, q: queue.Queue[Optional[str]]):
+                self._q = q
+
+            def readline(self) -> str:
+                item = self._q.get()
+                if item is None:
+                    return ""
+                if item.endswith("\n"):
+                    return item
+                return f"{item}\n"
+
+            def isatty(self) -> bool:
+                return False
 
         async def output_sender() -> None:
+            live_message_id: Optional[int] = None
+            live_text: str = ""
             while True:
                 item = await output_queue.get()
                 if item is None:
@@ -337,16 +397,68 @@ class TelegramDashboard:
                 text = item.strip()
                 if not text:
                     continue
-                await self._safe_send_pre(chat_id, self._truncate(text))
+
+                if command_name == "view_positions":
+                    single_row = self._extract_single_positions_row_update(text)
+                    if single_row and live_message_id and live_text:
+                        patched_text = self._replace_positions_row_in_snapshot(
+                            live_text,
+                            single_row,
+                        )
+                        if patched_text and patched_text != live_text:
+                            edited = await self._edit_pre(
+                                chat_id=chat_id,
+                                message_id=live_message_id,
+                                text=self._truncate(patched_text),
+                            )
+                            if edited:
+                                live_text = patched_text
+                        continue
+
+                merged_text = self._merge_command_output_text(live_text, text)
+                if not merged_text or merged_text == live_text:
+                    continue
+
+                if live_message_id is None:
+                    sent_id = await self._send_pre(chat_id, self._truncate(merged_text))
+                    if sent_id is not None:
+                        live_message_id = sent_id
+                        live_text = merged_text
+                    continue
+
+                edited = await self._edit_pre(
+                    chat_id=chat_id,
+                    message_id=live_message_id,
+                    text=self._truncate(merged_text),
+                )
+                if edited:
+                    live_text = merged_text
+                else:
+                    sent_id = await self._send_pre(chat_id, self._truncate(merged_text))
+                    if sent_id is not None:
+                        live_message_id = sent_id
+                        live_text = merged_text
                 await asyncio.sleep(0.12)
 
         sender_task = asyncio.create_task(output_sender())
 
         async def flush_output_buffer() -> None:
             text = output_buffer["value"].replace("\r", "")
+            text = ansi_escape_re.sub("", text)
             output_buffer["value"] = ""
             if text.strip():
                 await output_queue.put(text)
+
+        def schedule_flush() -> None:
+            nonlocal flush_task
+            if flush_task and not flush_task.done():
+                return
+
+            async def _flush_soon() -> None:
+                await asyncio.sleep(0.05)
+                await flush_output_buffer()
+
+            flush_task = loop.create_task(_flush_soon())
 
         def patched_print(*args, **kwargs) -> None:
             sep = kwargs.get("sep", " ")
@@ -357,6 +469,7 @@ class TelegramDashboard:
             text = sep.join(str(a) for a in args)
             chunk = f"{text}{end}".replace("\033[2J\033[H", "")
             output_buffer["value"] += chunk
+            schedule_flush()
 
         async def patched_async_input(prompt: str = "") -> str:
             if prompt:
@@ -380,14 +493,17 @@ class TelegramDashboard:
             prompt: str = "",
             timeout_seconds: float = 1.0,
         ) -> Optional[str]:
-            # Telegram cannot mimic fast in-place terminal redraw safely.
-            # Use blocking wait to avoid update spam/rate-limit issues.
-            _ = timeout_seconds
             if prompt:
                 output_buffer["value"] += prompt
             await flush_output_buffer()
-            user_input = await input_queue.get()
-            return user_input.strip()
+            try:
+                user_input = await asyncio.wait_for(
+                    input_queue.get(),
+                    timeout=timeout_seconds,
+                )
+                return user_input.strip()
+            except asyncio.TimeoutError:
+                return None
 
         def patched_clear_screen() -> None:
             return
@@ -399,6 +515,7 @@ class TelegramDashboard:
         original_commands_async_input = cli_commands_module.async_input
         original_commands_async_input_timeout = cli_commands_module.async_input_timeout
         original_commands_clear_screen = cli_commands_module.clear_screen
+        original_stdin = py_sys.stdin
 
         # Patch
         builtins.print = patched_print
@@ -407,9 +524,12 @@ class TelegramDashboard:
         cli_commands_module.async_input = patched_async_input
         cli_commands_module.async_input_timeout = patched_async_input_timeout
         cli_commands_module.clear_screen = patched_clear_screen
+        py_sys.stdin = _TelegramStdin(stdin_queue)
 
         try:
-            await self._execute_cli_command_object(command_name)
+            command_result = await self._execute_cli_command_object(command_name)
+            if command_name in {"open", "close"} and command_result is False:
+                await output_queue.put("Action cancelled.")
             await flush_output_buffer()
         except Exception as e:
             await flush_output_buffer()
@@ -422,6 +542,10 @@ class TelegramDashboard:
             cli_commands_module.async_input = original_commands_async_input
             cli_commands_module.async_input_timeout = original_commands_async_input_timeout
             cli_commands_module.clear_screen = original_commands_clear_screen
+            py_sys.stdin = original_stdin
+
+            # Unblock any background run_in_executor(sys.stdin.readline) calls.
+            stdin_queue.put(None)
 
             await output_queue.put(None)
             try:
@@ -429,33 +553,37 @@ class TelegramDashboard:
             except Exception:
                 pass
 
+            if flush_task and not flush_task.done():
+                flush_task.cancel()
+
             self._chat_command_tasks.pop(chat_id, None)
             self._chat_input_queues.pop(chat_id, None)
+            self._chat_stdin_queues.pop(chat_id, None)
 
             # Repaint dashboard snapshot after command ends.
-            await self._refresh_dashboard(chat_id, force=True)
+            # Send a fresh menu message so chat UX mirrors CLI "return to main menu".
+            await self._safe_send_text(chat_id, "Action finished. Main keyboard restored.")
+            await self._send_dashboard_snapshot(chat_id)
 
-    async def _execute_cli_command_object(self, command_name: str) -> None:
+    async def _execute_cli_command_object(self, command_name: str) -> Any:
         """Execute one of the existing CLI commands unchanged."""
         if command_name == "open":
             command = OpenPositionCommand(exchanges=self.exchanges, state=self.state)
-            await command.execute()
-            return
+            return await command.execute()
 
         if command_name == "close":
             command = ClosePositionCommand(state=self.state, exchanges=self.exchanges)
-            await command.execute()
-            return
+            return await command.execute()
 
         if command_name == "balances":
             command = ViewBalancesCommand(state=self.state, exchanges=self.exchanges)
             await command.execute()
-            return
+            return True
 
         if command_name == "view_positions":
             command = ViewPositionsCommand(state=self.state, exchanges=self.exchanges)
             await command.execute()
-            return
+            return True
 
         if command_name == "manage_funding":
             command = ManageFundingMonitoringCommand(
@@ -463,7 +591,7 @@ class TelegramDashboard:
                 funding_tracker=self.funding_tracker,
             )
             await command.execute()
-            return
+            return True
 
         raise ValueError(f"Unsupported command_name: {command_name}")
 
@@ -886,6 +1014,9 @@ class TelegramDashboard:
 
     async def _refresh_dashboard(self, chat_id: int, force: bool) -> None:
         """Create or edit dashboard message for the chat."""
+        if self._is_rate_limited(chat_id):
+            return
+
         text = await self._render_dashboard_message()
         previous = self._last_rendered_text.get(chat_id)
         if not force and previous == text:
@@ -919,7 +1050,65 @@ class TelegramDashboard:
                 self._dashboard_messages.pop(chat_id, None)
                 self._last_rendered_text.pop(chat_id, None)
                 return
+            if "message can't be edited" in message:
+                self._dashboard_messages.pop(chat_id, None)
+                self._last_rendered_text.pop(chat_id, None)
+                sent = await self._send_pre(chat_id, text)
+                if sent:
+                    self._dashboard_messages[chat_id] = sent
+                    self._last_rendered_text[chat_id] = text
+                return
+            retry_after = self._extract_retry_after_seconds(str(e))
+            if retry_after is not None:
+                self._set_rate_limit(chat_id, retry_after)
             log.warning(f"Telegram edit error for chat {chat_id}: {e}")
+
+    async def _send_dashboard_snapshot(self, chat_id: int) -> None:
+        """
+        Send a fresh dashboard snapshot message and re-anchor auto-refresh to it.
+
+        This is used after interactive command completion/cancel so user always
+        sees a clear "main menu" state in chat, similar to terminal CLI behavior.
+        """
+        if self._is_rate_limited(chat_id):
+            return
+
+        text = await self._render_dashboard_message()
+        sent_message_id = await self._send_pre(chat_id, text)
+        if sent_message_id is None:
+            return
+
+        self._dashboard_messages[chat_id] = sent_message_id
+        self._last_rendered_text[chat_id] = text
+
+    async def _edit_pre(self, chat_id: int, message_id: int, text: str) -> bool:
+        """Edit an existing Telegram message with <pre> payload."""
+        if self._is_rate_limited(chat_id):
+            return False
+        try:
+            await self._telegram_call(
+                "editMessageText",
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": self._wrap_pre(text),
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                },
+            )
+            return True
+        except TelegramApiError as e:
+            message = str(e).lower()
+            if "message is not modified" in message:
+                return True
+            retry_after = self._extract_retry_after_seconds(str(e))
+            if retry_after is not None:
+                self._set_rate_limit(chat_id, retry_after)
+            log.warning(f"Telegram edit pre error for chat {chat_id}: {e}")
+            return False
+        except Exception as e:
+            log.warning(f"Telegram edit pre error for chat {chat_id}: {e}")
+            return False
 
     async def _render_dashboard_message(self) -> str:
         """Render status text similar to CLI summary."""
@@ -962,7 +1151,7 @@ class TelegramDashboard:
             lines.append("No open positions")
 
         lines.append("")
-        lines.append("Select [1-6] in CLI. Telegram commands: /status /positions /refresh /stop")
+        lines.append("Tap reply buttons below, or type 1..6 / q manually.")
         return self._truncate("\n".join(lines))
 
     async def _render_positions_message(self) -> str:
@@ -1064,19 +1253,31 @@ class TelegramDashboard:
 
     async def _send_pre(self, chat_id: int, text: str) -> Optional[int]:
         """Send preformatted text and return message_id."""
+        if self._is_rate_limited(chat_id):
+            return None
         try:
+            payload = {
+                "chat_id": chat_id,
+                "text": self._wrap_pre(text),
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+
             response = await self._telegram_call(
                 "sendMessage",
-                {
-                    "chat_id": chat_id,
-                    "text": self._wrap_pre(text),
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                },
+                payload,
             )
             result = response.get("result") or {}
             message_id = result.get("message_id")
             return int(message_id) if isinstance(message_id, int) else None
+        except TelegramApiError as e:
+            retry_after = self._extract_retry_after_seconds(str(e))
+            if retry_after is not None:
+                self._set_rate_limit(chat_id, retry_after)
+                log.warning(f"Telegram send pre rate-limited for chat {chat_id}: {e}")
+                return None
+            log.warning(f"Telegram send pre error for chat {chat_id}: {e}")
+            return None
         except Exception as e:
             log.warning(f"Telegram send pre error for chat {chat_id}: {e}")
             return None
@@ -1087,15 +1288,29 @@ class TelegramDashboard:
 
     async def _safe_send_text(self, chat_id: int, text: str) -> None:
         """Best-effort plain text sender."""
+        if self._is_rate_limited(chat_id):
+            return
         try:
+            payload = {
+                "chat_id": chat_id,
+                "text": text,
+                "disable_web_page_preview": True,
+            }
+            reply_markup = self._reply_keyboard_for_chat(chat_id)
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
+
             await self._telegram_call(
                 "sendMessage",
-                {
-                    "chat_id": chat_id,
-                    "text": text,
-                    "disable_web_page_preview": True,
-                },
+                payload,
             )
+        except TelegramApiError as e:
+            retry_after = self._extract_retry_after_seconds(str(e))
+            if retry_after is not None:
+                self._set_rate_limit(chat_id, retry_after)
+                log.warning(f"Telegram send text rate-limited for chat {chat_id}: {e}")
+                return
+            log.warning(f"Telegram send text error for chat {chat_id}: {e}")
         except Exception as e:
             log.warning(f"Telegram send text error for chat {chat_id}: {e}")
 
@@ -1114,6 +1329,75 @@ class TelegramDashboard:
             raise TelegramApiError(description)
         return body
 
+    def _reply_keyboard_for_chat(self, chat_id: int) -> dict:
+        """
+        Build a Telegram Reply Keyboard for the current chat state.
+
+        Reply keyboards send ordinary text messages back to the bot.  We keep
+        button labels readable, then normalize them back to CLI input values in
+        _normalize_reply_button_text().
+        """
+        command_task = self._chat_command_tasks.get(chat_id)
+        if (
+            chat_id in self._chat_flows
+            or (command_task is not None and not command_task.done())
+        ):
+            keyboard = [
+                [{"text": "1"}, {"text": "2"}, {"text": "3"}, {"text": "4"}],
+                [{"text": "5"}, {"text": "6"}, {"text": "7"}, {"text": "q"}],
+            ]
+            placeholder = "Tap a choice, or type symbol/size when needed"
+        else:
+            keyboard = [
+                [{"text": "1"}, {"text": "2"}, {"text": "3"}],
+                [{"text": "4"}, {"text": "5"}, {"text": "6"}],
+                [{"text": "q"}],
+            ]
+            placeholder = "Tap a menu button"
+
+        return {
+            "keyboard": keyboard,
+            "resize_keyboard": True,
+            "one_time_keyboard": False,
+            "is_persistent": True,
+            "input_field_placeholder": placeholder,
+        }
+
+    @staticmethod
+    def _normalize_reply_button_text(text: str) -> str:
+        """
+        Convert human-readable Reply Keyboard labels into existing CLI inputs.
+
+        Examples:
+            "1 Open" -> "1"
+            "q Cancel" -> "q"
+            "/start Menu" -> "/start"
+        """
+        raw = (text or "").strip()
+        if not raw:
+            return ""
+
+        first_token = raw.split()[0].strip()
+        first_token_without_dot = first_token.rstrip(".")
+
+        if first_token.startswith("/"):
+            return first_token.split("@")[0]
+
+        if first_token_without_dot in {"1", "2", "3", "4", "5", "6", "7"}:
+            return first_token_without_dot
+
+        lowered = raw.lower()
+        if lowered in {"q", "q cancel", "cancel", "quit"}:
+            return "q"
+
+        if lowered in {"yes", "y"}:
+            return "yes"
+
+        if lowered in {"no", "n"}:
+            return "no"
+
+        return raw
+
     @staticmethod
     def _wrap_pre(text: str) -> str:
         """Wrap plain text into HTML <pre> block for monospace rendering."""
@@ -1125,3 +1409,108 @@ class TelegramDashboard:
         if len(text) <= max_len:
             return text
         return text[: max_len - 40] + "\n... output truncated ..."
+
+    @staticmethod
+    def _extract_single_positions_row_update(text: str) -> Optional[str]:
+        """
+        Return row line when chunk is a single OPEN POSITIONS table row update.
+
+        Expected format example:
+            ║  1. 🟢BTCUSDT  $   249   -$0.25    +0.2    +0.4    0h    ║
+        """
+        non_empty_lines = [line for line in text.splitlines() if line.strip()]
+        if len(non_empty_lines) != 1:
+            return None
+
+        line = non_empty_lines[0].strip()
+        if re.match(r"^║\s+\d+\.\s.*║$", line):
+            return line
+        return None
+
+    @staticmethod
+    def _replace_positions_row_in_snapshot(snapshot: str, new_row_line: str) -> Optional[str]:
+        """Replace matching position row (same index) inside OPEN POSITIONS snapshot."""
+        match = re.match(r"^║\s+(\d+)\.\s", new_row_line)
+        if not match:
+            return None
+
+        row_index = match.group(1)
+        row_pattern = re.compile(rf"^║\s+{row_index}\.\s.*║$")
+
+        lines = snapshot.splitlines()
+        for i, line in enumerate(lines):
+            if row_pattern.match(line):
+                lines[i] = new_row_line
+                return "\n".join(lines)
+
+        return None
+
+    @staticmethod
+    def _merge_command_output_text(current_text: str, chunk: str) -> str:
+        """
+        Merge incremental CLI command output into one live Telegram message body.
+
+        Strategy:
+        - full menu/box chunks replace snapshot;
+        - timer lines (`⏱️ ...`) replace last timer line;
+        - everything else appends.
+        """
+        normalized_chunk = chunk.strip()
+        if not normalized_chunk:
+            return current_text
+
+        # Full-screen box snapshot should replace current content.
+        if "╔" in normalized_chunk and "╚" in normalized_chunk:
+            return TelegramDashboard._compact_live_text(normalized_chunk)
+
+        if not current_text:
+            return TelegramDashboard._compact_live_text(normalized_chunk)
+
+        # Replace latest timer line with fresh one to keep single dynamic progress row.
+        if re.match(r"^⏱️\s+\[\d+s\]", normalized_chunk):
+            lines = current_text.splitlines()
+            replaced = False
+            for i in range(len(lines) - 1, -1, -1):
+                if re.match(r"^⏱️\s+\[\d+s\]", lines[i].strip()):
+                    lines[i] = normalized_chunk
+                    replaced = True
+                    break
+            if not replaced:
+                lines.append(normalized_chunk)
+            return TelegramDashboard._compact_live_text("\n".join(lines))
+
+        return TelegramDashboard._compact_live_text(f"{current_text}\n{normalized_chunk}")
+
+    @staticmethod
+    def _compact_live_text(text: str, max_len: int = 3600) -> str:
+        """Trim oldest lines to keep editable message within safe Telegram length."""
+        if len(text) <= max_len:
+            return text
+
+        lines = text.splitlines()
+        while lines and len("\n".join(lines)) > max_len:
+            lines.pop(0)
+        return "\n".join(lines)
+
+    def _is_rate_limited(self, chat_id: int) -> bool:
+        until = self._chat_rate_limited_until.get(chat_id, 0.0)
+        return until > asyncio.get_running_loop().time()
+
+    def _set_rate_limit(self, chat_id: int, retry_after_seconds: int) -> None:
+        # Add a tiny safety margin before resuming traffic.
+        delay = max(1, int(retry_after_seconds)) + 1
+        until = asyncio.get_running_loop().time() + delay
+        self._chat_rate_limited_until[chat_id] = until
+
+    @staticmethod
+    def _extract_retry_after_seconds(error_text: str) -> Optional[int]:
+        lowered = error_text.lower()
+        if "too many requests" not in lowered:
+            return None
+        match = re.search(r"retry after\s+(\d+)", lowered)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None

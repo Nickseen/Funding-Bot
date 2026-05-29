@@ -53,6 +53,19 @@ class PositionCloser:
         self.exchange2 = exchange2
         self.state = state
         self.emergency_close_timeout_seconds = 3
+
+    async def _read_stdin_line(self, prompt: str = "") -> str:
+        """
+        Read one line from stdin without blocking the asyncio event loop.
+
+        This keeps Telegram dashboard command mode responsive while waiting for
+        interactive user choices in close-flow menus.
+        """
+        if prompt:
+            print(prompt, end="")
+        loop = asyncio.get_running_loop()
+        line = await loop.run_in_executor(None, sys.stdin.readline)
+        return line.strip()
     
     # ============================================
     # 1. HIT-THE-BID CLOSE
@@ -208,7 +221,7 @@ class PositionCloser:
 Close position? [Y/n]: """
         
         print(message, end='')
-        confirm = input().strip().lower()
+        confirm = (await self._read_stdin_line()).lower()
         
         if confirm in ['', 'y', 'yes']:
             await self._close_with_limit_orders(position, ob1, ob2)
@@ -327,7 +340,7 @@ Close position? [Y/n]: """
 Close position? [Y/n]: """
         
         print(message, end='')
-        confirm = input().strip().lower()
+        confirm = (await self._read_stdin_line()).lower()
         
         if confirm in ['', 'y', 'yes']:
             await self._close_with_limit_orders(position, ob1, ob2)
@@ -817,13 +830,13 @@ Close position? [Y/n]: """
 ╚══════════════════════════════════════════════════════════
 Select [1-3]: """, end='')
         
-        choice = input().strip()
+        choice = await self._read_stdin_line()
         
         if choice == '1':
             return await self.close_free_fees(position)
         elif choice == '2':
             print("\n⚠️  WARNING: Market close will cause slippage!")
-            confirm = input("Are you sure? [y/N]: ").strip().lower()
+            confirm = (await self._read_stdin_line("Are you sure? [y/N]: ")).lower()
             if confirm == 'y':
                 return await self.close_market(position)
             return await self._show_free_fees_timeout_menu(position)
@@ -860,13 +873,13 @@ Select [1-3]: """, end='')
 ╚══════════════════════════════════════════════════════════
 Select [1-3]: """, end='')
         
-        choice = input().strip()
+        choice = await self._read_stdin_line()
         
         if choice == '1':
             return await self.close_smart_pnl(position)
         elif choice == '2':
             print("\n⚠️  WARNING: Market close will cause slippage!")
-            confirm = input("Are you sure? [y/N]: ").strip().lower()
+            confirm = (await self._read_stdin_line("Are you sure? [y/N]: ")).lower()
             if confirm == 'y':
                 return await self.close_market(position)
             return await self._show_smart_pnl_timeout_menu(position)
@@ -1115,7 +1128,7 @@ Select [1-3]: """, end='')
 ╚══════════════════════════════════════════════════════════
 Select [1-4]: """, end='')
         
-        choice = input().strip()
+        choice = await self._read_stdin_line()
         
         if choice == '1':
             # Попробовать еще раз
@@ -1129,7 +1142,7 @@ Select [1-4]: """, end='')
         elif choice == '3':
             # Market close (с предупреждением!)
             print("\n⚠️  WARNING: Market close will cause high slippage!")
-            confirm = input("Are you sure? [y/N]: ").strip().lower()
+            confirm = (await self._read_stdin_line("Are you sure? [y/N]: ")).lower()
             if confirm == 'y':
                 return await self.close_market(position)
             else:
@@ -1177,6 +1190,73 @@ Select [1-4]: """, end='')
 
         # Equal target/entry: treat as near-match.
         return abs(current_spread_bps - threshold_bps) <= tolerance_bps
+
+    async def get_spread_gap_snapshot(self, position: Position) -> dict:
+        """
+        Get current close-side spread metrics for Spread Gap UX.
+
+        Uses the same orientation as Spread Gap close:
+        spread = short close average - long close average.
+        """
+        ob1 = await self.exchange1.get_orderbook(position.pair)
+        ob2 = await self.exchange2.get_orderbook(position.pair)
+
+        synthetic_qty = max(position.quantity * 1000, 1e6)
+        if not ob1.asks or not ob1.bids:
+            pd1 = await self.exchange1.get_price_data(position.pair)
+            ask1 = pd1.ask if pd1.ask > 0 else pd1.bid
+            bid1 = pd1.bid if pd1.bid > 0 else pd1.ask
+            ob1.asks = [(ask1, synthetic_qty)]
+            ob1.bids = [(bid1, synthetic_qty)]
+        if not ob2.asks or not ob2.bids:
+            pd2 = await self.exchange2.get_price_data(position.pair)
+            ask2 = pd2.ask if pd2.ask > 0 else pd2.bid
+            bid2 = pd2.bid if pd2.bid > 0 else pd2.ask
+            ob2.asks = [(ask2, synthetic_qty)]
+            ob2.bids = [(bid2, synthetic_qty)]
+
+        if position.exchange1_side == "LONG":
+            close_price1, close_avg1 = calculate_aggressive_fill_price(
+                ob1.bids, position.quantity, "SELL"
+            )
+            close_price2, close_avg2 = calculate_aggressive_fill_price(
+                ob2.asks, position.quantity, "BUY"
+            )
+            long_close_avg = close_avg1
+            short_close_avg = close_avg2
+        else:
+            close_price1, close_avg1 = calculate_aggressive_fill_price(
+                ob1.asks, position.quantity, "BUY"
+            )
+            close_price2, close_avg2 = calculate_aggressive_fill_price(
+                ob2.bids, position.quantity, "SELL"
+            )
+            short_close_avg = close_avg1
+            long_close_avg = close_avg2
+
+        mid = (short_close_avg + long_close_avg) / 2
+        current_spread_bps = ((short_close_avg - long_close_avg) / mid) * 10000 if mid > 0 else 0.0
+
+        side1 = PositionSide.SHORT if position.exchange1_side == "SHORT" else PositionSide.LONG
+        pnl_usd = calculate_unrealized_pnl(
+            entry_price_ex1=position.exchange1_entry_price,
+            entry_price_ex2=position.exchange2_entry_price,
+            close_price_ex1=close_avg1,
+            close_price_ex2=close_avg2,
+            quantity=position.quantity,
+            side1=side1,
+        )
+        pnl_pct = (pnl_usd / position.initial_capital) * 100 if position.initial_capital > 0 else 0.0
+
+        return {
+            "current_spread_bps": current_spread_bps,
+            "pnl_usd": pnl_usd,
+            "pnl_pct": pnl_pct,
+            "close_price_ex1": close_price1,
+            "close_price_ex2": close_price2,
+            "close_avg_ex1": close_avg1,
+            "close_avg_ex2": close_avg2,
+        }
 
     async def close_spread_gap(
         self,
@@ -1439,20 +1519,20 @@ Select [1-4]: """, end='')
 ╚══════════════════════════════════════════════════════════
 Select [1-4]: """, end='')
 
-        choice = input().strip()
+        choice = await self._read_stdin_line()
 
         if choice == '1':
             return await self.close_spread_gap(position, threshold_bps)
         elif choice == '2':
             try:
-                new_thr = float(input("Enter new threshold (bps): ").strip())
+                new_thr = float(await self._read_stdin_line("Enter new threshold (bps): "))
             except ValueError:
                 print("Invalid input, keeping original threshold.")
                 new_thr = threshold_bps
             return await self.close_spread_gap(position, new_thr)
         elif choice == '3':
             print("\n⚠️  WARNING: Market close will cause slippage!")
-            if input("Are you sure? [y/N]: ").strip().lower() == 'y':
+            if (await self._read_stdin_line("Are you sure? [y/N]: ")).lower() == 'y':
                 return await self.close_market(position)
             return await self._show_spread_gap_timeout_menu(position, threshold_bps)
         elif choice == '4':
