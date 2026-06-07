@@ -30,7 +30,7 @@ def test_main_reply_keyboard_contains_menu_shortcuts():
     assert keyboard["one_time_keyboard"] is False
     assert [button["text"] for button in keyboard["keyboard"][0]] == ["1", "2", "3"]
     assert [button["text"] for button in keyboard["keyboard"][1]] == ["4", "5", "6"]
-    assert [button["text"] for button in keyboard["keyboard"][2]] == ["q"]
+    assert [button["text"] for button in keyboard["keyboard"][2]] == ["q", "sleep"]
 
 
 def test_action_reply_keyboard_contains_numeric_and_cancel_shortcuts():
@@ -49,6 +49,38 @@ def test_action_reply_keyboard_contains_numeric_and_cancel_shortcuts():
 
     assert [button["text"] for button in keyboard["keyboard"][0]] == ["1", "2", "3", "4"]
     assert [button["text"] for button in keyboard["keyboard"][1]] == ["5", "6", "7", "q"]
+    assert [button["text"] for button in keyboard["keyboard"][2]] == ["sleep"]
+
+
+def test_live_updates_are_enabled_by_default():
+    dashboard = TelegramDashboard(
+        token="token",
+        state=AppState(),
+        exchanges={},
+    )
+
+    assert dashboard.live_updates_enabled is True
+    assert dashboard._is_sleep_mode(123) is False
+
+
+def test_sleep_mode_is_per_chat_and_changes_keyboard_button():
+    dashboard = TelegramDashboard(
+        token="token",
+        state=AppState(),
+        exchanges={},
+    )
+
+    dashboard._sleep_mode_chats.add(123)
+    keyboard = dashboard._reply_keyboard_for_chat(123)
+
+    assert dashboard._is_sleep_mode(123) is True
+    assert dashboard._is_sleep_mode(456) is False
+    assert [button["text"] for button in keyboard["keyboard"][2]] == ["q", "live"]
+
+
+def test_dynamic_progress_chunk_detection():
+    assert TelegramDashboard._is_dynamic_progress_chunk("⏱️  [123s] PnL: $+0.10") is True
+    assert TelegramDashboard._is_dynamic_progress_chunk("✅ POSITION CLOSED SUCCESSFULLY") is False
 
 
 @pytest.mark.asyncio

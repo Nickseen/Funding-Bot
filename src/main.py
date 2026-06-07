@@ -556,6 +556,7 @@ async def main_telegram():
         polling_timeout_seconds=config.TELEGRAM_POLLING_TIMEOUT_SECONDS,
         allowed_chat_ids=config.get_telegram_allowed_chat_ids(),
         funding_tracker=funding_tracker,
+        live_updates_enabled=config.TELEGRAM_LIVE_UPDATES,
     )
 
     shutdown_event = asyncio.Event()
