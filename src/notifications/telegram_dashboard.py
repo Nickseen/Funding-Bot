@@ -410,8 +410,8 @@ class TelegramDashboard:
                 return False
 
         async def output_sender() -> None:
-            live_message_id: Optional[int] = None
-            live_text: str = ""
+            progress_message_id: Optional[int] = None
+            progress_text: str = ""
             while True:
                 item = await output_queue.get()
                 if item is None:
@@ -423,46 +423,32 @@ class TelegramDashboard:
                 if self._is_sleep_mode(chat_id) and self._is_dynamic_progress_chunk(text):
                     continue
 
-                if command_name == "view_positions":
-                    single_row = self._extract_single_positions_row_update(text)
-                    if single_row and live_message_id and live_text:
-                        patched_text = self._replace_positions_row_in_snapshot(
-                            live_text,
-                            single_row,
-                        )
-                        if patched_text and patched_text != live_text:
-                            edited = await self._edit_pre(
-                                chat_id=chat_id,
-                                message_id=live_message_id,
-                                text=self._truncate(patched_text),
-                            )
-                            if edited:
-                                live_text = patched_text
+                if self._is_dynamic_progress_chunk(text):
+                    if progress_message_id is None:
+                        sent_id = await self._send_pre(chat_id, self._truncate(text))
+                        if sent_id is not None:
+                            progress_message_id = sent_id
+                            progress_text = text
+                        await asyncio.sleep(0.12)
                         continue
 
-                merged_text = self._merge_command_output_text(live_text, text)
-                if not merged_text or merged_text == live_text:
+                    if text != progress_text:
+                        edited = await self._edit_pre(
+                            chat_id=chat_id,
+                            message_id=progress_message_id,
+                            text=self._truncate(text),
+                        )
+                        if edited:
+                            progress_text = text
+                        else:
+                            sent_id = await self._send_pre(chat_id, self._truncate(text))
+                            if sent_id is not None:
+                                progress_message_id = sent_id
+                                progress_text = text
+                    await asyncio.sleep(0.12)
                     continue
 
-                if live_message_id is None:
-                    sent_id = await self._send_pre(chat_id, self._truncate(merged_text))
-                    if sent_id is not None:
-                        live_message_id = sent_id
-                        live_text = merged_text
-                    continue
-
-                edited = await self._edit_pre(
-                    chat_id=chat_id,
-                    message_id=live_message_id,
-                    text=self._truncate(merged_text),
-                )
-                if edited:
-                    live_text = merged_text
-                else:
-                    sent_id = await self._send_pre(chat_id, self._truncate(merged_text))
-                    if sent_id is not None:
-                        live_message_id = sent_id
-                        live_text = merged_text
+                await self._send_pre(chat_id, self._truncate(text))
                 await asyncio.sleep(0.12)
 
         sender_task = asyncio.create_task(output_sender())
