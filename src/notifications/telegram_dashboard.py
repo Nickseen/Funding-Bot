@@ -75,6 +75,7 @@ class TelegramDashboard:
         polling_timeout_seconds: int = 30,
         allowed_chat_ids: Optional[Set[int]] = None,
         funding_tracker: Optional[Any] = None,
+        live_updates_enabled: bool = True,
     ):
         self.token = token
         self.state = state
@@ -83,6 +84,7 @@ class TelegramDashboard:
         self.polling_timeout_seconds = max(polling_timeout_seconds, 10)
         self.allowed_chat_ids = allowed_chat_ids or set()
         self.funding_tracker = funding_tracker
+        self.live_updates_enabled = live_updates_enabled
 
         self._session: Optional[aiohttp.ClientSession] = None
         self._running = False
@@ -102,6 +104,8 @@ class TelegramDashboard:
         self._chat_input_queues: Dict[int, asyncio.Queue[str]] = {}
         # chat_id -> blocking stdin queue used by sys.stdin.readline watchers
         self._chat_stdin_queues: Dict[int, queue.Queue[Optional[str]]] = {}
+        # chat ids where dynamic Telegram edits are disabled by user request
+        self._sleep_mode_chats: Set[int] = set()
         # chat_id -> unix monotonic seconds until Telegram API calls are paused
         self._chat_rate_limited_until: Dict[int, float] = {}
 
@@ -167,9 +171,13 @@ class TelegramDashboard:
         while self._running:
             try:
                 await asyncio.sleep(self.update_interval_seconds)
+                if not self.live_updates_enabled:
+                    continue
                 if not self._dashboard_messages:
                     continue
                 for chat_id in list(self._dashboard_messages.keys()):
+                    if self._is_sleep_mode(chat_id):
+                        continue
                     task = self._chat_command_tasks.get(chat_id)
                     if task and not task.done():
                         # Interactive CLI command owns chat output while active.
@@ -199,6 +207,20 @@ class TelegramDashboard:
             return
 
         command = text.split()[0].split("@")[0].lower()
+
+        if command in {"sleep", "/sleep"}:
+            self._sleep_mode_chats.add(chat_id)
+            await self._safe_send_text(
+                chat_id,
+                "Sleep mode enabled. Dynamic Telegram updates are paused; trading/close logic continues.",
+            )
+            return
+
+        if command in {"live", "/live"}:
+            self._sleep_mode_chats.discard(chat_id)
+            await self._safe_send_text(chat_id, "Live mode enabled. Dynamic Telegram updates resumed.")
+            await self._refresh_dashboard(chat_id, force=True)
+            return
 
         if command == "/cancel":
             task = self._chat_command_tasks.get(chat_id)
@@ -396,6 +418,9 @@ class TelegramDashboard:
                     break
                 text = item.strip()
                 if not text:
+                    continue
+
+                if self._is_sleep_mode(chat_id) and self._is_dynamic_progress_chunk(text):
                     continue
 
                 if command_name == "view_positions":
@@ -1345,13 +1370,14 @@ class TelegramDashboard:
             keyboard = [
                 [{"text": "1"}, {"text": "2"}, {"text": "3"}, {"text": "4"}],
                 [{"text": "5"}, {"text": "6"}, {"text": "7"}, {"text": "q"}],
+                [{"text": self._sleep_mode_button_text(chat_id)}],
             ]
             placeholder = "Tap a choice, or type symbol/size when needed"
         else:
             keyboard = [
                 [{"text": "1"}, {"text": "2"}, {"text": "3"}],
                 [{"text": "4"}, {"text": "5"}, {"text": "6"}],
-                [{"text": "q"}],
+                [{"text": "q"}, {"text": self._sleep_mode_button_text(chat_id)}],
             ]
             placeholder = "Tap a menu button"
 
@@ -1362,6 +1388,14 @@ class TelegramDashboard:
             "is_persistent": True,
             "input_field_placeholder": placeholder,
         }
+
+    def _is_sleep_mode(self, chat_id: int) -> bool:
+        """Return True when dynamic Telegram edits should be suppressed for chat."""
+        return (not self.live_updates_enabled) or chat_id in self._sleep_mode_chats
+
+    def _sleep_mode_button_text(self, chat_id: int) -> str:
+        """Show the action that switches the current Telegram update mode."""
+        return "live" if self._is_sleep_mode(chat_id) else "sleep"
 
     @staticmethod
     def _normalize_reply_button_text(text: str) -> str:
@@ -1480,6 +1514,12 @@ class TelegramDashboard:
             return TelegramDashboard._compact_live_text("\n".join(lines))
 
         return TelegramDashboard._compact_live_text(f"{current_text}\n{normalized_chunk}")
+
+    @staticmethod
+    def _is_dynamic_progress_chunk(text: str) -> bool:
+        """Return True for volatile progress rows that should not wake Telegram in sleep mode."""
+        normalized = (text or "").strip()
+        return bool(re.match(r"^⏱️\s+\[\d+s\]", normalized))
 
     @staticmethod
     def _compact_live_text(text: str, max_len: int = 3600) -> str:

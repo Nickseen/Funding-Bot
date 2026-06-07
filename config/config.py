@@ -108,6 +108,9 @@ class Config:
     TELEGRAM_POLLING_TIMEOUT_SECONDS: int = int(
         os.getenv("TELEGRAM_POLLING_TIMEOUT_SECONDS", "30")
     )
+    # Dynamic Telegram updates are enabled by default. Users can switch an
+    # individual chat to sleep mode with the Telegram reply keyboard.
+    TELEGRAM_LIVE_UPDATES: bool = os.getenv("TELEGRAM_LIVE_UPDATES", "true").lower() == "true"
     
     # Risk management
     DEFAULT_STOP_LOSS_PERCENT: float = float(os.getenv("DEFAULT_STOP_LOSS_PERCENT", "20"))
