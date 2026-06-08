@@ -219,7 +219,7 @@ class TelegramDashboard:
         if command in {"live", "/live"}:
             self._sleep_mode_chats.discard(chat_id)
             await self._safe_send_text(chat_id, "Live mode enabled. Dynamic Telegram updates resumed.")
-            await self._refresh_dashboard(chat_id, force=True)
+            await self._send_dashboard_snapshot(chat_id)
             return
 
         if command == "/cancel":
