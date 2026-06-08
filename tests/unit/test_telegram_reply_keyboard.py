@@ -123,3 +123,34 @@ async def test_plain_text_messages_attach_reply_keyboard():
     await dashboard._safe_send_text(123, "menu")
 
     assert payloads[0]["reply_markup"]["keyboard"][0][0]["text"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_live_command_sends_fresh_dashboard_snapshot():
+    dashboard = TelegramDashboard(
+        token="token",
+        state=AppState(),
+        exchanges={},
+    )
+    dashboard._session = object()
+    dashboard._sleep_mode_chats.add(123)
+    dashboard._dashboard_messages[123] = 999
+    dashboard._last_rendered_text[123] = "old dashboard"
+    calls = []
+
+    async def fake_render_dashboard_message():
+        return "new dashboard"
+
+    async def fake_call(method, payload, timeout=None):
+        calls.append((method, payload))
+        return {"ok": True, "result": {"message_id": 100 + len(calls)}}
+
+    dashboard._render_dashboard_message = fake_render_dashboard_message
+    dashboard._telegram_call = fake_call
+
+    await dashboard._handle_update({"message": {"text": "live", "chat": {"id": 123}}})
+
+    assert 123 not in dashboard._sleep_mode_chats
+    assert [method for method, _payload in calls] == ["sendMessage", "sendMessage"]
+    assert dashboard._dashboard_messages[123] == 102
+    assert dashboard._last_rendered_text[123] == "new dashboard"
