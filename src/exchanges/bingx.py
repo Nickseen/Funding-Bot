@@ -910,29 +910,83 @@ class BingXExchange(BaseExchange):
         except Exception as e:
             raise ExchangeError(f"Failed to get symbol info: {e}")
     
+    def _normalize_funding_payload(self, symbol: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize BingX/CCXT funding payload variants to adapter fields."""
+        info = payload.get('info') if isinstance(payload.get('info'), dict) else {}
+
+        funding_rate = (
+            payload.get('fundingRate')
+            if payload.get('fundingRate') is not None
+            else payload.get('lastFundingRate')
+        )
+        if funding_rate is None:
+            funding_rate = info.get('fundingRate')
+        if funding_rate is None:
+            funding_rate = info.get('lastFundingRate')
+
+        next_funding_time = (
+            payload.get('nextFundingTime')
+            or payload.get('nextFundingTimestamp')
+            or payload.get('fundingTimestamp')
+            or info.get('nextFundingTime')
+            or info.get('nextFundingTimestamp')
+        )
+
+        return {
+            'symbol': symbol,
+            'fundingRate': float(funding_rate or 0),
+            'nextFundingTime': int(float(next_funding_time or 0)),
+        }
+
+    def _extract_funding_data_row(self, response: Any) -> Dict[str, Any]:
+        """Extract one funding row from BingX native response shapes."""
+        if not isinstance(response, dict):
+            return {}
+
+        data = response.get('data')
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list) and data:
+            first = data[0]
+            return first if isinstance(first, dict) else {}
+        return response
+
     async def _api_get_funding_rate(self, symbol: str) -> Dict[str, Any]:
-        """BingX: GET funding rate"""
+        """BingX: GET funding rate from premiumIndex, with fallbacks."""
         try:
             ccxt_symbol = self._convert_symbol(symbol)
-            
-            # Try to get funding rate from ticker or dedicated endpoint
+            native_symbol = self._to_bingx_symbol(symbol)
+
+            premium_method = getattr(self.client, 'swap_v2_public_get_quote_premiumindex', None)
+            if not callable(premium_method):
+                premium_method = getattr(self.client, 'swapV2PublicGetQuotePremiumIndex', None)
+            if callable(premium_method):
+                try:
+                    response = await premium_method({'symbol': native_symbol})
+                    row = self._extract_funding_data_row(response)
+                    normalized = self._normalize_funding_payload(symbol, row)
+                    if normalized['fundingRate'] != 0 or normalized['nextFundingTime'] != 0:
+                        return normalized
+                except Exception as e:
+                    log.debug(f"BingX premiumIndex fallback failed for {symbol}: {e}")
+
+            # CCXT also uses /openApi/swap/v2/quote/premiumIndex, but it may call
+            # load_markets() first. Keep it as fallback instead of the primary path.
+            try:
+                funding = await self.client.fetch_funding_rate(ccxt_symbol)
+                normalized = self._normalize_funding_payload(symbol, funding or {})
+                if normalized['fundingRate'] != 0 or normalized['nextFundingTime'] != 0:
+                    return normalized
+            except Exception as e:
+                log.debug(f"BingX fetch_funding_rate fallback failed for {symbol}: {e}")
+
+            # Last resort only. Some BingX tickers do not include funding fields.
             ticker = await self.client.fetch_ticker(ccxt_symbol)
-            info = ticker.get('info', {})
-            
-            return {
-                'symbol': symbol,
-                'fundingRate': float(info.get('fundingRate', 0) or 0),
-                'nextFundingTime': int(info.get('nextFundingTime', 0) or 0),
-            }
+            return self._normalize_funding_payload(symbol, ticker or {})
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e))
         except Exception as e:
-            # Fallback - return defaults
-            return {
-                'symbol': symbol,
-                'fundingRate': 0,
-                'nextFundingTime': 0,
-            }
+            raise ExchangeError(f"Failed to get funding rate: {e}")
     
     # ============================================
     # PARSERS (convert BingX format to our types)
@@ -1094,9 +1148,6 @@ class BingXExchange(BaseExchange):
                 # Already in seconds
                 next_funding_time = datetime.fromtimestamp(next_funding_ts, tz=timezone.utc)
             
-            # If funding time is in the past, calculate next occurrence (8h intervals)
-            while next_funding_time < now:
-                next_funding_time += timedelta(hours=8)
         else:
             # No funding time provided - estimate next 00:00, 08:00, or 16:00 UTC
             current_hour = now.hour

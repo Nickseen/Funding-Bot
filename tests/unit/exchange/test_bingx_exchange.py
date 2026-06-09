@@ -190,6 +190,71 @@ class TestBingXExchange:
         assert funding.next_funding_time.year == 2022
 
     @pytest.mark.asyncio
+    async def test_api_get_funding_rate_uses_native_premium_index(self, bingx_exchange):
+        """BingX funding must come from premiumIndex, not ticker info."""
+        bingx_exchange.client.swap_v2_public_get_quote_premiumindex = AsyncMock(
+            return_value={
+                "code": 0,
+                "msg": "",
+                "data": {
+                    "symbol": "H-USDT",
+                    "markPrice": "0.123",
+                    "indexPrice": "0.124",
+                    "lastFundingRate": "-0.000472",
+                    "nextFundingTime": 1781010000000,
+                },
+            }
+        )
+        bingx_exchange.client.fetch_funding_rate = AsyncMock(
+            return_value={
+                "symbol": "H/USDT:USDT",
+                "fundingRate": 0.000001,
+                "nextFundingTimestamp": 1781010000000,
+            }
+        )
+        bingx_exchange.client.fetch_ticker = AsyncMock()
+
+        result = await bingx_exchange._api_get_funding_rate("HUSDT")
+
+        assert result == {
+            "symbol": "HUSDT",
+            "fundingRate": -0.000472,
+            "nextFundingTime": 1781010000000,
+        }
+        bingx_exchange.client.swap_v2_public_get_quote_premiumindex.assert_awaited_once_with(
+            {"symbol": "H-USDT"}
+        )
+        bingx_exchange.client.fetch_funding_rate.assert_not_called()
+        bingx_exchange.client.fetch_ticker.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_api_get_funding_rate_falls_back_to_ccxt_funding_endpoint(self, bingx_exchange):
+        """If native premiumIndex fails, CCXT funding payload is still normalized."""
+        bingx_exchange.client.swap_v2_public_get_quote_premiumindex = AsyncMock(
+            side_effect=Exception("native unavailable")
+        )
+        bingx_exchange.client.fetch_funding_rate = AsyncMock(
+            return_value={
+                "symbol": "H/USDT:USDT",
+                "fundingRate": -0.000472,
+                "nextFundingTimestamp": 1781010000000,
+                "info": {
+                    "symbol": "H-USDT",
+                    "lastFundingRate": "-0.000472",
+                    "nextFundingTime": "1781010000000",
+                },
+            }
+        )
+        bingx_exchange.client.fetch_ticker = AsyncMock()
+
+        result = await bingx_exchange._api_get_funding_rate("HUSDT")
+
+        assert result["fundingRate"] == pytest.approx(-0.000472)
+        assert result["nextFundingTime"] == 1781010000000
+        bingx_exchange.client.fetch_funding_rate.assert_awaited_once_with("H/USDT:USDT")
+        bingx_exchange.client.fetch_ticker.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_api_get_symbol_info_uses_base_quantity_units(self, bingx_exchange):
         """ExecutionEngine expects BingX quantity constraints already in base units."""
         ccxt_symbol = "DOGE/USDT:USDT"
@@ -336,8 +401,9 @@ class TestBingXExchange:
     async def test_connect_time_sync(self, bingx_exchange):
         """Test time synchronization in connect"""
         with patch.object(bingx_exchange.client, 'fetch_time', return_value=1640995200000):
-            await bingx_exchange.connect()
-            assert bingx_exchange.client.options['timeDifference'] is not None
+            with patch.object(bingx_exchange.client, 'load_markets', new=AsyncMock(return_value={})):
+                await bingx_exchange.connect()
+                assert bingx_exchange.client.options['timeDifference'] is not None
 
     # Commission and SL/TP Tests
     def test_commission_calculation(self, bingx_exchange):
